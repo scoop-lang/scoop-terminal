@@ -1,0 +1,61 @@
+package scoop.ui.terminal
+
+import scoop.test.*
+import scoop.window.*
+
+@Test
+private class TerminalCompositionTest {
+    @Test
+    fun committedTextLeavesTheNativeDocumentExactlyOnce() {
+        val empty = TextInputState("", Utf8Selection(0L, 0L))
+        val preedit = applyComposition(empty, edit(0L, compose("中😀")))
+        assertEquals("", preedit.committed)
+        assertEquals("中😀", preedit.snapshot.surroundingText)
+        assertEquals(Some(Utf8Range(0L, 7L)), preedit.snapshot.markedRange)
+
+        val confirmed = applyComposition(
+            preedit.snapshot,
+            edit(1L, TextInputOperation.Commit("中文", TextReplacement.CurrentSelection))
+        )
+        assertEquals("中文", confirmed.committed)
+        assertEquals("", confirmed.snapshot.surroundingText)
+        assertEquals(2L, confirmed.snapshot.revision)
+        val cleared = applyComposition(
+            confirmed.snapshot,
+            edit(2L, TextInputOperation.ClearPreedit)
+        )
+        assertEquals("", cleared.committed)
+        assertFailsWith<IllegalStateException> {
+            applyComposition(confirmed.snapshot, edit(1L, TextInputOperation.ClearPreedit))
+        }
+    }
+
+    @Test
+    fun nativeAcceptAndCancelUseTheCurrentMarkedText() {
+        val empty = TextInputState("", Utf8Selection(0L, 0L))
+        val batch = edit(
+            0L,
+            TextInputOperation.Commit("前", TextReplacement.CurrentSelection),
+            compose("中")
+        )
+        val marked = applyComposition(empty, batch)
+        assertEquals("前", marked.committed)
+        assertEquals("中", marked.snapshot.surroundingText)
+        assertEquals(Utf8Selection(3L, 3L), marked.snapshot.selection)
+        assertEquals(Some(Utf8Range(0L, 3L)), marked.snapshot.markedRange)
+
+        val accepted = applyComposition(marked.snapshot, edit(1L, TextInputOperation.ClearPreedit))
+        assertEquals("中", accepted.committed)
+        assertEquals("", accepted.snapshot.surroundingText)
+        val cancelled = applyComposition(marked.snapshot, edit(1L, compose("")))
+        assertEquals("", cancelled.committed)
+        assertEquals("", cancelled.snapshot.surroundingText)
+        assertEquals(None, cancelled.snapshot.markedRange)
+    }
+}
+
+private fun edit(revision: Long, vararg operations: TextInputOperation): TextInputBatch =
+    TextInputBatch(Some(revision), operations)
+
+private fun compose(text: String): TextInputOperation = TextInputOperation
+    .Preedit(text, None, TextReplacement.CurrentSelection)

@@ -1,0 +1,108 @@
+package scoop.ui.terminal
+
+import scoop.surface.InputArea
+import scoop.window.*
+
+internal class TerminalComposition(
+    private val window: Window,
+    private val area: InputArea,
+    private val send: (String) -> Unit,
+    private val changed: () -> Unit
+) {
+    private var connection: TextInputConnection? = None
+    private var current = emptyInput(0L)
+    private var enabled = false
+    val revision: Long get() = current.revision
+    val text: String get() = current.surroundingText
+
+    fun input(event: TextInputEvent) {
+        when (event) {
+            case Enabled(val value) -> {
+                enabled = true
+                connection = value
+                current = emptyInput(0L)
+                publish(None)
+                changed()
+            }
+
+            case Disabled(val value) -> {
+                if (connection != None && connection != value) return
+                enabled = false
+                connection = None
+                current = emptyInput(0L)
+                changed()
+            }
+
+            case Edit(val batch) -> edit(batch)
+        }
+    }
+
+    fun restart() {
+        current = emptyInput(0L)
+        if (area.restartTextInput()) enabled = false
+        changed()
+    }
+
+    private fun edit(batch: TextInputBatch) {
+        if (!enabled || !area.isFocusActive) return
+        when (batch.origin) {
+            case Some(val origin) -> if (connection != Some(origin.connection)) return
+            case None -> {}
+        }
+        val applied = try {
+            applyComposition(current, batch)
+        } catch (error: IllegalArgumentException) {
+            restart()
+            return
+        } catch (error: IllegalStateException) {
+            restart()
+            return
+        }
+        current = applied.snapshot
+        if (publish(batch.origin)) {
+            if (applied.committed != "") send(applied.committed)
+            changed()
+        } else {
+            restart()
+        }
+    }
+
+    private fun publish(after: TextInputOrigin?): Boolean = when (connection) {
+        case Some(val value) -> window.publishTextInputState(value, current, after)
+        case None -> true
+    }
+}
+
+private fun emptyInput(revision: Long): TextInputState = TextInputState(
+    "",
+    Utf8Selection(0L, 0L),
+    revision = revision
+)
+
+internal struct CompositionEdit(val snapshot: TextInputState, val committed: String)
+
+internal fun applyComposition(current: TextInputState, batch: TextInputBatch): CompositionEdit {
+    val applied = current.apply(batch)
+    val text = applied.surroundingText
+    return when (applied.markedRange) {
+        case Some(val range) -> {
+            val length = range.end - range.start
+            val snapshot = TextInputState(
+                text.utf8Slice(range),
+                Utf8Selection(
+                    clamp(applied.selection.anchor - range.start, 0L, length),
+                    clamp(applied.selection.cursor - range.start, 0L, length)
+                ),
+                Some(Utf8Range(0L, length)),
+                revision = applied.revision
+            )
+            CompositionEdit(
+                snapshot,
+                text.utf8Slice(Utf8Range(0L, range.start)) +
+                    text.utf8Slice(Utf8Range(range.end, text.byteLength))
+            )
+        }
+
+        case None -> CompositionEdit(emptyInput(applied.revision), text)
+    }
+}

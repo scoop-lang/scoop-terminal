@@ -1,0 +1,30 @@
+schema = 1
+
+[cone]
+group = { workspace = true }
+name = "scoop.ui.terminal"
+version = { workspace = true }
+kind = "library"
+
+[[sources]]
+path = "src"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+"scoop:scoop.platform" = "0.1.0"
+"scoop:scoop.concurrent" = "0.1.0"
+"scoop:scoop.asyncio" = "0.1.0"
+"scoop:scoop.graphics" = "0.1.0"
+"scoop:scoop.graphics.text" = "0.1.0"
+"scoop:scoop.surface" = "0.1.0"
+"scoop:scoop.ui" = "0.1.0"
+"scoop:scoop.window" = "0.1.0"
+"scoop:scoop.window.asyncio" = "0.1.0"
+"scoop:scoop.terminal.emulator" = { version = "0.1.0", path = "../emulator" }
+
+[test-dependencies]
+"scoop:scoop.test" = "0.1.0"
+
+[[test.sources]]
+path = "tests"

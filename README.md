@@ -1,6 +1,8 @@
 # Scoop 终端模拟器
 
-终端核心是一个纯 Scoop Cone，接收子进程输出字节，维护 VT 终端状态和屏幕。核心的输入、输出和宿主事件用普通值表示，可以直接测试字节回放。桌面会话接入 Scoop 的 `EventLoop.spawnPty()`，由活动视图提交尺寸、呈现网格和处理交互。
+`scoop.terminal.emulator` 是纯 Scoop 的 VT 核心。`Terminal.feed()` 接收输出字节并更新屏幕和历史，`encodeInput()` 根据当前模式编码文本、按键、鼠标和粘贴。回包、标题和响铃以值返回，可以在无窗口环境回放测试。
+
+`scoop.ui.terminal` 提供桌面会话和 `terminalView(session)`。在 `Application.runWithAsyncio` 的作用域中调用 `TerminalEmulatorSession.start(command)`，把视图挂到 UI 树。会话通过 `EventLoop.spawnPty()` 启动子进程，并按序写入用户输入和 VT 回包。视图处理已接受的尺寸、历史浏览、选择、剪贴板和输入法。嵌入方负责调用 `session.close()`，自然退出后可以继续展示最后的屏幕和状态。
 
 ## 开发
 
@@ -8,4 +10,8 @@
 
 ```sh
 scoop --sysroot ../scoop/sysroot test --release emulator
+scoop --sysroot ../scoop/sysroot test --release terminal-ui
+scoop --sysroot ../scoop/sysroot run --release demo
 ```
+
+示例启动本机默认 shell，可以在 `--` 后指定可执行文件和参数。在有桌面会话的 macOS 或 Linux GNU 环境运行 `scoop --sysroot ../scoop/sysroot test --release demo`，可验证真实窗口、PTY resize、VT 回包和退出收尾。

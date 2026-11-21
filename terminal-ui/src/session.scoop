@@ -1,0 +1,245 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.collections.ArrayDeque
+import scoop.concurrent.Channel
+import scoop.platform.memory.NativeByteBuffer
+import scoop.platform.process.Command
+import scoop.platform.process.ExitStatus
+import scoop.platform.process.requirePtySize
+import scoop.platform.system.*
+import scoop.terminal.emulator.*
+import scoop.window.asyncio.currentApplicationScope
+
+public enum TerminalSessionState {
+    Running, Exited(ExitStatus), Closed, Failed(Throwable)
+}
+
+private struct Dimensions(val columns: Long, val rows: Long)
+
+/** An application-owned session. The view and session are used on the window owner. */
+public class TerminalEmulatorSession private constructor(
+    public val terminal: Terminal,
+    private val pty: AsyncPty,
+    private val onTitle: (String) -> Unit,
+    private val onBell: () -> Unit
+) : AsyncCloseable {
+    private val outgoing = ArrayDeque<Array<Byte>>()
+    private val writeReady = Channel<Unit>(1L)
+    private val resizeReady = Channel<Unit>(1L)
+    private var requestedSize: Dimensions? = None
+    private var childExited = false
+    private var inputEnded = false
+    private var driver: Job? = None
+    private var observer: (() -> Unit)? = None
+    private var current = TerminalSessionState.Running
+
+    public val state: TerminalSessionState get() = current
+
+    private val running: Boolean
+        get() = when (current) {
+            case Running -> true
+            case _ -> false
+        }
+
+    public companion object {
+        /** Starts a session in an application running through Application.runWithAsyncio. */
+        public suspend fun start(
+            command: Command,
+            columns: Long = 80L,
+            rows: Long = 24L,
+            historyLimit: Long = 10000L,
+            searchPath: Boolean = false,
+            onTitle: (String) -> Unit = {},
+            onBell: () -> Unit = {}
+        ): TerminalEmulatorSession {
+            val application = currentApplicationScope()
+            val loop = currentEventLoop()
+            requirePtySize(columns, rows)
+            val terminal = Terminal(columns, rows, historyLimit)
+            val pty = loop.spawnPty(command, columns, rows, searchPath)
+            val session = TerminalEmulatorSession(terminal, pty, onTitle, onBell)
+            session.driver = Some(application.launch { session.run() })
+            return session
+        }
+    }
+
+    /** Enqueues input using the modes active when the input arrives. */
+    public fun send(input: TerminalInput) {
+        if (running && !childExited) enqueue(terminal.encodeInput(input))
+    }
+
+    internal fun requestSize(columns: Long, rows: Long) {
+        requirePtySize(columns, rows)
+        if (!running) {
+            resizeModel(columns, rows)
+            return
+        }
+        if (columns == terminal.columns && rows == terminal.rows) {
+            requestedSize = None
+            return
+        }
+        requestedSize = Some(Dimensions(columns, rows))
+        resizeReady.trySend(Unit)
+    }
+
+    internal fun attach(changed: () -> Unit): Disposable {
+        when (observer) {
+            case Some(_) -> throw IllegalStateException(Some("terminal session already has a view"))
+            case None -> {}
+        }
+        observer = Some(changed)
+        return ViewAttachment { observer = None }
+    }
+
+    public override suspend fun close() {
+        driver?.cancel()
+        pty.close()
+        driver?.join()
+        if (running) publish(TerminalSessionState.Closed)
+    }
+
+    private fun enqueue(bytes: Array<Byte>) {
+        if (!inputEnded && bytes.size != 0L) {
+            outgoing.addLast(bytes)
+            writeReady.trySend(Unit)
+        }
+    }
+
+    private suspend fun run() {
+        val session = this
+        var result: TerminalSessionState = try {
+            coroutineScope<TerminalSessionState> {
+                val scope = this
+                val output = scope.async { session.readOutput() }
+                val child = scope
+                    .async {
+                        val status = session.pty.wait()
+                        session.childExited = true
+                        status
+                    }
+                val input = scope.launch { session.writeInput() }
+                val resize = scope.launch { session.applySizes() }
+                val ended = try {
+                    val status = child.await()
+                    output.await()
+                    TerminalSessionState.Exited(status)
+                } finally {
+                    input.cancel()
+                    resize.cancel()
+                }
+                ended
+            }
+        } catch (error: CancellationException) {
+            TerminalSessionState.Closed
+        } catch (error: Throwable) {
+            TerminalSessionState.Failed(error)
+        }
+        try {
+            pty.close()
+        } catch (error: Throwable) {
+            result = when (result) {
+                case Failed(val primary) ->
+                    TerminalSessionState.Failed(ResourceUseException(primary, error))
+                case _ -> TerminalSessionState.Failed(error)
+            }
+        }
+        outgoing.clear()
+        publish(result)
+    }
+
+    private fun publish(state: TerminalSessionState) {
+        current = state
+        observer?.invoke()
+    }
+
+    private suspend fun readOutput() {
+        val buffer = NativeByteBuffer.allocate(8192L)
+        try {
+            while (true) {
+                buffer.clear()
+                val count = pty.readInto(buffer)
+                if (count == 0L) {
+                    apply(terminal.finishOutput())
+                    return
+                }
+                apply(terminal.feed(buffer.readBytes(count)))
+                yieldCoroutine()
+            }
+        } finally {
+            buffer.close()
+        }
+    }
+
+    private fun apply(update: TerminalUpdate) {
+        for (effect in update.effects) {
+            when (effect) {
+                case Reply(val bytes) -> enqueue(bytes)
+                case Title(val title) -> onTitle(title)
+                case Bell -> onBell()
+            }
+        }
+        if (update.changed) observer?.invoke()
+    }
+
+    private suspend fun writeInput() {
+        val buffer = NativeByteBuffer.allocate(8192L)
+        try {
+            while (true) {
+                writeReady.receive()
+                while (outgoing.size != 0L) {
+                    val bytes = outgoing.removeFirst()
+                    var offset = 0L
+                    while (offset < bytes.size) {
+                        buffer.clear()
+                        val remaining = bytes.size - offset
+                        val count = if (remaining < 8192L) remaining else 8192L
+                        buffer.writeBytes(bytes, offset, count)
+                        pty.writeFully(buffer)
+                        offset += count
+                    }
+                    yieldCoroutine()
+                }
+            }
+        } catch (error: PlatformException) {
+            if (error.kind != PlatformErrorKind.BrokenPipe) throw error
+            inputEnded = true
+            outgoing.clear()
+        } finally {
+            buffer.close()
+        }
+    }
+
+    private suspend fun applySizes() {
+        while (true) {
+            resizeReady.receive()
+            val next = requestedSize ?: continue
+            requestedSize = None
+            if (resizeModel(next.columns, next.rows) && !childExited) {
+                try {
+                    pty.resize(next.columns, next.rows)
+                } catch (error: IoClosedException) {
+                    // A naturally closing ConPTY can still deliver output.
+                    childExited = true
+                }
+            }
+        }
+    }
+
+    private fun resizeModel(columns: Long, rows: Long): Boolean {
+        if (columns == terminal.columns && rows == terminal.rows) return false
+        terminal.resize(columns, rows, restoreHistory = operatingSystem != OperatingSystem.Windows)
+        observer?.invoke()
+        return true
+    }
+}
+
+private class ViewAttachment(private val detach: () -> Unit) : Disposable {
+    private var active = true
+    public override fun dispose() {
+        if (active) {
+            active = false
+            detach()
+        }
+    }
+}

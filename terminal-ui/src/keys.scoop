@@ -1,0 +1,75 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+import scoop.window.*
+
+internal fun Modifiers.terminalModifiers(): TerminalModifiers = TerminalModifiers(
+    shift,
+    alt,
+    control
+)
+
+internal fun terminalKey(event: KeyEvent): TerminalKey? {
+    val modifiers = event.modifiers
+    if (event.state != ElementState.Pressed || modifiers.superKey) return None
+    if (event.location == KeyLocation.Numpad) {
+        if (event.physicalKey == PhysicalKey.Code(KeyCode.NumpadEnter))
+            return Some(TerminalKey.Keypad('\r'))
+        when (event.logicalKey) {
+            case Character(val value) ->
+                if (value.charLength == 1L) return Some(TerminalKey.Keypad(value.getCharAt(0L)))
+            case _ -> {}
+        }
+    }
+    return when (event.logicalKey) {
+        case Named(val named) -> namedKey(named, modifiers.control)
+
+        case Character(val value) -> {
+            if (value.charLength !=
+                1L ||
+                (!modifiers.control && !modifiers.alt) ||
+                modifiers.altGraph ==
+                Some(true)
+            )
+                return None
+            val character = value.getCharAt(0L)
+            if (modifiers.alt && !modifiers.control && character.code >= 128)
+                None
+            else
+                Some(TerminalKey.Character(character))
+        }
+
+        case _ -> None
+    }
+}
+
+private fun namedKey(key: NamedKey, control: Boolean): TerminalKey? = when (key) {
+    case Enter -> Some(TerminalKey.Enter)
+    case Escape -> Some(TerminalKey.Escape)
+    case Tab -> Some(TerminalKey.Tab)
+    case Space -> if (control) Some(TerminalKey.Character(' ')) else None
+    case Backspace -> Some(TerminalKey.Backspace)
+    case Delete -> Some(TerminalKey.Delete)
+    case Insert -> Some(TerminalKey.Insert)
+    case ArrowUp -> Some(TerminalKey.Up)
+    case ArrowDown -> Some(TerminalKey.Down)
+    case ArrowLeft -> Some(TerminalKey.Left)
+    case ArrowRight -> Some(TerminalKey.Right)
+    case Home -> Some(TerminalKey.Home)
+    case End -> Some(TerminalKey.End)
+    case PageUp -> Some(TerminalKey.PageUp)
+    case PageDown -> Some(TerminalKey.PageDown)
+    case F1 -> Some(TerminalKey.Function(1))
+    case F2 -> Some(TerminalKey.Function(2))
+    case F3 -> Some(TerminalKey.Function(3))
+    case F4 -> Some(TerminalKey.Function(4))
+    case F5 -> Some(TerminalKey.Function(5))
+    case F6 -> Some(TerminalKey.Function(6))
+    case F7 -> Some(TerminalKey.Function(7))
+    case F8 -> Some(TerminalKey.Function(8))
+    case F9 -> Some(TerminalKey.Function(9))
+    case F10 -> Some(TerminalKey.Function(10))
+    case F11 -> Some(TerminalKey.Function(11))
+    case F12 -> Some(TerminalKey.Function(12))
+    case _ -> None
+}

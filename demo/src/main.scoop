@@ -1,0 +1,91 @@
+package scoop.terminal.demo
+
+import scoop.platform.env.arguments
+import scoop.platform.env.environment
+import scoop.platform.fs.Path
+import scoop.platform.process.Command
+import scoop.platform.process.command
+import scoop.platform.system.*
+import scoop.ui.*
+import scoop.ui.terminal.*
+import scoop.window.*
+import scoop.window.asyncio.*
+
+fun main() {
+    val application = Application(applicationOptions { lastWindowPolicy = LastWindowPolicy.Exit })
+    val demo = DemoApplication(demoCommand())
+    UiHost { host, active, event -> demo.event(host, active, event) }
+        .use { host -> application.runWithAsyncio(host) }
+}
+
+private class DemoApplication(private val child: Command) {
+    private var session: TerminalEmulatorSession? = None
+    private var closing = false
+
+    fun event(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed -> {
+                val window = active
+                    .createWindow(
+                        windowAttributes {
+                            title = "Scoop Terminal"
+                            size = LogicalSize(840.0, 540.0)
+                        }
+                    )
+                val demo = this
+                currentApplicationScope()
+                    .launch {
+                        val terminal = TerminalEmulatorSession
+                            .start(
+                                demo.child, searchPath = true,
+                                onTitle = { title -> window.setTitle(title) }
+                            )
+                        demo.session = Some(terminal)
+                        host.attach(window, { scope -> Demo(terminal, scope) })
+                        window.requestFocus()
+                        Unit
+                    }
+            }
+
+            case Window(_, WindowEvent.CloseRequested) -> close(active)
+            else -> {}
+        }
+    }
+
+    private fun close(application: ActiveApplication) {
+        if (closing) return
+        closing = true
+        val running = session
+        currentApplicationScope()
+            .launch {
+                try {
+                    running?.close()
+                } finally {
+                    application.requestExit()
+                }
+            }
+    }
+}
+
+private class Demo(private val session: TerminalEmulatorSession, scope: ComponentScope) :
+    Component(scope) {
+    public override fun render(): View = terminalView(session)
+}
+
+private fun demoCommand(): Command {
+    val arguments = arguments()
+    val windows = operatingSystem == OperatingSystem.Windows
+    val variables = environment()
+    val executable = if (arguments.size > 1L) {
+        arguments[1L]
+    } else if (windows) {
+        variables[OsString.fromString("ComSpec")] ?: OsString.fromString("cmd.exe")
+    } else {
+        variables[OsString.fromString("SHELL")] ?: OsString.fromString("/bin/sh")
+    }
+    return command(Path.fromOsString(executable)) {
+        env(OsString.fromString("TERM"), OsString.fromString("xterm-256color"))
+        for (index in 2L..<arguments.size)
+            arg(arguments[index])
+    }
+}

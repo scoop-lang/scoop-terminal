@@ -1,7 +1,7 @@
 package scoop.terminal.emulator
 
 /** An incremental VT emulator with physical-row scrollback. All access is serialized by its owner. */
-public class Terminal(columns: Long, rows: Long, historyLimit: Long = 10000L) {
+public class Terminal public constructor(columns: Long, rows: Long, historyLimit: Long = 10000L) {
     private val state = createState(columns, rows, historyLimit)
 
     public val columns: Long get() = state.screen.columns

@@ -1,0 +1,241 @@
+package scoop.ui.terminal
+
+import scoop.collections.HashMap
+import scoop.graphics.*
+import scoop.graphics.text.*
+import scoop.terminal.emulator.*
+
+internal struct CellMetrics(val width: Double, val height: Double, val baseline: Double)
+
+internal struct GridGeometry(
+    val size: Size,
+    val metrics: CellMetrics,
+    val first: Long,
+    val rows: Array<TerminalLine>,
+    val columns: Long,
+    val requestedRows: Long,
+    val revision: Long
+) {
+    fun hit(point: Point): (Long, Long)? {
+        if (point.x < 0.0 || point.y < 0.0 || point.x >= size.width || point.y >= size.height)
+            return None
+        val row = (point.y / metrics.height).toLong()
+        val column = (point.x / metrics.width).toLong()
+        if (row >= rows.size || column >= columns) return None
+        return Some((row, column))
+    }
+
+    fun rect(row: Long, column: Long, width: Long = 1L): Rect = Rect(
+        column.toDouble() * metrics.width, row.toDouble() * metrics.height,
+        width.toDouble() * metrics.width, metrics.height
+    )
+}
+
+private struct PaintCell(
+    val bounds: Rect,
+    val layout: TextLayout?,
+    val foreground: Color,
+    val background: Color,
+    val underline: Boolean,
+    val struck: Boolean
+)
+
+internal class TerminalFrame(
+    val geometry: GridGeometry,
+    val caret: Rect?,
+    val inputRevision: Long,
+    private val showCursor: Boolean,
+    private val appearance: TerminalAppearance,
+    private val fonts: FontCollection
+) : Closeable {
+    private val layouts = HashMap<String, TextLayout>()
+    private val cells = ArrayList<PaintCell>()
+    private val selection = ArrayList<Rect>()
+    private var preedit: TextLayout? = None
+
+    fun shape(range: SelectionRange?, composition: String) {
+        var index = 0L
+        for (line in geometry.rows) {
+            val last = clamp(line.cells.size, 0L, geometry.columns)
+            var column = 0L
+            while (column < last) {
+                val cell = line.cells[column]
+                if (cell.width != 0L && column + cell.width <= last) addCell(index, column, cell)
+                column += 1L
+            }
+            val selected = when (range) {
+                case Some(val value) -> value.onRow(geometry.first + index, line)
+                case None -> None
+            }
+            when (selected) {
+                case Some(val span) -> {
+                    val end = clamp(span.end, 0L, geometry.columns)
+                    if (end > span.start)
+                        selection.add(geometry.rect(index, span.start, end - span.start))
+                }
+
+                case None -> {}
+            }
+            index += 1L
+        }
+        if (composition != "") {
+            when (caret) {
+                case Some(_) ->
+                    preedit = Some(shapeText(fonts, composition, appearance, appearance.foreground))
+                case None -> {}
+            }
+        }
+    }
+
+    private fun addCell(row: Long, column: Long, cell: TerminalCell) {
+        val foreground = resolveColor(cell.style.foreground, appearance.foreground)
+        val background = resolveColor(cell.style.background, appearance.background)
+        val fullInk = if (cell.style.inverse) background else foreground
+        val paper = if (cell.style.inverse) foreground else background
+        val ink = if (cell.style.faint)
+            Color(
+                (fullInk.red + paper.red) / 2.0, (fullInk.green + paper.green) / 2.0,
+                (fullInk.blue + paper.blue) / 2.0, fullInk.alpha
+            )
+        else
+            fullInk
+        val visible = cell.text != "" && !cell.style.concealed
+        val glyph = if (visible) Some(layout(cell, ink)) else None
+        if (visible || paper != appearance.background || cell.style.underlined || cell.style.struck)
+            cells
+                .add(
+                    PaintCell(
+                        geometry.rect(row, column, cell.width), glyph, ink, paper,
+                        cell.style.underlined, cell.style.struck
+                    )
+                )
+    }
+
+    private fun layout(cell: TerminalCell, ink: Color): TextLayout {
+        val key = f"${cell.style.flags}:${ink.red}:${ink.green}:${ink.blue}:${ink.alpha}:${
+            cell.text
+        }"
+        val cached = layouts[key]
+        when (cached) {
+            case Some(val value) -> return value
+            case None -> {}
+        }
+        val value = shapeText(fonts, cell.text, appearance, ink, cell.style.bold, cell.style.italic)
+        layouts[key] = value
+        return value
+    }
+
+    fun draw(canvas: Canvas, focused: Boolean) {
+        val clip = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
+        canvas.save()
+        canvas.clipRect(clip)
+        canvas.drawRect(clip, Paint(appearance.background))
+        for (cell in cells) {
+            if (cell.background != appearance.background)
+                canvas.drawRect(cell.bounds, Paint(cell.background))
+        }
+        for (highlight in selection)
+            canvas.drawRect(highlight, Paint(appearance.selection))
+        for (cell in cells)
+            drawGlyph(canvas, cell)
+        when (caret) {
+            case Some(val rect) -> {
+                val width = if (focused) 2.0 else 1.0
+                if (showCursor)
+                    canvas
+                        .drawRect(
+                            Rect(rect.x, rect.y, width, rect.height),
+                            Paint(appearance.cursor)
+                        )
+                when (preedit) {
+                    case Some(val layout) -> {
+                        canvas
+                            .drawRect(
+                                Rect(rect.x, rect.y, layout.maxIntrinsicWidth, rect.height),
+                                Paint(appearance.background)
+                            )
+                        canvas
+                            .drawText(
+                                layout,
+                                Point(
+                                    rect.x,
+                                    rect.y + geometry.metrics.baseline - layout.alphabeticBaseline
+                                )
+                            )
+                        canvas
+                            .drawRect(
+                                Rect(
+                                    rect.x, rect.y + rect.height - 1.0,
+                                    layout.maxIntrinsicWidth, 1.0
+                                ),
+                                Paint(appearance.cursor)
+                            )
+                    }
+
+                    case None -> {}
+                }
+            }
+
+            case None -> {}
+        }
+        canvas.restore()
+    }
+
+    private fun drawGlyph(canvas: Canvas, cell: PaintCell) {
+        val rect = cell.bounds
+        val baseline = geometry.metrics.baseline
+        when (cell.layout) {
+            case Some(val text) -> {
+                canvas.save()
+                canvas.clipRect(rect)
+                canvas.drawText(text, Point(rect.x, rect.y + baseline - text.alphabeticBaseline))
+                canvas.restore()
+            }
+
+            case None -> {}
+        }
+        if (cell.underline)
+            canvas
+                .drawRect(
+                    Rect(rect.x, rect.y + rect.height - 1.0, rect.width, 1.0),
+                    Paint(cell.foreground)
+                )
+        if (cell.struck)
+            canvas
+                .drawRect(
+                    Rect(rect.x, rect.y + baseline * 0.55, rect.width, 1.0),
+                    Paint(cell.foreground)
+                )
+    }
+
+    public override fun close() {
+        preedit?.close()
+        for ((key, layout) in layouts)
+            layout.close()
+        layouts.clear()
+    }
+}
+
+internal fun measureCell(fonts: FontCollection, appearance: TerminalAppearance): CellMetrics =
+    shapeText(fonts, "M", appearance, appearance.foreground)
+        .use { layout ->
+            CellMetrics(layout.maxIntrinsicWidth, layout.size.height, layout.alphabeticBaseline)
+        }
+
+private fun shapeText(
+    fonts: FontCollection,
+    value: String,
+    appearance: TerminalAppearance,
+    foreground: Color,
+    bold: Boolean = false,
+    italic: Boolean = false
+): TextLayout {
+    val style = textStyle {
+        families = appearance.families
+        fontSize = appearance.fontSize
+        color = foreground
+        weight = if (bold) 700 else 400
+        slant = if (italic) FontSlant.Italic else FontSlant.Upright
+    }
+    return Paragraph(fonts, value, style).use { paragraph -> paragraph.layoutUnwrapped() }
+}

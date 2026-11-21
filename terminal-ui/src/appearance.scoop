@@ -1,0 +1,59 @@
+package scoop.ui.terminal
+
+import scoop.graphics.Color
+import scoop.terminal.emulator.TerminalColor
+
+public struct TerminalAppearance(
+    val families: Array<String> = ["Menlo", "Consolas", "DejaVu Sans Mono", "monospace"],
+    val fontSize: Double = 14.0,
+    val foreground: Color = Color(0.88, 0.90, 0.92),
+    val background: Color = Color(0.08, 0.09, 0.11),
+    val selection: Color = Color(0.23, 0.43, 0.68, 0.65),
+    val cursor: Color = Color(0.84, 0.88, 0.93)
+)
+
+private val ansi16: Array<Int> = [
+    0x101218,
+    0xcc5c63,
+    0x7dbd78,
+    0xd4b36d,
+    0x6b9be4,
+    0xb78bcd,
+    0x64b8c0,
+    0xd4d8df,
+    0x596170,
+    0xf78187,
+    0xa2d898,
+    0xf5d489,
+    0x92b9ff,
+    0xd4a8ec,
+    0x8bd8dd,
+    0xffffff
+]
+
+internal fun resolveColor(value: TerminalColor, defaultColor: Color): Color = when (value) {
+    case Default -> defaultColor
+    case Indexed(val index) -> colorAt(index)
+    case Rgb(val red, val green, val blue) -> rgb(red, green, blue)
+}
+
+private fun colorAt(index: Int): Color {
+    if (index < 16) {
+        val packed = ansi16[index.toLong()]
+        return rgb(packed shr 16L, (packed shr 8L) and 255, packed and 255)
+    }
+    if (index >= 232) {
+        val level = 8 + (index - 232) * 10
+        return rgb(level, level, level)
+    }
+    val cube = index - 16
+    return rgb(level(cube / 36), level((cube / 6) % 6), level(cube % 6))
+}
+
+private fun level(index: Int): Int = if (index == 0) 0 else 55 + index * 40
+
+private fun rgb(red: Int, green: Int, blue: Int): Color = Color(
+    red.toDouble() / 255.0,
+    green.toDouble() / 255.0,
+    blue.toDouble() / 255.0
+)

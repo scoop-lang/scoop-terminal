@@ -1,0 +1,137 @@
+package scoop.terminal.demo
+
+import scoop.asyncio.*
+import scoop.platform.fs.Path
+import scoop.platform.process.*
+import scoop.platform.system.OsString
+import scoop.terminal.emulator.TerminalInput
+import scoop.test.*
+import scoop.time.Duration
+import scoop.ui.*
+import scoop.ui.terminal.*
+import scoop.window.*
+import scoop.window.asyncio.*
+
+@Test
+private class TerminalWindowTest {
+    @Test
+    fun nativeFrameResizeAndTerminalReplyReachTheChild() {
+        val probe = WindowProbe()
+        UiHost { host, active, event -> probe.onEvent(host, active, event) }
+            .use { host -> Application().runWithAsyncio(host) }
+        assertTrue(probe.finished)
+    }
+}
+
+private class WindowProbe {
+    var finished = false
+    private var title = ""
+
+    fun onEvent(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed ->
+                currentApplicationScope()
+                    .launch {
+                        try {
+                            this @WindowProbe.exercise(host, active)
+                        } finally {
+                            active.requestExit()
+                        }
+                    }
+            else -> {}
+        }
+    }
+
+    private suspend fun exercise(host: UiHost, active: ActiveApplication) {
+        val window = active.createWindow(windowAttributes { size = LogicalSize(480.0, 300.0) })
+        val child = command(Path.fromString("/bin/sh")) {
+            arg(OsString.fromString("-c"))
+            arg(OsString.fromString(childScript))
+        }
+        val probe = this
+        val session = TerminalEmulatorSession
+            .start(child, onTitle = { value -> probe.title = value })
+        try {
+            host.attach(window, { scope -> TestView(session, scope) })
+            awaitWindow("first accepted terminal layout and CPR") {
+                title == "reply-ok" && session.terminal.columns != 80L
+            }
+            val oldColumns = session.terminal.columns
+            val oldRows = session.terminal.rows
+            window.requestSize(LogicalSize(650.0, 420.0))
+            awaitWindow("second accepted terminal layout") {
+                session.terminal.columns > oldColumns && session.terminal.rows > oldRows
+            }
+            val dimensions = f"${session.terminal.rows} ${session.terminal.columns}"
+            session.send(TerminalInput.Text(dimensions + "\r"))
+            awaitWindow("session exit and EOF") {
+                when (session.state) {
+                    case Running -> false
+                    else -> true
+                }
+            }
+            when (session.state) {
+                case Exited(val status) -> assertEquals(ExitStatus.Exited(17), status)
+                case Failed(val error) -> throw error
+                else -> fail(Some("expected a normal process exit"))
+            }
+            assertEquals(dimensions, title)
+            val cells = session.terminal.lines(session.terminal.historySize, 1L)[0L].cells
+            assertEquals("中", cells[0L].text)
+            assertEquals("文", cells[2L].text)
+        } finally {
+            session.close()
+        }
+        val idle = command(Path.fromString("/bin/sh")) {
+            arg(OsString.fromString("-c"))
+            arg(OsString.fromString("printf '\\033]2;idle\\007'; read line"))
+        }
+        val pending = TerminalEmulatorSession
+            .start(idle, onTitle = { value -> probe.title = value })
+        try {
+            awaitWindow("idle child") { title == "idle" }
+        } finally {
+            pending.close()
+        }
+        when (pending.state) {
+            case Closed -> finished = true
+            case Failed(val error) -> throw error
+            else -> fail(Some("expected the active session to close"))
+        }
+    }
+}
+
+private val childScript = """
+stty -icanon -echo min 1 time 0 || exit 10
+printf '\033[2;3H\033[6n'
+reply=$(dd bs=1 count=6 2>/dev/null)
+[ "$reply" = "$(printf '\033[2;3R')" ] || exit 11
+stty icanon || exit 12
+printf '\033]2;reply-ok\007'
+IFS= read -r wanted
+i=0
+while [ "$i" -lt 100 ]; do
+    size=$(stty size)
+    [ "$size" = "$wanted" ] && break
+    i=$((i+1))
+    sleep 0.02
+done
+printf '\033]2;%s\007' "$size"
+printf '\033[2J\033[H中文'
+exit 17
+"""
+
+private class TestView(private val session: TerminalEmulatorSession, scope: ComponentScope) :
+    Component(scope) {
+    public override fun render(): View = terminalView(session)
+}
+
+private suspend fun awaitWindow(label: String, ready: () -> Boolean) {
+    val loop = currentEventLoop()
+    var attempts = 0L
+    while (!ready()) {
+        assertTrue(attempts < 250L, Some("timed out waiting for " + label))
+        attempts += 1L
+        loop.sleep(Duration.milliseconds(20L))
+    }
+}

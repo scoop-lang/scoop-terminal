@@ -1,0 +1,153 @@
+package scoop.ui.terminal
+
+import scoop.collections.withIndex
+import scoop.terminal.emulator.*
+import scoop.window.Utf8Selection
+
+internal struct CellLocation(val id: Long, val column: Long)
+
+internal struct CellSpan(val start: Long, val end: Long)
+
+private struct SelectedCells(val anchor: CellLocation, val end: CellLocation)
+
+internal struct SelectionRange(
+    val startRow: Long,
+    val startColumn: Long,
+    val endRow: Long,
+    val endColumn: Long,
+    val reversed: Boolean
+) {
+    fun onRow(row: Long, line: TerminalLine): CellSpan? {
+        if (row < startRow || row > endRow) return None
+        val columns = line.cells.size
+        val left = if (row == startRow) clamp(startColumn, 0L, columns) else 0L
+        val right = if (row == endRow) clamp(endColumn + 1L, left, columns) else columns
+        return Some(
+            CellSpan(
+                if (left < columns && line.cells[left].width == 0L) left - 1L else left,
+                if (right < columns && line.cells[right].width == 0L) right + 1L else right
+            )
+        )
+    }
+}
+
+internal struct VisibleText(val text: String, val selection: Utf8Selection?)
+
+internal class TerminalViewport(val terminal: Terminal) {
+    private var anchor: Long? = None
+    private var selection: SelectedCells? = None
+    private var alternate = terminal.alternateScreen
+
+    val first: Long
+        get() = when (anchor) {
+            case Some(val id) -> clamp(terminal.findLine(id) ?: 0L, 0L, terminal.historySize)
+            case None -> terminal.historySize
+        }
+    val atBottom: Boolean get() = first == terminal.historySize
+
+    fun update() {
+        if (alternate != terminal.alternateScreen) {
+            anchor = None
+            selection = None
+            alternate = terminal.alternateScreen
+        }
+        when (anchor) {
+            case Some(val id) ->
+                if (terminal.findLine(id) == None)
+                    anchor = if (terminal.historySize == 0L)
+                        None
+                    else
+                        Some(terminal.lines(0L, 1L)[0L].id)
+            case None -> {}
+        }
+        if (range() == None) selection = None
+    }
+
+    fun scroll(lines: Long): Boolean {
+        val old = first
+        val destination = clamp(old + lines, 0L, terminal.historySize)
+        if (old == destination) return false
+        anchor = if (destination == terminal.historySize)
+            None
+        else
+            Some(terminal.lines(destination, 1L)[0L].id)
+        return true
+    }
+
+    fun select(location: CellLocation) {
+        selection = Some(SelectedCells(location, location))
+    }
+
+    fun extend(location: CellLocation) {
+        val previous = selection ?: return
+        selection = Some(SelectedCells(previous.anchor, location))
+    }
+
+    fun range(): SelectionRange? {
+        val value = selection ?: return None
+        val start = terminal.findLine(value.anchor.id) ?: return None
+        val end = terminal.findLine(value.end.id) ?: return None
+        val reversed = end < start || (end == start && value.end.column < value.anchor.column)
+        return if (reversed)
+            Some(SelectionRange(end, value.end.column, start, value.anchor.column, true))
+        else
+            Some(SelectionRange(start, value.anchor.column, end, value.end.column, false))
+    }
+
+    fun copy(): String? {
+        val range = range() ?: return None
+        val lines = terminal.lines(range.startRow, range.endRow - range.startRow + 1L)
+        val text = StringBuilder()
+        for ((index, line) in lines.withIndex()) {
+            val span = range.onRow(range.startRow + index, line)!!
+            appendCells(text, line, span.start, span.end)
+            if (index + 1L < lines.size && !line.softWrapped) text.append('\n')
+        }
+        return Some(text.toString())
+    }
+
+    fun visibleText(): VisibleText {
+        val start = first
+        val lines = terminal.lines(start, terminal.rows)
+        val selection = range()
+        val text = StringBuilder()
+        var left: Long? = None
+        var right: Long? = None
+        for ((index, line) in lines.withIndex()) {
+            val span = when (selection) {
+                case Some(val value) -> value.onRow(start + index, line)
+                case None -> None
+            }
+            when (span) {
+                case Some(val span) -> {
+                    appendCells(text, line, 0L, span.start)
+                    if (left == None) left = Some(text.toString().byteLength)
+                    appendCells(text, line, span.start, span.end)
+                    right = Some(text.toString().byteLength)
+                    appendCells(text, line, span.end, line.cells.size)
+                }
+
+                case None -> appendCells(text, line, 0L, line.cells.size)
+            }
+            if (index + 1L < lines.size && !line.softWrapped) text.append('\n')
+        }
+        val offsets: Utf8Selection? = if (left == None || right == None)
+            None
+        else if (selection!!.reversed)
+            Some(Utf8Selection(right!!, left!!))
+        else
+            Some(Utf8Selection(left!!, right!!))
+        return VisibleText(text.toString(), offsets)
+    }
+}
+
+private fun appendCells(text: StringBuilder, line: TerminalLine, start: Long, end: Long) {
+    for (column in start..<end) {
+        val cell = line.cells[column]
+        if (cell.width != 0L) text.append(if (cell.text == "") " " else cell.text)
+    }
+}
+
+internal fun clamp(value: Long, minimum: Long, maximum: Long): Long = if (value < minimum)
+    minimum
+else if (value > maximum) maximum else value

@@ -1,0 +1,28 @@
+schema = 1
+
+[cone]
+group = { workspace = true }
+name = "terminal-demo"
+version = { workspace = true }
+kind = "executable"
+
+[[sources]]
+path = "src"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+"scoop:scoop.platform" = "0.1.0"
+"scoop:scoop.asyncio" = "0.1.0"
+"scoop:scoop.ui" = "0.1.0"
+"scoop:scoop.window" = "0.1.0"
+"scoop:scoop.window.asyncio" = "0.1.0"
+"scoop:scoop.ui.terminal" = { version = "0.1.0", path = "../terminal-ui" }
+
+[test-dependencies]
+"scoop:scoop.terminal.emulator" = { version = "0.1.0", path = "../emulator" }
+"scoop:scoop.test" = "0.1.0"
+
+[[test.sources]]
+path = "tests"
+when = { os = ["darwin", "linux"] }

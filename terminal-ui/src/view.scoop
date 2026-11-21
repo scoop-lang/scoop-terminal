@@ -1,0 +1,374 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.platform.system.OperatingSystem
+import scoop.platform.system.operatingSystem
+import scoop.surface.*
+import scoop.terminal.emulator.*
+import scoop.ui.*
+import scoop.window.*
+import scoop.window.accessibility.*
+
+/** Embeds one active view of the session in a Scoop UI tree. */
+public fun terminalView(
+    session: TerminalEmulatorSession,
+    appearance: TerminalAppearance = TerminalAppearance()
+): View = element(
+    TerminalViewProps(session, appearance),
+    { props, scope -> TerminalViewElement(props, scope) }
+)
+
+private struct TerminalViewProps(
+    val session: TerminalEmulatorSession,
+    val appearance: TerminalAppearance
+)
+
+private class TerminalViewElement(
+    private val props: Props<TerminalViewProps>,
+    scope: ComponentScope
+) : Element<TerminalFrame>(scope) {
+    private var session = props.value.session
+    private var viewport = TerminalViewport(session.terminal)
+    private var attachment: Disposable? = None
+    private var accepted: GridGeometry? = None
+    private var selecting = false
+    private var reported = TerminalMouseButton.NonePressed
+    private var wheelRemainder = 0.0
+    private val area = scope
+        .createArea(focusable = true, textInput = true) { context, event -> route(context, event) }
+    private val focus = scope.focusTarget(area)
+    private val semantics = scope.semantics(SemanticRole.Text)
+    private val composition = TerminalComposition(
+        scope.nativeWindow, area,
+        { value -> session.send(TerminalInput.Text(value)) },
+        { scope.requestLayout() }
+    )
+
+    public override fun onMount() {
+        area.scope.defaultAction = area.scope.handler
+        semantics.bindFocus(Some(focus))
+        attach()
+    }
+
+    private fun attach() {
+        attachment = Some(session.attach { modelChanged() })
+        modelChanged()
+    }
+
+    public override fun update(): UiInvalidation {
+        val next = props.value.session
+        if (next !== session) {
+            attachment?.dispose()
+            accepted = None
+            selecting = false
+            reported = TerminalMouseButton.NonePressed
+            composition.restart()
+            session = next
+            viewport = TerminalViewport(next.terminal)
+            attach()
+        }
+        return UiInvalidation.Layout
+    }
+
+    public override fun onUnmount() {
+        attachment?.dispose()
+        attachment = None
+        accepted = None
+    }
+
+    private fun modelChanged() {
+        viewport.update()
+        refresh()
+    }
+
+    private fun refresh() {
+        val visible = viewport.visibleText()
+        semantics
+            .update(
+                SemanticProperties(
+                    name = Some("Terminal"), value = Some(visible.text),
+                    readOnly = true, selection = visible.selection
+                )
+            )
+        area.setCaret(None, Some(composition.revision))
+        scope.requestLayout()
+    }
+
+    public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
+        TerminalFrame
+    > {
+        val appearance = props.value.appearance
+        val fonts = scope.defaultFonts
+        val terminal = session.terminal
+        val metrics = measureCell(fonts, appearance)
+        val size = constraints
+            .constrain(
+                Size(
+                    constraints.maxWidth ?: terminal.columns.toDouble() * metrics.width,
+                    constraints.maxHeight ?: terminal.rows.toDouble() * metrics.height
+                )
+            )
+        val columns = clamp((size.width / metrics.width).toLong(), 0L, 32767L)
+        val rows = clamp((size.height / metrics.height).toLong(), 0L, 32767L)
+        val first = viewport.first
+        val visible = terminal.lines(first, clamp(rows, 0L, terminal.rows))
+        val geometry = GridGeometry(size, metrics, first, visible, columns, rows, terminal.revision)
+        val cursor = terminal.cursor
+        val caret = if (viewport.atBottom && cursor.row < visible.size && cursor.column < columns)
+            Some(geometry.rect(cursor.row, cursor.column))
+        else
+            None
+        val frame = TerminalFrame(
+            geometry, caret, composition.revision, cursor.visible,
+            appearance, fonts
+        )
+        try {
+            frame.shape(viewport.range(), composition.text)
+            return LayoutResult(LayoutMetrics(size), frame, { frame.close() })
+        } catch (error: Throwable) {
+            frame.close()
+            throw error
+        }
+    }
+
+    public override fun scene(context: SceneContext, measured: TerminalFrame) {
+        val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
+        area.setCaret(measured.caret, Some(measured.inputRevision))
+        context.place(area, bounds)
+        context.semantics(semantics, bounds)
+        val focused = area.isFocusActive
+        context.draw { paint -> measured.draw(paint.canvas, focused) }
+        val owner = session
+        val geometry = measured.geometry
+        context
+            .onFrameComplete { completion ->
+                if (scope.isMounted &&
+                    session ===
+                    owner &&
+                    completion.submission ==
+                    FrameSubmission.Accepted
+                ) {
+                    accepted = Some(geometry)
+                    if (geometry.columns > 0L && geometry.requestedRows > 0L)
+                        owner.requestSize(geometry.columns, geometry.requestedRows)
+                }
+            }
+    }
+
+    private fun route(context: RoutedEventContext, event: InputEvent) {
+        if (context.phase == RoutedPhase.Notification) {
+            when (event) {
+                case TextInput(val text) -> composition.input(text)
+
+                case FocusChanged(val active) -> {
+                    session.send(TerminalInput.Focus(active))
+                    scope.requestFrame()
+                }
+
+                else -> {}
+            }
+        } else if (context.phase == RoutedPhase.Default) {
+            val handled = when (event) {
+                case Keyboard(val key) -> keyboard(key)
+                case Pointer(val pointer) -> pointerEvent(context, pointer)
+                case TextCommand(val command) -> clipboardCommand(command)
+                else -> false
+            }
+            if (handled) context.consume()
+        }
+    }
+
+    private fun keyboard(event: KeyEvent): Boolean {
+        if (event.state != ElementState.Pressed) return false
+        val modifiers = event.modifiers
+        val shortcut = if (operatingSystem == OperatingSystem.Darwin)
+            modifiers.superKey
+        else
+            modifiers.shift && modifiers.control
+        if (shortcut) {
+            when (event.logicalKey) {
+                case Character(val value) -> {
+                    if (value == "c" || value == "C") return clipboardCommand(TextEditCommand.Copy)
+                    if (value == "v" || value == "V") return clipboardCommand(TextEditCommand.Paste)
+                }
+
+                case _ -> {}
+            }
+        }
+        val key = terminalKey(event) ?: return false
+        session.send(TerminalInput.Key(key, modifiers.terminalModifiers()))
+        return true
+    }
+
+    private fun clipboardCommand(command: TextEditCommand): Boolean = when (command) {
+        case Copy -> {
+            val text = viewport.copy()
+            if (text != None) scope.nativeWindow.clipboard.writeText(text!!)
+            true
+        }
+
+        case Paste -> {
+            val text = scope.nativeWindow.clipboard.readText()
+            if (text != None) session.send(TerminalInput.Paste(text!!))
+            true
+        }
+
+        case _ -> false
+    }
+
+    private fun pointerEvent(context: RoutedEventContext, event: InputPointerEvent): Boolean {
+        when (event) {
+            case Cancelled(_, _) -> {
+                selecting = false
+                reported = TerminalMouseButton.NonePressed
+                return false
+            }
+
+            case _ -> {}
+        }
+        val frame = accepted ?: return false
+        val point = context.localPosition ?: return false
+        val(row, column) = frame.hit(point) ?: return false
+        return when (event) {
+            case Button(val pointer, val button, val state, _) ->
+                button(frame, row, column, pointer.state.modifiers, button, state)
+            case Moved(val pointer) -> motion(frame, row, column, pointer.state.modifiers)
+            case Wheel(val pointer, val delta, _, _) ->
+                wheel(frame, row, column, pointer.state.modifiers, delta)
+            case _ -> false
+        }
+    }
+
+    private fun button(
+        frame: GridGeometry,
+        row: Long,
+        column: Long,
+        modifiers: Modifiers,
+        mouse: MouseButton,
+        state: ElementState
+    ): Boolean {
+        val mapped = when (mouse) {
+            case Left -> TerminalMouseButton.Left
+            case Middle -> TerminalMouseButton.Middle
+            case Right -> TerminalMouseButton.Right
+            case Other(_) -> return false
+        }
+        if (state == ElementState.Pressed) {
+            area.requestFocus(FocusOrigin.Pointer)
+            if (reportMouse(frame, modifiers)) {
+                reported = mapped
+                sendMouse(TerminalMouseAction.Press, mapped, row, column, modifiers)
+                return true
+            }
+            if (mapped == TerminalMouseButton.Left) {
+                val location = location(frame, row, column)
+                if (modifiers.shift && viewport.range() != None)
+                    viewport.extend(location)
+                else
+                    viewport.select(location)
+                selecting = true
+                refresh()
+                return true
+            }
+        } else {
+            if (reported == mapped) {
+                reported = TerminalMouseButton.NonePressed
+                sendMouse(TerminalMouseAction.Release, mapped, row, column, modifiers)
+                return true
+            }
+            if (mapped == TerminalMouseButton.Left && selecting) {
+                selecting = false
+                viewport.extend(location(frame, row, column))
+                refresh()
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun motion(
+        frame: GridGeometry,
+        row: Long,
+        column: Long,
+        modifiers: Modifiers
+    ): Boolean {
+        if (selecting) {
+            viewport.extend(location(frame, row, column))
+            refresh()
+            return true
+        }
+        if (reportMouse(frame, modifiers)) {
+            sendMouse(TerminalMouseAction.Move, reported, row, column, modifiers)
+            return true
+        }
+        return false
+    }
+
+    private fun wheel(
+        frame: GridGeometry,
+        row: Long,
+        column: Long,
+        modifiers: Modifiers,
+        delta: InputScrollDelta
+    ): Boolean {
+        val lines = when (delta) {
+            case Lines(_, val y) -> y
+            case Pixels(_, val y) -> y / frame.metrics.height
+        }
+        wheelRemainder += lines
+        val steps = wheelRemainder.toLong()
+        wheelRemainder -= steps.toDouble()
+        if (steps == 0L) return lines != 0.0
+        if (reportMouse(frame, modifiers)) {
+            val mouse = if (steps > 0L)
+                TerminalMouseButton.WheelUp
+            else
+                TerminalMouseButton.WheelDown
+            val count = if (steps > 0L) steps else -steps
+            for (index in 0L..<count)
+                sendMouse(TerminalMouseAction.Press, mouse, row, column, modifiers)
+            return true
+        }
+        if (viewport.scroll(-steps)) {
+            refresh()
+            return true
+        }
+        return false
+    }
+
+    private fun reportMouse(frame: GridGeometry, modifiers: Modifiers): Boolean {
+        val terminal = session.terminal
+        return !modifiers.shift &&
+            viewport.atBottom &&
+            terminal.mouseReporting &&
+            frame.columns ==
+            terminal.columns &&
+            frame.requestedRows ==
+            terminal.rows
+    }
+
+    private fun sendMouse(
+        action: TerminalMouseAction,
+        button: TerminalMouseButton,
+        row: Long,
+        column: Long,
+        modifiers: Modifiers
+    ) {
+        session
+            .send(
+                TerminalInput
+                    .Mouse(
+                        TerminalMouse(
+                            action, button, row, column,
+                            modifiers.terminalModifiers()
+                        )
+                    )
+            )
+    }
+}
+
+private fun location(frame: GridGeometry, row: Long, column: Long): CellLocation {
+    val line = frame.rows[row]
+    val index = clamp(column, 0L, line.cells.size - 1L)
+    return CellLocation(line.id, if (line.cells[index].width == 0L) index - 1L else index)
+}

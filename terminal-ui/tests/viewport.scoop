@@ -1,0 +1,41 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.Terminal
+import scoop.test.*
+import scoop.window.Utf8Selection
+
+@Test
+private class TerminalViewportTest {
+    @Test
+    fun selectionExpandsWideCellsAndJoinsOnlySoftWraps() {
+        val terminal = Terminal(4L, 3L)
+        terminal.feed("中abD\r\nZ".toByteArray())
+        val lines = terminal.lines(0L, 3L)
+        val viewport = TerminalViewport(terminal)
+        viewport.select(CellLocation(lines[0L].id, 1L))
+        assertEquals(Some("中"), viewport.copy())
+        assertEquals(Some(Utf8Selection(0L, 3L)), viewport.visibleText().selection)
+        viewport.extend(CellLocation(lines[2L].id, 0L))
+        assertEquals(Some("中abD   \nZ"), viewport.copy())
+    }
+
+    @Test
+    fun historyViewportUsesStableRowsAndRetiresEvictedSelection() {
+        val terminal = Terminal(6L, 2L, 3L)
+        val viewport = TerminalViewport(terminal)
+        terminal.feed("a\r\nb\r\nc\r\nd".toByteArray())
+        assertTrue(viewport.scroll(-1L))
+        val anchored = terminal.lines(viewport.first, 1L)[0L].id
+        viewport.select(CellLocation(anchored, 0L))
+        terminal.feed("\r\ne\r\nf".toByteArray())
+        viewport.update()
+        assertEquals(anchored, terminal.lines(viewport.first, 1L)[0L].id)
+        assertEquals(Some("b"), viewport.copy())
+        terminal.feed("\r\ng".toByteArray())
+        viewport.update()
+        assertEquals(0L, viewport.first)
+        assertEquals(None, viewport.copy())
+        assertTrue(viewport.scroll(3L))
+        assertTrue(viewport.atBottom)
+    }
+}
