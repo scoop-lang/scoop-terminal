@@ -1,0 +1,228 @@
+package scoop.terminal.emulator
+
+internal interface VtActions {
+    fun print(character: Char)
+    fun control(code: Int)
+    fun escape(intermediate: Int, final: Int)
+    fun csi(command: VtCsi)
+    fun title(text: String)
+}
+
+internal struct VtCsi(
+    val prefix: Int,
+    val intermediate: Int,
+    val final: Int,
+    val arguments: Array<Int>,
+    val separators: Array<Int>
+) {
+    fun argument(index: Long, defaultValue: Int): Int = if (index >=
+        arguments.size ||
+        arguments[index] <
+        0
+    )
+        defaultValue
+    else
+        arguments[index]
+
+    fun count(index: Long = 0L): Int {
+        val value = argument(index, 1)
+        return if (value == 0) 1 else value
+    }
+}
+
+private enum VtState {
+    Ground, Escape, EscapeIgnore, Csi, CsiIgnore, Osc, OscEscape, StringIgnore, StringEscape
+}
+
+internal class VtParser(private val actions: VtActions) {
+    private var state = VtState.Ground
+    private val text = VtUtf8 { character -> actions.print(character) }
+    private var intermediate = 0
+    private var prefix = 0
+    private var field = -1
+    private val arguments = ArrayList<Int>()
+    private val separators = ArrayList<Int>()
+    private var oscSelector = -1
+    private var oscBody = false
+    private var oscBytes = 0
+    private val title = StringBuilder()
+    private val oscText = VtUtf8 { character ->
+        title.append(character);
+        Unit
+    }
+
+    fun feed(bytes: List<Byte>) {
+        for (byte in bytes)
+            advance(byte.toInt() and 0xff)
+    }
+
+    fun finish() {
+        text.finish()
+        state = VtState.Ground
+        oscText.reset()
+        title.clear()
+    }
+
+    private fun advance(byte: Int) {
+        if (state == VtState.Ground) {
+            if (byte >= 0x20 && byte != 0x7f) {
+                text.push(byte)
+            } else {
+                text.finish()
+                if (byte == 0x1b) startEscape() else if (byte != 0x7f) actions.control(byte)
+            }
+            return
+        }
+        if (byte == 0x18 || byte == 0x1a) {
+            state = VtState.Ground
+            return
+        }
+        when (state) {
+            case Osc -> {
+                if (byte == 0x07)
+                    finishTitle()
+                else if (byte == 0x1b)
+                    state = VtState.OscEscape
+                else if (byte >= 0x20 && byte != 0x7f) readOsc(byte)
+                return
+            }
+
+            case OscEscape -> {
+                if (byte == '\\'.code) finishTitle() else state = VtState.StringIgnore
+                return
+            }
+
+            case StringIgnore -> {
+                if (byte == 0x1b) state = VtState.StringEscape
+                return
+            }
+
+            case StringEscape -> {
+                if (byte == '\\'.code)
+                    state = VtState.Ground
+                else if (byte != 0x1b) state = VtState.StringIgnore
+                return
+            }
+
+            case _ -> {}
+        }
+        if (byte == 0x1b) {
+            startEscape()
+        } else if (byte < 0x20) {
+            actions.control(byte)
+        } else if (byte < 0x7f) {
+            when (state) {
+                case Escape -> readEscape(byte)
+                case EscapeIgnore -> if (byte >= 0x30) state = VtState.Ground
+                case Csi -> readCsi(byte)
+                case CsiIgnore -> if (byte >= 0x40) state = VtState.Ground
+                case _ -> {}
+            }
+        }
+    }
+
+    private fun startEscape() {
+        intermediate = 0
+        state = VtState.Escape
+    }
+
+    private fun readEscape(byte: Int) {
+        if (byte < 0x30) {
+            if (intermediate == 0) intermediate = byte else state = VtState.EscapeIgnore
+        } else if (intermediate != 0) {
+            actions.escape(intermediate, byte)
+            state = VtState.Ground
+        } else {
+            when (byte) {
+                case 0x5b -> {
+                    prefix = 0
+                    field = -1
+                    arguments.clear()
+                    separators.clear()
+                    state = VtState.Csi
+                }
+
+                case 0x5d -> {
+                    oscSelector = -1
+                    oscBody = false
+                    oscBytes = 0
+                    oscText.reset()
+                    title.clear()
+                    state = VtState.Osc
+                }
+
+                case 0x50 -> state = VtState.StringIgnore
+                case 0x58 -> state = VtState.StringIgnore
+                case 0x5e -> state = VtState.StringIgnore
+                case 0x5f -> state = VtState.StringIgnore
+
+                case _ -> {
+                    actions.escape(0, byte)
+                    state = VtState.Ground
+                }
+            }
+        }
+    }
+
+    private fun readCsi(byte: Int) {
+        if (byte >= 0x40) {
+            arguments.add(field)
+            actions
+                .csi(VtCsi(prefix, intermediate, byte, arguments.toArray(), separators.toArray()))
+            state = VtState.Ground
+        } else if (byte < 0x30 && intermediate == 0) {
+            intermediate = byte
+        } else if (intermediate == 0 && byte >= 0x30 && byte <= 0x39) {
+            val digit = byte - 0x30
+            val previous = if (field < 0) 0 else field
+            field = if (previous > (Int.MAX_VALUE - digit) / 10)
+                Int.MAX_VALUE
+            else
+                previous * 10 + digit
+        } else if (intermediate == 0 && (byte == 0x3a || byte == 0x3b) && arguments.size < 31L) {
+            arguments.add(field)
+            separators.add(byte)
+            field = -1
+        } else if (byte >=
+            0x3c &&
+            prefix ==
+            0 &&
+            intermediate ==
+            0 &&
+            field <
+            0 &&
+            arguments.size ==
+            0L
+        ) {
+            prefix = byte
+        } else {
+            state = VtState.CsiIgnore
+        }
+    }
+
+    private fun readOsc(byte: Int) {
+        if (!oscBody) {
+            if (byte == 0x3b) {
+                oscBody = true
+            } else if (byte >= 0x30 && byte <= 0x39 && oscSelector < 1000) {
+                val previous = if (oscSelector < 0) 0 else oscSelector
+                oscSelector = previous * 10 + byte - 0x30
+            } else {
+                oscSelector = 10000
+            }
+        } else if (oscSelector == 0 || oscSelector == 2) {
+            if (oscBytes < 4096) {
+                oscBytes += 1
+                oscText.push(byte)
+            }
+        }
+    }
+
+    private fun finishTitle() {
+        if (oscBody && (oscSelector == 0 || oscSelector == 2)) {
+            oscText.finish()
+            actions.title(title.toString())
+        }
+        state = VtState.Ground
+    }
+}

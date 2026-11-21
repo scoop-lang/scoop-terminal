@@ -1,0 +1,78 @@
+format = 1
+
+[[resolutions]]
+root = "emulator"
+purpose = "test"
+target = "aarch64-apple-darwin"
+root-coordinate = "scoop:scoop.terminal.emulator:0.1.0"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.charset:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.charset"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.core:0.1.0"
+kind = "library"
+dependencies = []
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.core"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.platform:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.platform"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.std:0.1.0"
+kind = "library"
+dependencies = ["scoop:scoop.core:0.1.0"]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.std"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.terminal.emulator:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.charset:0.1.0",
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = ["scoop:scoop.test:0.1.0"]
+
+[resolutions.nodes.source]
+kind = "path"
+path = "emulator"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.test:0.1.0"
+kind = "library"
+dependencies = ["scoop:scoop.core:0.1.0"]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.test"

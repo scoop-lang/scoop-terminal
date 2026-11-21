@@ -1,0 +1,8 @@
+schema = 1
+
+[workspace]
+members = ["emulator"]
+
+[workspace.cone]
+group = "scoop"
+version = "0.1.0"

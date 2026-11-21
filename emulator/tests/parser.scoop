@@ -1,0 +1,53 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class ParserTest {
+    @Test
+    fun splitTextAndControlSequences() {
+        val input = "a中\u001b[3;4Hb\u001b]2;界\u001b\\\u0007".toByteArray()
+        val whole = Scan()
+        VtParser(whole).feed(input)
+        val split = Scan()
+        val parser = VtParser(split)
+        for (byte in input)
+            parser.feed([byte])
+        assertEquals("a中[3,4]b<title:界><bell>", whole.output.toString())
+        assertEquals(whole.output.toString(), split.output.toString())
+    }
+
+    @Test
+    fun consumesUnsupportedStringsAndIncompleteOutput() {
+        val scan = Scan()
+        val parser = VtParser(scan)
+        parser.feed("a\u001bP1;2|hidden\u001b\\b\u001b]52;c;hidden\u0007c".toByteArray())
+        parser.feed([0xf0.toByte(), 0x9f.toByte()])
+        parser.finish()
+        assertEquals("abc�", scan.output.toString())
+    }
+}
+
+private class Scan : VtActions {
+    val output = StringBuilder()
+
+    public override fun print(character: Char) {
+        output.append(character)
+    }
+
+    public override fun control(code: Int) {
+        if (code == 7) output.append("<bell>")
+    }
+
+    public override fun escape(intermediate: Int, final: Int) {
+        output.append("<esc>")
+    }
+
+    public override fun csi(command: VtCsi) {
+        output.append(f"[${command.argument(0L, 1)},${command.argument(1L, 1)}]")
+    }
+
+    public override fun title(text: String) {
+        output.append(f"<title:${text}>")
+    }
+}

@@ -1,0 +1,21 @@
+schema = 1
+
+[cone]
+group = { workspace = true }
+name = "scoop.terminal.emulator"
+version = { workspace = true }
+kind = "library"
+
+[[sources]]
+path = "src"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+"scoop:scoop.charset" = "0.1.0"
+
+[test-dependencies]
+"scoop:scoop.test" = "0.1.0"
+
+[[test.sources]]
+path = "tests"
