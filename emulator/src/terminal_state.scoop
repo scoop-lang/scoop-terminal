@@ -1,0 +1,276 @@
+package scoop.terminal.emulator
+
+import scoop.charset.graphemeBoundaries
+import scoop.charset.unicodeScalarWidth
+
+internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : VtActions {
+    private val ids = RowIds()
+    val main = Screen(columns, rows, historyLimit, ids)
+    val alternate = Screen(columns, rows, 0L, ids)
+    var alternateScreen = false
+    val screen: Screen get() = if (alternateScreen) alternate else main
+    var style = TerminalStyle()
+    var modes = TerminalModes()
+    private var tabs = defaultTabs(columns)
+    private var charset = 0
+    private val savedCharset = MutableArray<Int>(2L) { 0 }
+    private var combining: ScreenRow? = None
+    private var startColumn = 0L
+    private var lastPrinted = TerminalCell()
+    private val effects = ArrayList<TerminalEffect>()
+    private var changed = false
+    private var contentRevision = 0L
+    val revision: Long get() = contentRevision
+    private val parser = VtParser(this)
+
+    fun feed(bytes: List<Byte>): TerminalUpdate {
+        parser.feed(bytes)
+        return update()
+    }
+
+    fun finishOutput(): TerminalUpdate {
+        parser.finish()
+        combining = None
+        return update()
+    }
+
+    private fun update(): TerminalUpdate {
+        if (changed) contentRevision += 1L
+        val result = TerminalUpdate(changed, effects.toArray())
+        effects.clear()
+        changed = false
+        return result
+    }
+
+    fun resize(columns: Long, rows: Long, restoreHistory: Boolean) {
+        main.resize(columns, rows, restoreHistory, style)
+        alternate.resize(columns, rows, false, style)
+        val previous = tabs
+        tabs = MutableArray<Boolean>(columns) { index ->
+            if (index < previous.size) previous[index] else defaultTab(index)
+        }
+        combining = None
+        contentRevision += 1L
+    }
+
+    public override fun print(character: Char) {
+        val active = if ((charset and 4) != 0) 2 else 1
+        val displayed = if ((charset and active) != 0) lineCharacter(character) else character
+        val text = displayed.toString()
+        if (extendCluster(displayed, text)) return
+        combining = None
+        val width = if (displayed.code < 128) 1L else clusterWidth(text)
+        if (width > 0L) put(text, width)
+    }
+
+    private fun extendCluster(character: Char, text: String): Boolean {
+        val row = combining ?: return false
+        val cell = row[startColumn]
+        if (character.code < 128 && cell.text.byteLength == cell.text.charLength) return false
+        val combined = cell.text + text
+        if (graphemeBoundaries(combined).size != 2L) return false
+        val width = clusterWidth(combined)
+        if (startColumn + width > screen.columns) {
+            row.erase(startColumn, startColumn + cell.width, style)
+            screen.moveColumn(startColumn)
+            put(combined, width)
+        } else {
+            row.put(startColumn, combined, width, cell.style)
+            moveAfter(startColumn, width)
+            lastPrinted = TerminalCell(combined, width, cell.style)
+            changed = true
+        }
+        return true
+    }
+
+    private fun put(text: String, width: Long) {
+        val grid = screen
+        val length = if (width <= grid.columns) width else 1L
+        if (modes.autoWrap && (grid.pendingWrap || grid.column + length > grid.columns)) {
+            grid.current.softWrapped = true
+            grid.moveColumn(0L)
+            grid.lineFeed(style)
+        }
+        val fits = length == width && grid.column + length <= grid.columns
+        val displayed = if (fits) text else "�"
+        val occupied = if (fits) length else 1L
+        val row = grid.current
+        val position = grid.column
+        if (modes.insert) row.shift(position, occupied, true, style)
+        row.put(position, displayed, occupied, style)
+        combining = Some(row)
+        startColumn = position
+        lastPrinted = TerminalCell(displayed, occupied, style)
+        moveAfter(position, occupied)
+        changed = true
+    }
+
+    private fun moveAfter(column: Long, occupied: Long) {
+        val grid = screen
+        val end = column + occupied
+        grid.column = clamp(end, 0L, grid.columns - 1L)
+        grid.pendingWrap = modes.autoWrap && end == grid.columns
+    }
+
+    public override fun control(code: Int) {
+        combining = None
+        val grid = screen
+        when (code) {
+            case 7 -> effects.add(TerminalEffect.Bell)
+
+            case 8 -> {
+                grid.moveColumn(grid.column - 1L)
+                changed = true
+            }
+
+            case 9 -> tab(1L, true)
+            case 10 -> lineFeed(modes.lineFeedNewLine)
+            case 11 -> lineFeed(modes.lineFeedNewLine)
+            case 12 -> lineFeed(modes.lineFeedNewLine)
+
+            case 13 -> {
+                grid.moveColumn(0L)
+                changed = true
+            }
+
+            case 14 -> charset = charset or 4
+            case 15 -> charset = charset and 4.inv()
+            case _ -> {}
+        }
+    }
+
+    public override fun escape(intermediate: Int, final: Int) {
+        combining = None
+        if (intermediate == 0x28 || intermediate == 0x29) {
+            val bank = if (intermediate == 0x28) 1 else 2
+            if (final == 0x30)
+                charset = charset or bank
+            else if (final == 0x42) charset = charset and bank.inv()
+            return
+        }
+        if (intermediate != 0) return
+        when (final.toChar()) {
+            case '7' -> saveCursor()
+            case '8' -> restoreCursor()
+            case 'D' -> lineFeed(false)
+            case 'E' -> lineFeed(true)
+            case 'H' -> tabs[screen.column] = true
+
+            case 'M' -> {
+                screen.reverseIndex(style)
+                changed = true
+            }
+
+            case '=' -> modes.applicationKeypad = true
+            case '>' -> modes.applicationKeypad = false
+            case 'c' -> reset()
+            case _ -> {}
+        }
+    }
+
+    public override fun csi(command: VtCsi) {
+        combining = None
+        if (executeCsi(this, command)) changed = true
+    }
+
+    public override fun title(text: String) {
+        effects.add(TerminalEffect.Title(text))
+    }
+
+    fun reply(text: String) {
+        effects.add(TerminalEffect.Reply(text.toByteArray()))
+    }
+
+    private fun lineFeed(returns: Boolean) {
+        val grid = screen
+        if (returns) grid.moveColumn(0L)
+        grid.lineFeed(style)
+        changed = true
+    }
+
+    fun tab(count: Long, forward: Boolean) {
+        val grid = screen
+        val step = if (forward) 1L else -1L
+        val edge = if (forward) grid.columns - 1L else 0L
+        var column = grid.column
+        var left = count
+        while (column != edge && left > 0L) {
+            column += step
+            if (tabs[column]) left -= 1L
+        }
+        grid.moveColumn(column)
+        changed = true
+    }
+
+    fun eraseTabs(mode: Int) {
+        if (mode == 0)
+            tabs[screen.column] = false
+        else if (mode == 3) tabs = MutableArray<Boolean>(screen.columns) { false }
+    }
+
+    fun repeat(count: Long) {
+        val glyph = lastPrinted
+        if (glyph.text != "") {
+            for (index in 0L..<clamp(count, 0L, 65535L))
+                put(glyph.text, glyph.width)
+        }
+    }
+
+    fun saveCursor() {
+        screen.save(style)
+        savedCharset[if (alternateScreen) 1L else 0L] = charset
+    }
+
+    fun restoreCursor() {
+        style = screen.restore()
+        charset = savedCharset[if (alternateScreen) 1L else 0L]
+        changed = true
+    }
+
+    fun switchScreen(enabled: Boolean, save: Boolean, clear: Boolean) {
+        if (alternateScreen == enabled) return
+        if (enabled && save) saveCursor()
+        alternateScreen = enabled
+        if (enabled && clear) {
+            alternate.reset(TerminalStyle())
+            savedCharset[1L] = 0
+        }
+        if (!enabled && save) restoreCursor()
+        changed = true
+    }
+
+    private fun reset() {
+        style = TerminalStyle()
+        modes = TerminalModes()
+        main.reset(style)
+        alternate.reset(style)
+        alternateScreen = false
+        tabs = defaultTabs(main.columns)
+        charset = 0
+        savedCharset[0L] = 0
+        savedCharset[1L] = 0
+        lastPrinted = TerminalCell()
+        changed = true
+    }
+}
+
+private fun defaultTab(column: Long): Boolean = column != 0L && column % 8L == 0L
+
+private fun defaultTabs(columns: Long): MutableArray<Boolean> = MutableArray<Boolean>(columns) {
+    column
+    ->
+    defaultTab(column)
+}
+
+private fun clusterWidth(text: String): Long {
+    var width = 0L
+    var emoji = false
+    var regional = 0
+    for (character in text) {
+        val scalar = unicodeScalarWidth(character).toLong()
+        if (scalar > width) width = scalar
+        if (character.code == 0xfe0f || character.code == 0x20e3) emoji = true
+        if (character.code >= 0x1f1e6 && character.code <= 0x1f1ff) regional += 1
+    }
+    return if (emoji || regional == 2) 2L else clamp(width, 0L, 2L)
+}

@@ -15,7 +15,9 @@ internal struct VtCsi(
     val arguments: Array<Int>,
     val separators: Array<Int>
 ) {
-    fun argument(index: Long, defaultValue: Int): Int = if (index >=
+    fun argument(index: Long, defaultValue: Int): Int = if (index <
+        0L ||
+        index >=
         arguments.size ||
         arguments[index] <
         0

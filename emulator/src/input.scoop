@@ -1,0 +1,167 @@
+package scoop.terminal.emulator
+
+public struct TerminalModifiers(
+    val shift: Boolean = false,
+    val alt: Boolean = false,
+    val control: Boolean = false
+)
+
+public enum TerminalKey {
+    Character(Char), Escape, Enter, Tab, Backspace,
+    Up, Down, Left, Right, Home, End, Insert, Delete, PageUp, PageDown,
+    Function(Int), Keypad(Char)
+}
+
+public enum TerminalMouseButton {
+    Left, Middle, Right, NonePressed, WheelUp, WheelDown
+}
+
+public enum TerminalMouseAction {
+    Press, Release, Move
+}
+
+public struct TerminalMouse(
+    val action: TerminalMouseAction,
+    val button: TerminalMouseButton,
+    val row: Long,
+    val column: Long,
+    val modifiers: TerminalModifiers = TerminalModifiers()
+)
+
+public enum TerminalInput {
+    Text(String), Key(TerminalKey, TerminalModifiers), Paste(String), Focus(Boolean), Mouse(
+        TerminalMouse
+    )
+}
+
+internal fun encode(terminal: TerminalState, input: TerminalInput): Array<Byte> {
+    val modes = terminal.modes
+    val text = when (input) {
+        case Text(val value) -> value
+        case Key(val key, val modifiers) -> keySequence(key, modifiers, modes)
+        case Paste(val value) ->
+            if (modes.bracketedPaste) "\u001b[200~" + value + "\u001b[201~" else value
+        case Focus(val focused) ->
+            if (!modes.focusEvents) "" else if (focused) "\u001b[I" else "\u001b[O"
+        case Mouse(val event) -> mouseSequence(terminal, event)
+    }
+    return text.toByteArray()
+}
+
+private fun keySequence(
+    key: TerminalKey,
+    modifiers: TerminalModifiers,
+    modes: TerminalModes
+): String {
+    val parameter = 1 +
+        (if (modifiers.shift) 1 else 0) +
+        (if (modifiers.alt) 2 else 0) +
+        (if (modifiers.control) 4 else 0)
+    val meta = if (modifiers.alt) "\u001b" else ""
+    return when (key) {
+        case Character(val character) -> meta + keyCharacter(character, modifiers.control)
+        case Escape -> meta + "\u001b"
+        case Enter -> meta + if (modes.lineFeedNewLine) "\r\n" else "\r"
+        case Tab -> if (modifiers.shift) "\u001b[Z" else meta + "\t"
+        case Backspace -> meta + "\u007f"
+        case Up -> cursorKey('A', parameter, modes.applicationCursor)
+        case Down -> cursorKey('B', parameter, modes.applicationCursor)
+        case Right -> cursorKey('C', parameter, modes.applicationCursor)
+        case Left -> cursorKey('D', parameter, modes.applicationCursor)
+        case Home -> cursorKey('H', parameter, modes.applicationCursor)
+        case End -> cursorKey('F', parameter, modes.applicationCursor)
+        case Insert -> tildeKey(2, parameter)
+        case Delete -> tildeKey(3, parameter)
+        case PageUp -> tildeKey(5, parameter)
+        case PageDown -> tildeKey(6, parameter)
+        case Function(val number) -> functionKey(number, parameter)
+        case Keypad(val character) -> keypadKey(character, parameter, modes.applicationKeypad)
+    }
+}
+
+private fun keyCharacter(character: Char, control: Boolean): String {
+    if (!control) return character.toString()
+    val code = character.code
+    if (code >= 0x61 && code <= 0x7a) return (code - 0x60).toChar().toString()
+    if (code >= 0x40 && code <= 0x5f) return (code - 0x40).toChar().toString()
+    if (character == ' ') return "\u0000"
+    if (character == '?') return "\u007f"
+    return character.toString()
+}
+
+private fun cursorKey(final: Char, parameter: Int, application: Boolean): String = if (parameter !=
+    1
+)
+    f"\u001b[1;${parameter}${final}"
+else if (application) "\u001bO" + final.toString() else "\u001b[" + final.toString()
+
+private fun tildeKey(code: Int, parameter: Int): String = if (parameter == 1)
+    f"\u001b[${code}~"
+else
+    f"\u001b[${code};${parameter}~"
+
+private fun functionKey(number: Int, parameter: Int): String {
+    if (number >= 1 && number <= 4)
+        return cursorKey(('P'.code + number - 1).toChar(), parameter, true)
+    val codes: Array<Int> = [15, 17, 18, 19, 20, 21, 23, 24]
+    if (number >= 5 && number <= 12) return tildeKey(codes[number.toLong() - 5L], parameter)
+    return ""
+}
+
+private fun keypadKey(character: Char, parameter: Int, application: Boolean): String {
+    if (!application) return character.toString()
+    val code = character.code
+    val final = if (code >= '0'.code && code <= '9'.code) {
+        ('p'.code + code - '0'.code).toChar()
+    } else
+        when (character) {
+            case '\r' -> 'M'
+            case '.' -> 'n'
+            case '*' -> 'j'
+            case '+' -> 'k'
+            case '-' -> 'm'
+            case '/' -> 'o'
+            case _ -> return character.toString()
+        }
+    return cursorKey(final, parameter, true)
+}
+
+private fun mouseSequence(terminal: TerminalState, event: TerminalMouse): String {
+    val modes = terminal.modes
+    val tracking = modes.mouseTracking
+    val grid = terminal.screen
+    if (!modes.sgrMouse ||
+        tracking ==
+        0 ||
+        event.row <
+        0L ||
+        event.row >=
+        grid.rows ||
+        event.column <
+        0L ||
+        event.column >=
+        grid.columns
+    )
+        return ""
+    if (tracking == 9 && event.action != TerminalMouseAction.Press) return ""
+    if (event.action ==
+        TerminalMouseAction.Move &&
+        (tracking < 1002 || (tracking == 1002 && event.button == TerminalMouseButton.NonePressed))
+    )
+        return ""
+    val button = when (event.button) {
+        case Left -> 0
+        case Middle -> 1
+        case Right -> 2
+        case NonePressed -> 3
+        case WheelUp -> 64
+        case WheelDown -> 65
+    }
+    val code = button +
+        (if (event.modifiers.shift) 4 else 0) +
+        (if (event.modifiers.alt) 8 else 0) +
+        (if (event.modifiers.control) 16 else 0) +
+        (if (event.action == TerminalMouseAction.Move) 32 else 0)
+    val suffix = if (event.action == TerminalMouseAction.Release) 'm' else 'M'
+    return f"\u001b[<${code};${event.column + 1L};${event.row + 1L}${suffix}"
+}

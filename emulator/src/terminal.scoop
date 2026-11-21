@@ -1,0 +1,56 @@
+package scoop.terminal.emulator
+
+/** An incremental VT emulator with physical-row scrollback. All access is serialized by its owner. */
+public class Terminal(columns: Long, rows: Long, historyLimit: Long = 10000L) {
+    private val state = createState(columns, rows, historyLimit)
+
+    public val columns: Long get() = state.screen.columns
+    public val rows: Long get() = state.screen.rows
+    public val historySize: Long get() = state.screen.historySize
+    public val revision: Long get() = state.revision
+    public val alternateScreen: Boolean get() = state.alternateScreen
+    public val mouseReporting: Boolean
+        get() = state.modes.mouseTracking != 0 && state.modes.sgrMouse
+    public val cursor: TerminalCursor
+        get() {
+            val screen = state.screen
+            return TerminalCursor(screen.row, screen.column, state.modes.cursorVisible)
+        }
+
+    /** Processes output in order, retaining incomplete UTF-8, escape sequences and graphemes. */
+    public fun feed(bytes: List<Byte>): TerminalUpdate = state.feed(bytes)
+
+    /** Completes pending text when the output stream ends. */
+    public fun finishOutput(): TerminalUpdate = state.finishOutput()
+
+    /** Resizes physical lines and optionally restores history when the main screen grows taller. */
+    public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true) {
+        checkSize(columns, rows)
+        if (columns != this.columns || rows != this.rows)
+            state.resize(columns, rows, restoreHistory)
+    }
+
+    /** Reads zero-based physical rows, starting at the oldest retained scrollback row. */
+    public fun lines(start: Long, count: Long): Array<TerminalLine> {
+        val limit = historySize + rows
+        if (start < 0L || start > limit || count < 0L || count > limit - start)
+            throw IndexOutOfBoundsException()
+        return state.screen.lines(start, count)
+    }
+
+    public fun findLine(id: Long): Long? = state.screen.findLine(id)
+
+    /** Encodes a host input using the modes active at the moment of the call. */
+    public fun encodeInput(input: TerminalInput): Array<Byte> = encode(state, input)
+}
+
+private fun createState(columns: Long, rows: Long, historyLimit: Long): TerminalState {
+    checkSize(columns, rows)
+    if (historyLimit < 0L) throw IllegalArgumentException(Some("negative terminal history limit"))
+    return TerminalState(columns, rows, historyLimit)
+}
+
+private fun checkSize(columns: Long, rows: Long) {
+    if (columns <= 0L || rows <= 0L || columns > 65535L || rows > 65535L)
+        throw IllegalArgumentException(Some("terminal cell dimensions out of range"))
+}

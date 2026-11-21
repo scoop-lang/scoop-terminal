@@ -1,0 +1,95 @@
+package scoop.terminal.emulator
+
+internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
+    private var cells = MutableArray<TerminalCell>(columns) { TerminalCell(style = style) }
+    var softWrapped = false
+
+    operator fun get(column: Long): TerminalCell = cells[column]
+
+    fun snapshot(): TerminalLine = TerminalLine(
+        id,
+        Array<TerminalCell>(cells.size) { column -> cells[column] },
+        softWrapped
+    )
+
+    fun put(column: Long, text: String, width: Long, style: TerminalStyle) {
+        clearGlyph(column, style)
+        if (width == 2L) {
+            clearGlyph(column + 1L, style)
+            cells[column + 1L] = TerminalCell(width = 0L, style = style)
+        }
+        cells[column] = TerminalCell(text, width, style)
+    }
+
+    fun erase(start: Long, end: Long, style: TerminalStyle) {
+        if (start >= end) return
+        val left = if (cells[start].width == 0L) start - 1L else start
+        val right = if (end < cells.size && cells[end].width == 0L) end + 1L else end
+        val blank = TerminalCell(style = style)
+        for (index in left..<right)
+            cells[index] = blank
+        if (right == cells.size) softWrapped = false
+    }
+
+    fun shift(start: Long, amount: Long, insert: Boolean, style: TerminalStyle) {
+        val count = clamp(amount, 0L, cells.size - start)
+        if (count == 0L) return
+        val blank = TerminalCell(style = style)
+        if (insert) {
+            var index = cells.size - 1L
+            while (index >= start + count) {
+                cells[index] = cells[index - count]
+                index -= 1L
+            }
+            for (column in start..<start + count)
+                cells[column] = blank
+        } else {
+            for (column in start..<cells.size - count)
+                cells[column] = cells[column + count]
+            for (column in cells.size - count..<cells.size)
+                cells[column] = blank
+        }
+        repair(style)
+        softWrapped = false
+    }
+
+    fun resize(columns: Long, style: TerminalStyle) {
+        if (columns == cells.size) return
+        val previous = cells
+        val blank = TerminalCell(style = style)
+        cells = MutableArray<TerminalCell>(columns) { index ->
+            if (index < previous.size) previous[index] else blank
+        }
+        repair(style)
+        softWrapped = false
+    }
+
+    private fun clearGlyph(column: Long, style: TerminalStyle) {
+        val blank = TerminalCell(style = style)
+        when (cells[column].width) {
+            case 0L -> cells[column - 1L] = blank
+            case 2L -> cells[column + 1L] = blank
+            case _ -> {}
+        }
+        cells[column] = blank
+    }
+
+    private fun repair(style: TerminalStyle) {
+        val blank = TerminalCell(style = style)
+        var index = 0L
+        while (index < cells.size) {
+            when (cells[index].width) {
+                case 2L -> {
+                    if (index + 1L < cells.size && cells[index + 1L].width == 0L)
+                        index += 1L
+                    else
+                        cells[index] = blank
+                }
+
+                case 0L -> cells[index] = blank
+                case _ -> {}
+            }
+            index += 1L
+        }
+    }
+}

@@ -1,0 +1,102 @@
+package scoop.terminal.emulator
+
+internal fun rendition(previous: TerminalStyle, command: VtCsi): TerminalStyle {
+    var foreground = previous.foreground
+    var background = previous.background
+    var flags = previous.flags
+    var index = 0L
+    while (index < command.arguments.size) {
+        val mode = command.argument(index, 0)
+        if (mode == 38 || mode == 48) {
+            val(color, end) = extendedColor(command, index)
+            when (color) {
+                case Some(val value) -> {
+                    if (mode == 38) foreground = value else background = value
+                }
+
+                case None -> {}
+            }
+            index = end + 1L
+            continue
+        }
+        when (mode) {
+            case 0 -> {
+                foreground = TerminalColor.Default
+                background = TerminalColor.Default
+                flags = 0
+            }
+
+            case 1 -> flags = flags or 1
+            case 2 -> flags = flags or 2
+            case 3 -> flags = flags or 4
+            case 4 -> flags = flags or 8
+            case 5 -> flags = flags or 16
+            case 6 -> flags = flags or 16
+            case 7 -> flags = flags or 32
+            case 8 -> flags = flags or 64
+            case 9 -> flags = flags or 128
+            case 21 -> flags = flags or 8
+            case 22 -> flags = flags and 3.inv()
+            case 23 -> flags = flags and 4.inv()
+            case 24 -> flags = flags and 8.inv()
+            case 25 -> flags = flags and 16.inv()
+            case 27 -> flags = flags and 32.inv()
+            case 28 -> flags = flags and 64.inv()
+            case 29 -> flags = flags and 128.inv()
+            case 39 -> foreground = TerminalColor.Default
+            case 49 -> background = TerminalColor.Default
+
+            case _ -> {
+                if (mode >= 30 && mode <= 37) foreground = TerminalColor.Indexed(mode - 30)
+                if (mode >= 40 && mode <= 47) background = TerminalColor.Indexed(mode - 40)
+                if (mode >= 90 && mode <= 97) foreground = TerminalColor.Indexed(mode - 82)
+                if (mode >= 100 && mode <= 107) background = TerminalColor.Indexed(mode - 92)
+            }
+        }
+        // Attributes with unsupported subparameters consume their entire parameter.
+        index = subparameterEnd(command, index) + 1L
+    }
+    return TerminalStyle(foreground, background, flags)
+}
+
+private fun subparameterEnd(command: VtCsi, index: Long): Long {
+    var end = index
+    while (end < command.separators.size && command.separators[end] == 0x3a)
+        end += 1L
+    return end
+}
+
+private fun extendedColor(command: VtCsi, start: Long): (TerminalColor?, Long) {
+    val size = command.arguments.size
+    val group = subparameterEnd(command, start)
+    val colon = group > start
+    val code = command.argument(start + 1L, -1)
+    val end = if (colon)
+        group
+    else
+        clamp(start + if (code == 2) 4L else if (code == 5) 2L else 1L, start, size - 1L)
+    val value: TerminalColor? = when (code) {
+        case 2 -> {
+            val red = command.argument(end - 2L, -1)
+            val green = command.argument(end - 1L, -1)
+            val blue = command.argument(end, -1)
+            if (end >= start + 4L && component(red) && component(green) && component(blue))
+                Some(TerminalColor.Rgb(red, green, blue))
+            else
+                None
+        }
+
+        case 5 -> {
+            val palette = command.argument(start + 2L, -1)
+            if (end >= start + 2L && component(palette))
+                Some(TerminalColor.Indexed(palette))
+            else
+                None
+        }
+
+        case _ -> None
+    }
+    return (value, end)
+}
+
+private fun component(value: Int): Boolean = value >= 0 && value <= 255

@@ -1,0 +1,45 @@
+package scoop.terminal.emulator
+
+/** A color before the host applies its terminal palette. */
+public enum TerminalColor {
+    Default, Indexed(Int), Rgb(Int, Int, Int)
+}
+
+/** Rendition information shared by both columns of a wide glyph. */
+public struct TerminalStyle(
+    val foreground: TerminalColor = TerminalColor.Default,
+    val background: TerminalColor = TerminalColor.Default,
+    val flags: Int = 0
+) {
+    public val bold: Boolean get() = (flags and 1) != 0
+    public val faint: Boolean get() = (flags and 2) != 0
+    public val italic: Boolean get() = (flags and 4) != 0
+    public val underlined: Boolean get() = (flags and 8) != 0
+    public val blink: Boolean get() = (flags and 16) != 0
+    public val inverse: Boolean get() = (flags and 32) != 0
+    public val concealed: Boolean get() = (flags and 64) != 0
+    public val struck: Boolean get() = (flags and 128) != 0
+}
+
+/** Width zero is the trailing column of a wide glyph. Empty text otherwise denotes a blank. */
+public struct TerminalCell(
+    val text: String = "",
+    val width: Long = 1L,
+    val style: TerminalStyle = TerminalStyle()
+)
+
+/** A physical row, with identity retained when the row moves through scrollback. */
+public struct TerminalLine(val id: Long, val cells: Array<TerminalCell>, val softWrapped: Boolean)
+
+public struct TerminalCursor(val row: Long, val column: Long, val visible: Boolean)
+
+/** Effects are delivered in the same order as the output that produced them. */
+public enum TerminalEffect {
+    Reply(Array<Byte>), Title(String), Bell
+}
+
+public struct TerminalUpdate(val changed: Boolean, val effects: Array<TerminalEffect>)
+
+internal fun clamp(value: Long, lower: Long, upper: Long): Long = if (value < lower)
+    lower
+else if (value > upper) upper else value

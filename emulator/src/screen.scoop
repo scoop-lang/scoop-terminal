@@ -1,0 +1,239 @@
+package scoop.terminal.emulator
+
+import scoop.collections.ArrayDeque
+
+internal class RowIds {
+    private var next = 0L
+    fun take(): Long {
+        val id = next
+        next += 1L
+        return id
+    }
+}
+
+private struct SavedPosition(
+    val row: Long,
+    val column: Long,
+    val pendingWrap: Boolean,
+    val origin: Boolean,
+    val style: TerminalStyle
+)
+
+internal class Screen(
+    var columns: Long,
+    rows: Long,
+    private val historyLimit: Long,
+    private val ids: RowIds
+) {
+    private val cells = ArrayList<ScreenRow>()
+    private val history = ArrayDeque<ScreenRow>()
+    var row = 0L
+    var column = 0L
+    var top = 0L
+    var bottom = rows - 1L
+    var pendingWrap = false
+    var origin = false
+    private var saved = SavedPosition(0L, 0L, false, false, TerminalStyle())
+
+    init {
+        for (index in 0L..<rows)
+            cells.add(blank(TerminalStyle()))
+    }
+
+    val rows: Long get() = cells.size
+    val historySize: Long get() = history.size
+    val current: ScreenRow get() = cells[row]
+
+    private fun blank(style: TerminalStyle): ScreenRow = ScreenRow(ids.take(), columns, style)
+
+    fun lines(start: Long, count: Long): Array<TerminalLine> {
+        val end = start + count
+        val snapshot = ArrayList<TerminalLine>()
+        var index = 0L
+        if (start < history.size) {
+            for (line in history) {
+                if (index >= end) break
+                if (index >= start) snapshot.add(line.snapshot())
+                index += 1L
+            }
+        }
+        index = if (start > history.size) start else history.size
+        while (index < end) {
+            snapshot.add(cells[index - history.size].snapshot())
+            index += 1L
+        }
+        return snapshot.toArray()
+    }
+
+    fun findLine(id: Long): Long? {
+        var index = 0L
+        for (line in history) {
+            if (line.id == id) return Some(index)
+            index += 1L
+        }
+        for (line in cells) {
+            if (line.id == id) return Some(index)
+            index += 1L
+        }
+        return None
+    }
+
+    fun position(targetRow: Long, targetColumn: Long) {
+        row = if (origin) clamp(top + targetRow, top, bottom) else clamp(targetRow, 0L, rows - 1L)
+        column = clamp(targetColumn, 0L, columns - 1L)
+        pendingWrap = false
+    }
+
+    fun move(rows: Long, columns: Long) {
+        val inside = row >= top && row <= bottom
+        val low = if (inside) top else 0L
+        val high = if (inside) bottom else this.rows - 1L
+        row = clamp(row + rows, low, high)
+        moveColumn(column + columns)
+    }
+
+    fun moveColumn(target: Long) {
+        column = clamp(target, 0L, columns - 1L)
+        pendingWrap = false
+    }
+
+    fun lineFeed(style: TerminalStyle) {
+        pendingWrap = false
+        if (row == bottom) scrollUp(top, bottom, 1L, style) else if (row + 1L < rows) row += 1L
+    }
+
+    fun reverseIndex(style: TerminalStyle) {
+        pendingWrap = false
+        if (row == top) scrollDown(top, bottom, 1L, style) else if (row > 0L) row -= 1L
+    }
+
+    fun setMargins(first: Long, last: Long) {
+        if (first < 0L || last >= rows || first >= last) return
+        top = first
+        bottom = last
+        position(0L, 0L)
+    }
+
+    fun save(style: TerminalStyle) {
+        saved = SavedPosition(row, column, pendingWrap, origin, style)
+    }
+
+    fun restore(): TerminalStyle {
+        origin = saved.origin
+        row = clamp(saved.row, 0L, rows - 1L)
+        column = clamp(saved.column, 0L, columns - 1L)
+        pendingWrap = saved.pendingWrap && column == columns - 1L
+        return saved.style
+    }
+
+    fun eraseDisplay(mode: Int, style: TerminalStyle) {
+        pendingWrap = false
+        when (mode) {
+            case 0 -> {
+                current.erase(column, columns, style)
+                for (index in row + 1L..<rows)
+                    cells[index].erase(0L, columns, style)
+            }
+
+            case 1 -> {
+                for (index in 0L..<row)
+                    cells[index].erase(0L, columns, style)
+                current.erase(0L, column + 1L, style)
+            }
+
+            case 2 ->
+                for (line in cells)
+                    line.erase(0L, columns, style)
+            case 3 -> history.clear()
+            case _ -> {}
+        }
+    }
+
+    fun eraseLine(mode: Int, style: TerminalStyle) {
+        pendingWrap = false
+        when (mode) {
+            case 0 -> current.erase(column, columns, style)
+            case 1 -> current.erase(0L, column + 1L, style)
+            case 2 -> current.erase(0L, columns, style)
+            case _ -> {}
+        }
+    }
+
+    fun scrollUp(
+        first: Long,
+        last: Long,
+        count: Long,
+        style: TerminalStyle,
+        record: Boolean = true
+    ) {
+        for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
+            val removed = cells.removeAt(first)
+            if (record && first == 0L) remember(removed)
+            cells.add(last, blank(style))
+        }
+    }
+
+    fun scrollDown(first: Long, last: Long, count: Long, style: TerminalStyle) {
+        for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
+            cells.removeAt(last)
+            cells.add(first, blank(style))
+        }
+    }
+
+    private fun remember(line: ScreenRow) {
+        if (historyLimit != 0L) {
+            if (history.size == historyLimit) history.removeFirst()
+            history.addLast(line)
+        }
+    }
+
+    fun resize(width: Long, height: Long, restoreHistory: Boolean, style: TerminalStyle) {
+        val previousWidth = columns
+        columns = width
+        while (cells.size > height && cells.size > row + 1L)
+            cells.removeAt(cells.size - 1L)
+        while (cells.size > height) {
+            remember(cells.removeAt(0L))
+            row -= 1L
+            shiftSaved(-1L)
+        }
+        if (restoreHistory) {
+            while (cells.size < height && history.size != 0L) {
+                cells.add(0L, history.removeLast())
+                row += 1L
+                shiftSaved(1L)
+            }
+        }
+        while (cells.size < height)
+            cells.add(blank(style))
+        for (line in cells)
+            line.resize(width, style)
+        if (height - 1L != bottom || top != 0L) {
+            top = 0L
+            bottom = height - 1L
+        }
+        column = clamp(column, 0L, width - 1L)
+        if (previousWidth != width) pendingWrap = false
+    }
+
+    private fun shiftSaved(delta: Long) {
+        saved = SavedPosition(
+            saved.row + delta,
+            saved.column,
+            saved.pendingWrap,
+            saved.origin,
+            saved.style
+        )
+    }
+
+    fun reset(style: TerminalStyle) {
+        for (index in 0L..<rows)
+            cells[index] = blank(style)
+        history.clear()
+        top = 0L
+        bottom = rows - 1L
+        origin = false
+        position(0L, 0L)
+        save(style)
+    }
+}

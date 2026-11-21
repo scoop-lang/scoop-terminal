@@ -1,0 +1,164 @@
+package scoop.terminal.emulator
+
+internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
+    if (command.intermediate != 0) return false
+    val final = command.final.toChar()
+    if (final == 'c' || final == 'n') {
+        query(terminal, command)
+        return false
+    }
+    if (final == 'h' || final == 'l') {
+        applyModes(terminal, command, final == 'h')
+        return true
+    }
+    if (command.prefix != 0) return false
+
+    val screen = terminal.screen
+    val style = terminal.style
+    val count = command.count().toLong()
+    val mode = command.argument(0L, 0)
+    when (final) {
+        case 'A' -> screen.move(-count, 0L)
+        case 'B' -> screen.move(count, 0L)
+        case 'C' -> screen.move(0L, count)
+        case 'D' -> screen.move(0L, -count)
+
+        case 'E' -> {
+            screen.move(count, 0L)
+            screen.moveColumn(0L)
+        }
+
+        case 'F' -> {
+            screen.move(-count, 0L)
+            screen.moveColumn(0L)
+        }
+
+        case 'G' -> screen.moveColumn(count - 1L)
+        case 'H' -> screen.position(count - 1L, command.count(1L).toLong() - 1L)
+        case 'I' -> terminal.tab(count, true)
+        case 'J' -> screen.eraseDisplay(mode, style)
+        case 'K' -> screen.eraseLine(mode, style)
+
+        case 'L' -> {
+            if (screen.row >= screen.top && screen.row <= screen.bottom)
+                screen.scrollDown(screen.row, screen.bottom, count, style)
+            screen.pendingWrap = false
+        }
+
+        case 'M' -> {
+            if (screen.row >= screen.top && screen.row <= screen.bottom)
+                screen.scrollUp(screen.row, screen.bottom, count, style, false)
+            screen.pendingWrap = false
+        }
+
+        case 'P' -> {
+            screen.current.shift(screen.column, count, false, style)
+            screen.pendingWrap = false
+        }
+
+        case 'S' -> screen.scrollUp(screen.top, screen.bottom, count, style)
+        case 'T' -> screen.scrollDown(screen.top, screen.bottom, count, style)
+
+        case 'X' -> {
+            screen
+                .current
+                .erase(screen.column, clamp(screen.column + count, 0L, screen.columns), style)
+            screen.pendingWrap = false
+        }
+
+        case 'Z' -> terminal.tab(count, false)
+        case '`' -> screen.moveColumn(count - 1L)
+        case 'a' -> screen.move(0L, count)
+        case 'b' -> terminal.repeat(count)
+        case 'd' -> screen.position(count - 1L, screen.column)
+        case 'e' -> screen.move(count, 0L)
+        case 'f' -> screen.position(count - 1L, command.count(1L).toLong() - 1L)
+        case 'g' -> terminal.eraseTabs(mode)
+
+        case 'm' -> {
+            terminal.style = rendition(style, command)
+            return false
+        }
+
+        case 'r' -> {
+            val last = command.argument(1L, screen.rows.toInt())
+            screen.setMargins(count - 1L, if (last == 0) screen.rows - 1L else last.toLong() - 1L)
+        }
+
+        case 's' -> terminal.saveCursor()
+        case 'u' -> terminal.restoreCursor()
+
+        case '@' -> {
+            screen.current.shift(screen.column, count, true, style)
+            screen.pendingWrap = false
+        }
+
+        case _ -> return false
+    }
+    return true
+}
+
+private fun applyModes(terminal: TerminalState, command: VtCsi, enabled: Boolean) {
+    val modes = terminal.modes
+    if (command.prefix == 0) {
+        for (value in command.arguments) {
+            if (value == 4) modes.insert = enabled
+            if (value == 20) modes.lineFeedNewLine = enabled
+        }
+        return
+    }
+    if (command.prefix != 0x3f) return
+    for (value in command.arguments) {
+        when (value) {
+            case 1 -> modes.applicationCursor = enabled
+
+            case 6 -> {
+                terminal.screen.origin = enabled
+                terminal.screen.position(0L, 0L)
+            }
+
+            case 7 -> {
+                modes.autoWrap = enabled
+                terminal.screen.pendingWrap = false
+            }
+
+            case 9 -> updateMouse(modes, value, enabled)
+            case 25 -> modes.cursorVisible = enabled
+            case 47 -> terminal.switchScreen(enabled, false, false)
+            case 66 -> modes.applicationKeypad = enabled
+            case 1000 -> updateMouse(modes, value, enabled)
+            case 1002 -> updateMouse(modes, value, enabled)
+            case 1003 -> updateMouse(modes, value, enabled)
+            case 1004 -> modes.focusEvents = enabled
+            case 1006 -> modes.sgrMouse = enabled
+            case 1047 -> terminal.switchScreen(enabled, false, true)
+            case 1048 -> if (enabled) terminal.saveCursor() else terminal.restoreCursor()
+            case 1049 -> terminal.switchScreen(enabled, true, true)
+            case 2004 -> modes.bracketedPaste = enabled
+            case _ -> {}
+        }
+    }
+}
+
+private fun updateMouse(modes: TerminalModes, mode: Int, enabled: Boolean) {
+    if (enabled)
+        modes.mouseTracking = mode
+    else if (modes.mouseTracking == mode) modes.mouseTracking = 0
+}
+
+private fun query(terminal: TerminalState, command: VtCsi) {
+    val value = command.argument(0L, 0)
+    if (command.final == 'c'.code && value == 0) {
+        if (command.prefix == 0)
+            terminal.reply("\u001b[?1;2c")
+        else if (command.prefix == 0x3e) terminal.reply("\u001b[>0;1;0c")
+    } else if (command.final == 'n'.code) {
+        if (value == 5 && command.prefix == 0) terminal.reply("\u001b[0n")
+        if (value == 6 && (command.prefix == 0 || command.prefix == 0x3f)) {
+            val screen = terminal.screen
+            val row = screen.row + 1L - if (screen.origin) screen.top else 0L
+            val prefix = if (command.prefix == 0x3f) "?" else ""
+            terminal.reply(f"\u001b[${prefix}${row};${screen.column + 1L}R")
+        }
+    }
+}

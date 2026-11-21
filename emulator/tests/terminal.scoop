@@ -1,0 +1,116 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class TerminalTest {
+    @Test
+    fun cursorQueriesUseThePositionWhenParsed() {
+        val terminal = Terminal(4L, 2L)
+        val result = terminal.write("ABCDE\u001b[6n\u001b[1;2H\u001b[6n")
+        assertTrue(result.changed)
+        assertEquals("ABCD", terminal.rowText(0L))
+        assertTrue(terminal.lines(0L, 1L)[0L].softWrapped)
+        assertEquals("E   ", terminal.rowText(1L))
+        assertEquals("\u001b[2;2R", replyText(result.effects[0L]))
+        assertEquals("\u001b[1;2R", replyText(result.effects[1L]))
+
+        val fixed = Terminal(4L, 2L)
+        fixed.write("\u001b[?7lABCDE")
+        assertEquals("ABCE", fixed.rowText(0L))
+        assertEquals("    ", fixed.rowText(1L))
+    }
+
+    @Test
+    fun extendedGraphemesAcrossReadBoundariesOccupyTheSameCells() {
+        val terminal = Terminal(12L, 2L)
+        val text = "中👩‍💻e\u0301" + "1\uFE0F\u20E3"
+        for (byte in text.toByteArray())
+            terminal.feed([byte])
+        val cells = terminal.lines(0L, 1L)[0L].cells
+        assertEquals("中", cells[0L].text)
+        assertEquals(2L, cells[0L].width)
+        assertEquals(0L, cells[1L].width)
+        assertEquals("👩‍💻", cells[2L].text)
+        assertEquals(2L, cells[2L].width)
+        assertEquals("e\u0301", cells[4L].text)
+        assertEquals(1L, cells[4L].width)
+        assertEquals(2L, cells[5L].width)
+        assertEquals(7L, terminal.cursor.column)
+    }
+
+    @Test
+    fun wideOverwritesAndResizeRepairBothColumns() {
+        val terminal = Terminal(4L, 2L)
+        terminal.write("中a\u001b[1;2HX")
+        assertEquals(" Xa ", terminal.rowText(0L))
+        terminal.write("\u001b[1;3H界")
+        terminal.resize(3L, 2L)
+        assertEquals(" X ", terminal.rowText(0L))
+        assertEquals(1L, terminal.lines(0L, 1L)[0L].cells[2L].width)
+    }
+
+    @Test
+    fun alternateScreenAndPhysicalHistoryResizeKeepRowIdentity() {
+        val terminal = Terminal(4L, 2L, 2L)
+        terminal.write("a\r\nb")
+        val identity = terminal.lines(0L, 1L)[0L].id
+        terminal.write("\r\nc\r\nd")
+        assertEquals(2L, terminal.historySize)
+        assertEquals(Some(0L), terminal.findLine(identity))
+        terminal.write("\u001b[?1049h1\r\n2\r\n3")
+        assertTrue(terminal.alternateScreen)
+        assertEquals(0L, terminal.historySize)
+        terminal.write("\u001b[?1049l")
+        assertEquals("d   ", terminal.rowText(3L))
+        terminal.resize(4L, 3L, restoreHistory = true)
+        assertEquals(1L, terminal.historySize)
+        assertEquals("b   ", terminal.rowText(1L))
+        assertEquals(2L, terminal.cursor.row)
+
+        val conPty = Terminal(4L, 2L, 2L)
+        conPty.write("a\r\nb\r\nc")
+        conPty.resize(4L, 3L, restoreHistory = false)
+        assertEquals(1L, conPty.historySize)
+        assertEquals("    ", conPty.rowText(3L))
+    }
+
+    @Test
+    fun renditionAndInputModesUseTheSameProtocolState() {
+        val terminal = Terminal(8L, 4L)
+        terminal.write("\u001b[1;38:2::10:20:30;48;5;240mX\u001b[?1;1000;1006;2004h")
+        val style = terminal.lines(0L, 1L)[0L].cells[0L].style
+        assertTrue(style.bold)
+        assertEquals(TerminalColor.Rgb(10, 20, 30), style.foreground)
+        assertEquals(TerminalColor.Indexed(240), style.background)
+        val up = TerminalInput.Key(TerminalKey.Up, TerminalModifiers())
+        val interrupt = TerminalInput
+            .Key(TerminalKey.Character('c'), TerminalModifiers(control = true))
+        assertEquals("\u001bOA", String.fromUtf8(terminal.encodeInput(up)))
+        assertEquals("\u0003", String.fromUtf8(terminal.encodeInput(interrupt)))
+        assertEquals(
+            "\u001b[200~paste\u001b[201~",
+            String.fromUtf8(terminal.encodeInput(TerminalInput.Paste("paste")))
+        )
+        val mouse = TerminalMouse(TerminalMouseAction.Press, TerminalMouseButton.Left, 2L, 3L)
+        assertEquals(
+            "\u001b[<0;4;3M",
+            String.fromUtf8(terminal.encodeInput(TerminalInput.Mouse(mouse)))
+        )
+    }
+}
+
+private fun Terminal.write(text: String): TerminalUpdate = feed(text.toByteArray())
+
+private fun Terminal.rowText(index: Long): String {
+    val text = StringBuilder()
+    for (cell in lines(index, 1L)[0L].cells) {
+        if (cell.width > 0L) text.append(if (cell.text == "") " " else cell.text)
+    }
+    return text.toString()
+}
+
+private fun replyText(effect: TerminalEffect): String = when (effect) {
+    case Reply(val bytes) -> String.fromUtf8(bytes)
+    case _ -> throw IllegalStateException(Some("expected a terminal reply"))
+}
