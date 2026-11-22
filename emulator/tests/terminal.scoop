@@ -22,6 +22,46 @@ private class TerminalTest {
     }
 
     @Test
+    fun cursorChangesAndIdenticalRedrawsKeepTheScreenRevision() {
+        val terminal = Terminal(8L, 2L)
+        terminal.write("a中b")
+        val screen = terminal.screenRevision
+        val model = terminal.revision
+        assertTrue(terminal.write("\u001b[1;2H\u001b[?25l").changed)
+        assertEquals(TerminalCursor(0L, 1L, false), terminal.cursor)
+        assertEquals(model + 1L, terminal.revision)
+        assertEquals(screen, terminal.screenRevision)
+
+        terminal.write("\u001b[?25h\u001b[Ha中b\u001b[K\n")
+        assertEquals(TerminalCursor(1L, 4L, true), terminal.cursor)
+        assertEquals(screen, terminal.screenRevision)
+        terminal.write("\u001b[H\u001b[31ma")
+        assertEquals(screen + 1L, terminal.screenRevision)
+    }
+
+    @Test
+    fun scrollingScreenSwitchesAndResizeInvalidateTheGrid() {
+        val terminal = Terminal(4L, 2L)
+        terminal.write("a\r\nb")
+        val screen = terminal.screenRevision
+        terminal.write("\n")
+        assertEquals(screen + 1L, terminal.screenRevision)
+        assertEquals(1L, terminal.historySize)
+        terminal.write("\u001b[3J")
+        assertEquals(screen + 2L, terminal.screenRevision)
+        assertEquals(0L, terminal.historySize)
+
+        terminal.write("\u001b[?1049h")
+        assertEquals(screen + 3L, terminal.screenRevision)
+        terminal.write("\u001b[?1049l")
+        assertEquals(screen + 4L, terminal.screenRevision)
+        terminal.resize(6L, 3L)
+        assertEquals(screen + 5L, terminal.screenRevision)
+        terminal.finishOutput()
+        assertEquals(screen + 5L, terminal.screenRevision)
+    }
+
+    @Test
     fun extendedGraphemesAcrossReadBoundariesOccupyTheSameCells() {
         val terminal = Terminal(12L, 2L)
         val text = "中👩‍💻e\u0301" + "1\uFE0F\u20E3"

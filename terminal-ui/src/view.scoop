@@ -40,6 +40,10 @@ private class TerminalViewElement(
     private var attachment: Disposable? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
+    private var observedScreen = session.terminal.screenRevision
+    private var observedCursor = session.terminal.cursor
+    private val screenPaint = PaintKey()
+    private var paintRevision = 0L
     private var selecting = false
     private var reported = TerminalMouseButton.NonePressed
     private var wheelRemainder = 0.0
@@ -63,6 +67,8 @@ private class TerminalViewElement(
     }
 
     private fun attach() {
+        observedScreen = session.terminal.screenRevision
+        observedCursor = session.terminal.cursor
         attachment = Some(session.attach { modelChanged() })
         refresh()
     }
@@ -91,6 +97,16 @@ private class TerminalViewElement(
     }
 
     private fun modelChanged() {
+        val terminal = session.terminal
+        val cursor = terminal.cursor
+        val moved = cursor != observedCursor
+        observedCursor = cursor
+        val screen = terminal.screenRevision
+        if (screen == observedScreen) {
+            if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
+            return
+        }
+        observedScreen = screen
         viewport.update()
         val now = MonotonicTimeSource.now()
         lastOutput = now
@@ -160,15 +176,13 @@ private class TerminalViewElement(
         val rows = clamp((size.height / metrics.height).toLong(), 0L, 32767L)
         val first = viewport.first
         val visible = terminal.lines(first, clamp(rows, 0L, terminal.rows))
-        val geometry = GridGeometry(size, metrics, first, visible, columns, rows, terminal.revision)
-        val cursor = terminal.cursor
-        val caret = if (viewport.atBottom && cursor.row < visible.size && cursor.column < columns)
-            Some(geometry.rect(cursor.row, cursor.column))
-        else
-            None
+        val geometry = GridGeometry(
+            size, metrics, first, visible, columns, rows, terminal.screenRevision,
+            first == terminal.historySize
+        )
+        paintRevision += 1L
         val frame = TerminalFrame(
-            geometry, caret, composition.revision, cursor.visible,
-            appearance, glyphs
+            geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs
         )
         try {
             frame.shape(viewport.range(), composition.text)
@@ -181,13 +195,33 @@ private class TerminalViewElement(
 
     public override fun scene(context: SceneContext, measured: TerminalFrame) {
         val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
-        area.setCaret(measured.caret, Some(measured.inputRevision))
-        context.place(area, bounds)
-        context.semantics(semantics, bounds)
-        val focused = area.isFocusActive
-        context.draw { paint -> measured.draw(paint.canvas, focused) }
         val owner = session
         val geometry = measured.geometry
+        val terminal = owner.terminal
+        // The live cursor belongs to this grid only until pending screen output changes it.
+        val cursor = if (geometry.screenRevision == terminal.screenRevision)
+            terminal.cursor
+        else
+            measured.cursor
+        val caret = geometry.caret(cursor)
+        area.setCaret(caret, Some(measured.inputRevision))
+        context.place(area, bounds)
+        context.semantics(semantics, bounds)
+        context
+            .drawLayer(screenPaint, bounds, measured.paintRevision) { paint ->
+                measured.drawScreen(paint.canvas)
+            }
+        when (caret) {
+            case Some(val rect) -> {
+                val focused = area.isFocusActive
+                context
+                    .draw { paint ->
+                        measured.drawCursor(paint.canvas, rect, cursor.visible, focused)
+                    }
+            }
+
+            case None -> {}
+        }
         context
             .onFrameComplete { completion ->
                 if (scope.isMounted &&

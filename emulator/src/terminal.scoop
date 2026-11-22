@@ -8,6 +8,8 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     public val rows: Long get() = state.screen.rows
     public val historySize: Long get() = state.screen.historySize
     public val revision: Long get() = state.revision
+    /** Version of the cells, physical rows and scrollback, independent of cursor-only output. */
+    public val screenRevision: Long get() = state.screenRevision
     public val alternateScreen: Boolean get() = state.alternateScreen
     public val mouseReporting: Boolean
         get() = state.modes.mouseTracking != 0 && state.modes.sgrMouse

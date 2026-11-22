@@ -1,8 +1,21 @@
 package scoop.terminal.emulator
 
-internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
+internal class ScreenRow(
+    val id: Long,
+    columns: Long,
+    style: TerminalStyle,
+    private val changes: ScreenChanges
+) {
     private var cells = MutableArray<TerminalCell>(columns) { TerminalCell(style = style) }
-    var softWrapped = false
+    private var wrapped = false
+    var softWrapped: Boolean
+        get() = wrapped
+        set(value) {
+            if (wrapped != value) {
+                wrapped = value
+                changes.pending = true
+            }
+        }
 
     operator fun get(column: Long): TerminalCell = cells[column]
 
@@ -13,12 +26,16 @@ internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
     )
 
     fun put(column: Long, text: String, width: Long, style: TerminalStyle) {
+        val cell = TerminalCell(text, width, style)
+        val continuation = TerminalCell(width = 0L, style = style)
+        if (cells[column] == cell && (width != 2L || cells[column + 1L] == continuation)) return
         clearGlyph(column, style)
         if (width == 2L) {
             clearGlyph(column + 1L, style)
-            cells[column + 1L] = TerminalCell(width = 0L, style = style)
+            cells[column + 1L] = continuation
         }
-        cells[column] = TerminalCell(text, width, style)
+        cells[column] = cell
+        changes.pending = true
     }
 
     fun erase(start: Long, end: Long, style: TerminalStyle) {
@@ -26,8 +43,12 @@ internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
         val left = if (cells[start].width == 0L) start - 1L else start
         val right = if (end < cells.size && cells[end].width == 0L) end + 1L else end
         val blank = TerminalCell(style = style)
-        for (index in left..<right)
-            cells[index] = blank
+        for (index in left..<right) {
+            if (cells[index] != blank) {
+                cells[index] = blank
+                changes.pending = true
+            }
+        }
         if (right == cells.size) softWrapped = false
     }
 
@@ -51,6 +72,7 @@ internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
         }
         repair(style)
         softWrapped = false
+        changes.pending = true
     }
 
     fun resize(columns: Long, style: TerminalStyle) {
@@ -62,6 +84,7 @@ internal class ScreenRow(val id: Long, columns: Long, style: TerminalStyle) {
         }
         repair(style)
         softWrapped = false
+        changes.pending = true
     }
 
     private fun clearGlyph(column: Long, style: TerminalStyle) {

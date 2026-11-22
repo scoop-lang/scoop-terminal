@@ -2,6 +2,10 @@ package scoop.terminal.emulator
 
 import scoop.collections.ArrayDeque
 
+internal class ScreenChanges {
+    var pending = false
+}
+
 internal class RowIds {
     private var next = 0L
     fun take(): Long {
@@ -23,7 +27,8 @@ internal class Screen(
     var columns: Long,
     rows: Long,
     private val historyLimit: Long,
-    private val ids: RowIds
+    private val ids: RowIds,
+    private val changes: ScreenChanges
 ) {
     private val cells = ArrayList<ScreenRow>()
     private val history = ArrayDeque<ScreenRow>()
@@ -44,7 +49,12 @@ internal class Screen(
     val historySize: Long get() = history.size
     val current: ScreenRow get() = cells[row]
 
-    private fun blank(style: TerminalStyle): ScreenRow = ScreenRow(ids.take(), columns, style)
+    private fun blank(style: TerminalStyle): ScreenRow = ScreenRow(
+        ids.take(),
+        columns,
+        style,
+        changes
+    )
 
     fun lines(start: Long, count: Long): Array<TerminalLine> {
         val end = start + count
@@ -144,7 +154,11 @@ internal class Screen(
             case 2 ->
                 for (line in cells)
                     line.erase(0L, columns, style)
-            case 3 -> history.clear()
+            case 3 ->
+                if (history.size != 0L) {
+                    history.clear()
+                    changes.pending = true
+                }
             case _ -> {}
         }
     }
@@ -170,6 +184,7 @@ internal class Screen(
             val removed = cells.removeAt(first)
             if (record && first == 0L) remember(removed)
             cells.add(last, blank(style))
+            changes.pending = true
         }
     }
 
@@ -177,6 +192,7 @@ internal class Screen(
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
             cells.removeAt(last)
             cells.add(first, blank(style))
+            changes.pending = true
         }
     }
 
@@ -214,6 +230,7 @@ internal class Screen(
         }
         column = clamp(column, 0L, width - 1L)
         if (previousWidth != width) pendingWrap = false
+        changes.pending = true
     }
 
     private fun shiftSaved(delta: Long) {
@@ -235,5 +252,6 @@ internal class Screen(
         origin = false
         position(0L, 0L)
         save(style)
+        changes.pending = true
     }
 }

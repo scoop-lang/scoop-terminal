@@ -5,8 +5,9 @@ import scoop.charset.unicodeScalarWidth
 
 internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : VtActions {
     private val ids = RowIds()
-    val main = Screen(columns, rows, historyLimit, ids)
-    val alternate = Screen(columns, rows, 0L, ids)
+    private val screenChanges = ScreenChanges()
+    val main = Screen(columns, rows, historyLimit, ids, screenChanges)
+    val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     var alternateScreen = false
     val screen: Screen get() = if (alternateScreen) alternate else main
     var style = TerminalStyle()
@@ -19,8 +20,10 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     private var lastPrinted = TerminalCell()
     private val effects = ArrayList<TerminalEffect>()
     private var changed = false
-    private var contentRevision = 0L
-    val revision: Long get() = contentRevision
+    private var modelRevision = 0L
+    private var gridRevision = 0L
+    val revision: Long get() = modelRevision
+    val screenRevision: Long get() = gridRevision
     private val parser = VtParser(this)
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -35,11 +38,20 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     }
 
     private fun update(): TerminalUpdate {
-        if (changed) contentRevision += 1L
-        val result = TerminalUpdate(changed, effects.toArray())
+        val screenChanged = updateScreenRevision()
+        val modified = changed || screenChanged
+        if (modified) modelRevision += 1L
+        val result = TerminalUpdate(modified, effects.toArray())
         effects.clear()
         changed = false
         return result
+    }
+
+    private fun updateScreenRevision(): Boolean {
+        if (!screenChanges.pending) return false
+        screenChanges.pending = false
+        gridRevision += 1L
+        return true
     }
 
     fun resize(columns: Long, rows: Long, restoreHistory: Boolean) {
@@ -50,7 +62,8 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
             if (index < previous.size) previous[index] else defaultTab(index)
         }
         combining = None
-        contentRevision += 1L
+        updateScreenRevision()
+        modelRevision += 1L
     }
 
     public override fun print(character: Char) {
@@ -236,6 +249,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
             savedCharset[1L] = 0
         }
         if (!enabled && save) restoreCursor()
+        screenChanges.pending = true
         changed = true
     }
 
