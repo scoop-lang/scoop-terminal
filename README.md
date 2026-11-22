@@ -14,4 +14,4 @@ scoop --sysroot ../scoop/sysroot test --release terminal-ui
 scoop --sysroot ../scoop/sysroot run --release demo
 ```
 
-示例启动本机默认 shell，可以在 `--` 后指定可执行文件和参数。在有桌面会话的 macOS 或 Linux GNU 环境运行 `scoop --sysroot ../scoop/sysroot test --release demo`，可验证真实窗口、PTY resize、VT 回包和退出收尾。
+示例启动本机默认 shell，可以在 `--` 后指定可执行文件和参数。在有桌面会话的 macOS、Linux GNU 或 Windows 环境运行 `scoop --sysroot ../scoop/sysroot test --release demo`，可验证真实窗口 resize 和 shell 退出后的输出。Unix 用例还检查子进程发出的 VT 光标查询。

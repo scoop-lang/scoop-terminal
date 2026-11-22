@@ -26,3 +26,7 @@ path = "src"
 [[test.sources]]
 path = "tests"
 when = { os = ["darwin", "linux"] }
+
+[[test.sources]]
+path = "test-windows"
+when = { os = "windows" }

@@ -1,0 +1,102 @@
+package scoop.terminal.demo
+
+import scoop.asyncio.*
+import scoop.collections.any
+import scoop.platform.fs.Path
+import scoop.platform.process.*
+import scoop.platform.system.OsString
+import scoop.terminal.emulator.TerminalInput
+import scoop.test.*
+import scoop.text.trim
+import scoop.time.Duration
+import scoop.ui.*
+import scoop.ui.terminal.*
+import scoop.window.*
+import scoop.window.asyncio.*
+
+@Test
+private class ConPtyWindowTest {
+    @Test
+    fun windowResizesAndRetainsWindowsShellOutput() {
+        val probe = ConPtyWindowProbe()
+        UiHost { host, active, event -> probe.onEvent(host, active, event) }
+            .use { host -> Application().runWithAsyncio(host) }
+        assertTrue(probe.finished)
+    }
+}
+
+private class ConPtyWindowProbe {
+    var finished = false
+
+    fun onEvent(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed ->
+                currentApplicationScope()
+                    .launch {
+                        try {
+                            this @ConPtyWindowProbe.exercise(host, active)
+                        } finally {
+                            active.requestExit()
+                        }
+                    }
+            else -> {}
+        }
+    }
+
+    private suspend fun exercise(host: UiHost, active: ActiveApplication) {
+        val window = active.createWindow(windowAttributes { size = LogicalSize(480.0, 300.0) })
+        val child = command(Path.fromString("cmd.exe")) {
+            arg(OsString.fromString("/d"))
+            arg(OsString.fromString("/q"))
+        }
+        val session = TerminalEmulatorSession.start(child, searchPath = true)
+        try {
+            host.attach(window, { scope -> ConPtyTestView(session, scope) })
+            awaitWindowsFrame("first accepted layout") { session.terminal.columns != 80L }
+            val oldColumns = session.terminal.columns
+            window.requestSize(LogicalSize(650.0, 420.0))
+            awaitWindowsFrame("resized layout") { session.terminal.columns > oldColumns }
+            session.send(TerminalInput.Text("echo scoop-windows-roundtrip&exit /b 17\r"))
+            awaitWindowsFrame("command exit and output EOF") {
+                when (session.state) {
+                    case Running -> false
+                    else -> true
+                }
+            }
+            when (session.state) {
+                case Exited(val status) -> assertEquals(ExitStatus.Exited(17), status)
+                case Failed(val error) -> throw error
+                else -> fail(Some("expected cmd.exe to exit"))
+            }
+            assertTrue(
+                session
+                    .terminal
+                    .lines(0L, session.terminal.historySize + session.terminal.rows)
+                    .any { line ->
+                        val text = StringBuilder()
+                        for (cell in line.cells)
+                            text.append(if (cell.text == "") " " else cell.text)
+                        text.toString().trim() == "scoop-windows-roundtrip"
+                    }
+            )
+            finished = true
+        } finally {
+            session.close()
+        }
+    }
+}
+
+private class ConPtyTestView(private val session: TerminalEmulatorSession, scope: ComponentScope) :
+    Component(scope) {
+    public override fun render(): View = terminalView(session)
+}
+
+private suspend fun awaitWindowsFrame(label: String, ready: () -> Boolean) {
+    val loop = currentEventLoop()
+    var attempts = 0L
+    while (!ready()) {
+        assertTrue(attempts < 250L, Some("timed out waiting for " + label))
+        attempts += 1L
+        loop.sleep(Duration.milliseconds(20L))
+    }
+}
