@@ -69,7 +69,7 @@ private class DemoApplication(private val child: Command) {
 
 private class Demo(private val session: TerminalEmulatorSession, scope: ComponentScope) :
     Component(scope) {
-    public override fun render(): View = terminalView(session)
+    public override fun render(): View = terminalView(session, autoFocus = true)
 }
 
 private fun demoCommand(): Command {

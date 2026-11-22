@@ -27,6 +27,7 @@ private class ConPtyWindowTest {
 
 private class ConPtyWindowProbe {
     var finished = false
+    private var textInputEnabled = false
 
     fun onEvent(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
         when (event) {
@@ -39,6 +40,8 @@ private class ConPtyWindowProbe {
                             active.requestExit()
                         }
                     }
+            case Window(_, WindowEvent.TextInput(TextInputEvent.Enabled(_))) ->
+                textInputEnabled = true
             else -> {}
         }
     }
@@ -52,7 +55,10 @@ private class ConPtyWindowProbe {
         val session = TerminalEmulatorSession.start(child, searchPath = true)
         try {
             host.attach(window, { scope -> ConPtyTestView(session, scope) })
-            awaitWindowsFrame("first accepted layout") { session.terminal.columns != 80L }
+            window.requestFocus()
+            awaitWindowsFrame("first accepted layout and terminal focus") {
+                session.terminal.columns != 80L && textInputEnabled
+            }
             val oldColumns = session.terminal.columns
             window.requestSize(LogicalSize(650.0, 420.0))
             awaitWindowsFrame("resized layout") { session.terminal.columns > oldColumns }
@@ -88,7 +94,7 @@ private class ConPtyWindowProbe {
 
 private class ConPtyTestView(private val session: TerminalEmulatorSession, scope: ComponentScope) :
     Component(scope) {
-    public override fun render(): View = terminalView(session)
+    public override fun render(): View = terminalView(session, autoFocus = true)
 }
 
 private suspend fun awaitWindowsFrame(label: String, ready: () -> Boolean) {

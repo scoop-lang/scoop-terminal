@@ -17,18 +17,20 @@ private val outputQuietInterval = Duration.milliseconds(24L)
 
 private val outputRefreshInterval = Duration.milliseconds(96L)
 
-/** Embeds one active view of the session in a Scoop UI tree. */
+/** Embeds one active view of the session, optionally focusing it on its first placement. */
 public fun terminalView(
     session: TerminalEmulatorSession,
-    appearance: TerminalAppearance = TerminalAppearance()
+    appearance: TerminalAppearance = TerminalAppearance(),
+    autoFocus: Boolean = false
 ): View = element(
-    TerminalViewProps(session, appearance),
+    TerminalViewProps(session, appearance, autoFocus),
     { props, scope -> TerminalViewElement(props, scope) }
 )
 
 private struct TerminalViewProps(
     val session: TerminalEmulatorSession,
-    val appearance: TerminalAppearance
+    val appearance: TerminalAppearance,
+    val autoFocus: Boolean
 )
 
 private class TerminalViewElement(
@@ -57,19 +59,20 @@ private class TerminalViewElement(
     private val composition = TerminalComposition(
         scope.nativeWindow, area,
         { value -> session.send(TerminalInput.Text(value)) },
-        { scope.requestLayout() }
+        { if (scope.isMounted) scope.requestLayout() }
     )
 
     public override fun onMount() {
         area.scope.defaultAction = area.scope.handler
         semantics.bindFocus(Some(focus))
         attach()
+        if (props.value.autoFocus) focus.handle.requestFocus()
     }
 
     private fun attach() {
         observedScreen = session.terminal.screenRevision
         observedCursor = session.terminal.cursor
-        attachment = Some(session.attach { modelChanged() })
+        attachment = Some(session.attach { if (scope.isMounted) modelChanged() })
         refresh()
     }
 
@@ -244,7 +247,8 @@ private class TerminalViewElement(
 
                 case FocusChanged(val active) -> {
                     session.send(TerminalInput.Focus(active))
-                    scope.requestFrame()
+                    // The surface also delivers focus loss during retirement.
+                    if (scope.isMounted) scope.requestFrame()
                 }
 
                 else -> {}
