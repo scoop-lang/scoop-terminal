@@ -1,0 +1,124 @@
+package scoop.ui.terminal
+
+import scoop.collections.HashMap
+import scoop.graphics.Color
+import scoop.graphics.text.*
+import scoop.terminal.emulator.TerminalCell
+
+internal struct CellMetrics(val width: Double, val height: Double, val baseline: Double)
+
+private const val GLYPH_CACHE_LIMIT = 1024L
+
+/** The view and its measured layouts keep this font snapshot alive. */
+internal class TerminalGlyphCache(
+    private val fonts: FontCollection,
+    private val appearance: TerminalAppearance
+) {
+    private val fontRevision = fonts.revision
+    private val layouts = HashMap<GlyphKey, TextLayout>()
+    private var references = 1L
+
+    val metrics: CellMetrics = shapeText(fonts, "M", appearance, appearance.foreground)
+        .use { layout ->
+            CellMetrics(layout.maxIntrinsicWidth, layout.size.height, layout.alphabeticBaseline)
+        }
+
+    fun canReuse(fonts: FontCollection, appearance: TerminalAppearance): Boolean = this.fonts ===
+        fonts &&
+        fontRevision ==
+        fonts.revision &&
+        this.appearance.families ===
+        appearance.families &&
+        this.appearance.fontSize ==
+        appearance.fontSize &&
+        this.appearance.foreground ==
+        appearance.foreground &&
+        layouts.size <
+        GLYPH_CACHE_LIMIT
+
+    fun layout(cell: TerminalCell, ink: Color): TextLayout {
+        val key = GlyphKey(
+            cell.text, cell.style.bold, cell.style.italic, ink.red.toBits(),
+            ink.green.toBits(), ink.blue.toBits(), ink.alpha.toBits()
+        )
+        when (layouts[key]) {
+            case Some(val cached) -> return cached
+            case None -> {}
+        }
+        val value = shapeText(fonts, cell.text, appearance, ink, key.bold, key.italic)
+        layouts[key] = value
+        return value
+    }
+
+    fun shapePreedit(text: String): TextLayout = shapeText(
+        fonts,
+        text,
+        appearance,
+        appearance.foreground
+    )
+
+    fun retain() {
+        references += 1L
+    }
+
+    fun release() {
+        references -= 1L
+        if (references != 0L) return
+        for ((_, layout) in layouts)
+            layout.close()
+        layouts.clear()
+    }
+}
+
+private struct GlyphKey(
+    val text: String,
+    val bold: Boolean,
+    val italic: Boolean,
+    val red: Long,
+    val green: Long,
+    val blue: Long,
+    val alpha: Long
+) : Equals<GlyphKey>, Hash {
+    public override operator fun equals(other: GlyphKey): Boolean = text ==
+        other.text &&
+        bold ==
+        other.bold &&
+        italic ==
+        other.italic &&
+        red ==
+        other.red &&
+        green ==
+        other.green &&
+        blue ==
+        other.blue &&
+        alpha ==
+        other.alpha
+
+    public override fun hash(): Long {
+        var hash = text.hash()
+        hash = hash * 31L + bold.hash()
+        hash = hash * 31L + italic.hash()
+        hash = hash * 31L + red.hash()
+        hash = hash * 31L + green.hash()
+        hash = hash * 31L + blue.hash()
+        return hash * 31L + alpha.hash()
+    }
+}
+
+private fun shapeText(
+    fonts: FontCollection,
+    value: String,
+    appearance: TerminalAppearance,
+    foreground: Color,
+    bold: Boolean = false,
+    italic: Boolean = false
+): TextLayout {
+    val style = textStyle {
+        families = appearance.families
+        fontSize = appearance.fontSize
+        color = foreground
+        weight = if (bold) 700 else 400
+        slant = if (italic) FontSlant.Italic else FontSlant.Upright
+    }
+    return Paragraph(fonts, value, style).use { paragraph -> paragraph.layoutUnwrapped() }
+}

@@ -1,0 +1,32 @@
+package scoop.ui.terminal
+
+import scoop.graphics.Color
+import scoop.graphics.text.FontCollection
+import scoop.terminal.emulator.TerminalCell
+import scoop.terminal.emulator.TerminalStyle
+import scoop.test.*
+
+@Test
+private class TerminalGlyphCacheTest {
+    @Test
+    fun sharesGlyphsWithTheSameInkAndKeepsRetainedFramesAlive() {
+        FontCollection()
+            .use { fonts ->
+                val cache = TerminalGlyphCache(fonts, TerminalAppearance())
+                val cell = TerminalCell("A", 1L, TerminalStyle())
+                val plain = cache.layout(cell, Color.White)
+                cache.retain()
+                cache.release()
+                try {
+                    assertTrue(plain === cache.layout(cell, Color.White))
+                    assertTrue(plain !== cache.layout(cell, Color.Black))
+                    val bold = TerminalCell("A", 1L, TerminalStyle(flags = 1))
+                    assertTrue(plain !== cache.layout(bold, Color.White))
+                    assertTrue(!plain.isClosed)
+                } finally {
+                    cache.release()
+                }
+                assertTrue(plain.isClosed)
+            }
+    }
+}

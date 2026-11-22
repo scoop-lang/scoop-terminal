@@ -1,13 +1,21 @@
 package scoop.ui.terminal
 
 import scoop.graphics.*
+import scoop.graphics.text.FontCollection
 import scoop.platform.system.OperatingSystem
 import scoop.platform.system.operatingSystem
+import scoop.platform.time.MonotonicInstant
+import scoop.platform.time.MonotonicTimeSource
 import scoop.surface.*
 import scoop.terminal.emulator.*
+import scoop.time.Duration
 import scoop.ui.*
 import scoop.window.*
 import scoop.window.accessibility.*
+
+private val outputQuietInterval = Duration.milliseconds(24L)
+
+private val outputRefreshInterval = Duration.milliseconds(96L)
 
 /** Embeds one active view of the session in a Scoop UI tree. */
 public fun terminalView(
@@ -31,6 +39,7 @@ private class TerminalViewElement(
     private var viewport = TerminalViewport(session.terminal)
     private var attachment: Disposable? = None
     private var accepted: GridGeometry? = None
+    private var glyphCache: TerminalGlyphCache? = None
     private var selecting = false
     private var reported = TerminalMouseButton.NonePressed
     private var wheelRemainder = 0.0
@@ -38,6 +47,9 @@ private class TerminalViewElement(
         .createArea(focusable = true, textInput = true) { context, event -> route(context, event) }
     private val focus = scope.focusTarget(area)
     private val semantics = scope.semantics(SemanticRole.Text)
+    private var lastOutput = MonotonicInstant(0L, 0)
+    private var outputRefreshLimit: MonotonicInstant? = None
+    private val refreshDeadline = scope.createDeadline { refreshOutput() }
     private val composition = TerminalComposition(
         scope.nativeWindow, area,
         { value -> session.send(TerminalInput.Text(value)) },
@@ -52,7 +64,7 @@ private class TerminalViewElement(
 
     private fun attach() {
         attachment = Some(session.attach { modelChanged() })
-        modelChanged()
+        refresh()
     }
 
     public override fun update(): UiInvalidation {
@@ -74,14 +86,38 @@ private class TerminalViewElement(
         attachment?.dispose()
         attachment = None
         accepted = None
+        glyphCache?.release()
+        glyphCache = None
     }
 
     private fun modelChanged() {
         viewport.update()
-        refresh()
+        val now = MonotonicTimeSource.now()
+        lastOutput = now
+        if (outputRefreshLimit == None) {
+            outputRefreshLimit = Some(now + outputRefreshInterval)
+            refreshDeadline.schedule(now + outputQuietInterval)
+        }
+    }
+
+    private fun refreshOutput() {
+        // Coalesce a burst until it quiets down, with a deadline for sustained output.
+        val limit = outputRefreshLimit ?: return
+        val quiet = lastOutput + outputQuietInterval
+        val next = if (quiet < limit) quiet else limit
+        if (MonotonicTimeSource.now() < next) {
+            refreshDeadline.schedule(next)
+        } else {
+            outputRefreshLimit = None
+            refresh()
+        }
     }
 
     private fun refresh() {
+        if (outputRefreshLimit != None) {
+            outputRefreshLimit = None
+            refreshDeadline.cancel()
+        }
         val visible = viewport.visibleText()
         semantics
             .update(
@@ -94,13 +130,25 @@ private class TerminalViewElement(
         scope.requestLayout()
     }
 
+    private fun glyphs(fonts: FontCollection, appearance: TerminalAppearance): TerminalGlyphCache {
+        val previous = glyphCache
+        when (previous) {
+            case Some(val value) -> if (value.canReuse(fonts, appearance)) return value
+            case None -> {}
+        }
+        val next = TerminalGlyphCache(fonts, appearance)
+        glyphCache = Some(next)
+        previous?.release()
+        return next
+    }
+
     public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
         TerminalFrame
     > {
         val appearance = props.value.appearance
-        val fonts = scope.defaultFonts
+        val glyphs = glyphs(scope.defaultFonts, appearance)
         val terminal = session.terminal
-        val metrics = measureCell(fonts, appearance)
+        val metrics = glyphs.metrics
         val size = constraints
             .constrain(
                 Size(
@@ -120,7 +168,7 @@ private class TerminalViewElement(
             None
         val frame = TerminalFrame(
             geometry, caret, composition.revision, cursor.visible,
-            appearance, fonts
+            appearance, glyphs
         )
         try {
             frame.shape(viewport.range(), composition.text)

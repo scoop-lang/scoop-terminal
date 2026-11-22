@@ -1,11 +1,8 @@
 package scoop.ui.terminal
 
-import scoop.collections.HashMap
 import scoop.graphics.*
 import scoop.graphics.text.*
 import scoop.terminal.emulator.*
-
-internal struct CellMetrics(val width: Double, val height: Double, val baseline: Double)
 
 internal struct GridGeometry(
     val size: Size,
@@ -46,12 +43,15 @@ internal class TerminalFrame(
     val inputRevision: Long,
     private val showCursor: Boolean,
     private val appearance: TerminalAppearance,
-    private val fonts: FontCollection
+    private val glyphs: TerminalGlyphCache
 ) : Closeable {
-    private val layouts = HashMap<String, TextLayout>()
     private val cells = ArrayList<PaintCell>()
     private val selection = ArrayList<Rect>()
     private var preedit: TextLayout? = None
+
+    init {
+        glyphs.retain()
+    }
 
     fun shape(range: SelectionRange?, composition: String) {
         var index = 0L
@@ -80,8 +80,7 @@ internal class TerminalFrame(
         }
         if (composition != "") {
             when (caret) {
-                case Some(_) ->
-                    preedit = Some(shapeText(fonts, composition, appearance, appearance.foreground))
+                case Some(_) -> preedit = Some(glyphs.shapePreedit(composition))
                 case None -> {}
             }
         }
@@ -100,7 +99,7 @@ internal class TerminalFrame(
         else
             fullInk
         val visible = cell.text != "" && !cell.style.concealed
-        val glyph = if (visible) Some(layout(cell, ink)) else None
+        val glyph = if (visible) Some(glyphs.layout(cell, ink)) else None
         if (visible || paper != appearance.background || cell.style.underlined || cell.style.struck)
             cells
                 .add(
@@ -109,20 +108,6 @@ internal class TerminalFrame(
                         cell.style.underlined, cell.style.struck
                     )
                 )
-    }
-
-    private fun layout(cell: TerminalCell, ink: Color): TextLayout {
-        val key = f"${cell.style.flags}:${ink.red}:${ink.green}:${ink.blue}:${ink.alpha}:${
-            cell.text
-        }"
-        val cached = layouts[key]
-        when (cached) {
-            case Some(val value) -> return value
-            case None -> {}
-        }
-        val value = shapeText(fonts, cell.text, appearance, ink, cell.style.bold, cell.style.italic)
-        layouts[key] = value
-        return value
     }
 
     fun draw(canvas: Canvas, focused: Boolean) {
@@ -209,33 +194,10 @@ internal class TerminalFrame(
     }
 
     public override fun close() {
-        preedit?.close()
-        for ((key, layout) in layouts)
-            layout.close()
-        layouts.clear()
-    }
-}
-
-internal fun measureCell(fonts: FontCollection, appearance: TerminalAppearance): CellMetrics =
-    shapeText(fonts, "M", appearance, appearance.foreground)
-        .use { layout ->
-            CellMetrics(layout.maxIntrinsicWidth, layout.size.height, layout.alphabeticBaseline)
+        try {
+            preedit?.close()
+        } finally {
+            glyphs.release()
         }
-
-private fun shapeText(
-    fonts: FontCollection,
-    value: String,
-    appearance: TerminalAppearance,
-    foreground: Color,
-    bold: Boolean = false,
-    italic: Boolean = false
-): TextLayout {
-    val style = textStyle {
-        families = appearance.families
-        fontSize = appearance.fontSize
-        color = foreground
-        weight = if (bold) 700 else 400
-        slant = if (italic) FontSlant.Italic else FontSlant.Upright
     }
-    return Paragraph(fonts, value, style).use { paragraph -> paragraph.layoutUnwrapped() }
 }
