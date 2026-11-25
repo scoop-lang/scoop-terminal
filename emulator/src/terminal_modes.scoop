@@ -8,6 +8,8 @@ internal class TerminalModes {
     var applicationCursor = false
     var applicationKeypad = false
     var cursorVisible = true
+    var cursorShape = TerminalCursorShape.Block
+    var cursorBlink = true
     var mouseTracking = 0
     var sgrMouse = false
     var pixelMouse = false

@@ -38,7 +38,10 @@ public class Terminal public constructor(
     public val cursor: TerminalCursor
         get() {
             val screen = state.screen
-            return TerminalCursor(screen.row, screen.column, state.modes.cursorVisible)
+            return TerminalCursor(
+                screen.row, screen.column, state.modes.cursorVisible,
+                state.modes.cursorShape, state.modes.cursorBlink
+            )
         }
 
     /** Processes output in order, retaining incomplete UTF-8, escape sequences and graphemes. */

@@ -1,13 +1,74 @@
 package scoop.ui.terminal
 
-import scoop.graphics.Color
+import scoop.graphics.*
 import scoop.graphics.text.FontCollection
 import scoop.terminal.emulator.TerminalCell
 import scoop.terminal.emulator.TerminalStyle
+import scoop.terminal.emulator.Terminal
+import scoop.terminal.emulator.TerminalCursorShape
 import scoop.test.*
 
 @Test
 private class TerminalGlyphCacheTest {
+    @Test
+    fun coloredUnderlineAndCursorBlinkAreIndependentRasterLayers() {
+        val terminal = Terminal(2L, 1L)
+        terminal.feed("\u001b[4:2;58;2;255;0;0;5m \u001b[0m\r".toByteArray())
+        val appearance = TerminalAppearance(background = Color.Black, cursor = Color.White)
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, appearance)
+                val reading = terminal.reading
+                val geometry = GridGeometry(
+                    Size(20.0, 16.0), CellMetrics(10.0, 16.0, 12.0),
+                    0L, reading.lines(0L, 1L), 2L, 1L, reading.screenRevision, true, reading
+                )
+                val frame = TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, glyphs)
+                try {
+                    frame.shape(None, "")
+                    assertTrue(frame.hasBlink)
+                    RasterSurface(20, 16)
+                        .use { surface ->
+                            surface.draw { canvas -> frame.drawScreen(canvas, true) }
+                            val painted = surface.readPixels()
+                            assertEquals(255, painted[(15L * 20L + 5L) * 4L].toInt() and 255)
+                            assertEquals(255, painted[(13L * 20L + 5L) * 4L].toInt() and 255)
+                            surface.draw { canvas -> frame.drawScreen(canvas, false) }
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            val rect = geometry.caret(reading.cursor)!!
+                            val cursor = reading
+                                .cursor.{shape: TerminalCursorShape.Underline, blink: true}
+                            surface
+                                .draw { canvas ->
+                                    frame.drawCursor(canvas, rect, cursor, true, false)
+                                }
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            surface
+                                .draw { canvas ->
+                                    frame.drawCursor(canvas, rect, cursor, true, true)
+                                }
+                            assertEquals(
+                                255,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(8L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                        }
+                } finally {
+                    frame.close()
+                    glyphs.release()
+                }
+            }
+    }
+
     @Test
     fun narrowWideCellsShapeThePlaceholderAndKeepOriginalText() {
         FontCollection()

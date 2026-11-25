@@ -17,7 +17,7 @@
 | M1 | Unicode 17 字素/宽度、创建时 ambiguous 策略、变体序列与零宽前缀 | 已实现，核心 46 项测试通过 |
 | M1 | 运行中修改宽度策略的全量重排 | 待实现 |
 | M1 | 传统键鼠、1016 像素鼠标、水平滚轮 | 已实现，5 项输入协议用例通过 |
-| M1 | 样式与光标 | 待实现 |
+| M1 | 下划线类型/颜色、光标形状、独立闪烁 | 已实现，4 项协议及 3 项绘制/缓存用例通过 |
 | M1 | 能力查询、准确的 capability 表、terminfo | 待实现 |
 | M2 | 同步输出 2026、期限、流顺序与有序效果 | 待实现 |
 | M2 | OSC 颜色查询/设置/重置 | 待实现 |
@@ -43,6 +43,8 @@
 - 工具链：`~/.scoop/bin/scoop`，`0.0.0-dev.20261126`，编译器 `bb295704d`。
 - `scoop --sysroot ../scoop/sysroot test --release emulator`：46/46 通过，包括 8 项边距/编辑/复位、6 项解析、3 项存储、11 项 reflow、5 项快照及 6 项 Unicode 宽度测试。
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter InputProtocolTest`：5/5 通过，覆盖 Ctrl 别名、修饰功能键/方向键、小键盘、X10/传统原始字节、跟踪/编码独立切换、1016 像素及横向滚轮。视图从已接受布局的设备缩放计算像素坐标；未接受尺寸或 DPI 不用于鼠标报告。
+- `scoop --sysroot ../scoop/sysroot test --release emulator --filter RenditionTest`：4/4 通过，覆盖 4:0..5、21/24、58/59、无效色彩空间、DECSCUSR、光标可见性/闪烁独立及保存恢复。
+- `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。
 - `scoop test --release emulator --filter ParserTest`：6/6 通过，包括每个字节边界的切分、冒号子参数/中间字节、CAN/SUB/EOF、非法 DCS header、OSC 精确上限与超限整串丢弃。

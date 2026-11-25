@@ -4,14 +4,18 @@ internal fun rendition(previous: TerminalStyle, command: VtCsi): TerminalStyle {
     var foreground = previous.foreground
     var background = previous.background
     var flags = previous.flags
+    var underline = previous.underlineStyle
+    var underlineColor = previous.underlineColor
     var index = 0L
     while (index < command.arguments.size) {
         val mode = command.argument(index, 0)
-        if (mode == 38 || mode == 48) {
+        if (mode == 38 || mode == 48 || mode == 58) {
             val(color, end) = extendedColor(command, index)
             when (color) {
                 case Some(val value) -> {
-                    if (mode == 38) foreground = value else background = value
+                    if (mode == 38)
+                        foreground = value
+                    else if (mode == 48) background = value else underlineColor = value
                 }
 
                 case None -> {}
@@ -24,27 +28,46 @@ internal fun rendition(previous: TerminalStyle, command: VtCsi): TerminalStyle {
                 foreground = TerminalColor.Default
                 background = TerminalColor.Default
                 flags = 0
+                underline = TerminalUnderline.None
+                underlineColor = TerminalColor.Default
             }
 
             case 1 -> flags = flags or 1
             case 2 -> flags = flags or 2
             case 3 -> flags = flags or 4
-            case 4 -> flags = flags or 8
+
+            case 4 -> {
+                val kind = if (subparameterEnd(command, index) == index)
+                    1
+                else
+                    command.argument(index + 1L, 1)
+                when (kind) {
+                    case 0 -> underline = TerminalUnderline.None
+                    case 1 -> underline = TerminalUnderline.Single
+                    case 2 -> underline = TerminalUnderline.Double
+                    case 3 -> underline = TerminalUnderline.Curly
+                    case 4 -> underline = TerminalUnderline.Dotted
+                    case 5 -> underline = TerminalUnderline.Dashed
+                    case _ -> {}
+                }
+            }
+
             case 5 -> flags = flags or 16
             case 6 -> flags = flags or 16
             case 7 -> flags = flags or 32
             case 8 -> flags = flags or 64
             case 9 -> flags = flags or 128
-            case 21 -> flags = flags or 8
+            case 21 -> underline = TerminalUnderline.Double
             case 22 -> flags = flags and 3.inv()
             case 23 -> flags = flags and 4.inv()
-            case 24 -> flags = flags and 8.inv()
+            case 24 -> underline = TerminalUnderline.None
             case 25 -> flags = flags and 16.inv()
             case 27 -> flags = flags and 32.inv()
             case 28 -> flags = flags and 64.inv()
             case 29 -> flags = flags and 128.inv()
             case 39 -> foreground = TerminalColor.Default
             case 49 -> background = TerminalColor.Default
+            case 59 -> underlineColor = TerminalColor.Default
 
             case _ -> {
                 if (mode >= 30 && mode <= 37) foreground = TerminalColor.Indexed(mode - 30)
@@ -56,7 +79,8 @@ internal fun rendition(previous: TerminalStyle, command: VtCsi): TerminalStyle {
         // Attributes with unsupported subparameters consume their entire parameter.
         index = subparameterEnd(command, index) + 1L
     }
-    return TerminalStyle(foreground, background, flags)
+    flags = if (underline == TerminalUnderline.None) flags and 8.inv() else flags or 8
+    return TerminalStyle(foreground, background, flags, underline, underlineColor)
 }
 
 private fun subparameterEnd(command: VtCsi, index: Long): Long {
@@ -80,7 +104,11 @@ private fun extendedColor(command: VtCsi, start: Long): (TerminalColor?, Long) {
             val red = command.argument(end - 2L, -1)
             val green = command.argument(end - 1L, -1)
             val blue = command.argument(end, -1)
-            if (end >= start + 4L && component(red) && component(green) && component(blue))
+            val correctLength = end ==
+                start +
+                4L ||
+                (colon && end == start + 5L && command.argument(start + 2L, 0) == 0)
+            if (correctLength && component(red) && component(green) && component(blue))
                 Some(TerminalColor.Rgb(red, green, blue))
             else
                 None
@@ -88,7 +116,7 @@ private fun extendedColor(command: VtCsi, start: Long): (TerminalColor?, Long) {
 
         case 5 -> {
             val palette = command.argument(start + 2L, -1)
-            if (end >= start + 2L && component(palette))
+            if (end == start + 2L && component(palette))
                 Some(TerminalColor.Indexed(palette))
             else
                 None

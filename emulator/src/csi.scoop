@@ -1,6 +1,15 @@
 package scoop.terminal.emulator
 
 internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
+    if (command.intermediate == ' '.code && command.final == 'q'.code && command.prefix == 0) {
+        val value = command.argument(0L, 0)
+        if (value < 0 || value > 6) return false
+        terminal.modes.cursorShape = if (value <= 2)
+            TerminalCursorShape.Block
+        else if (value <= 4) TerminalCursorShape.Underline else TerminalCursorShape.Bar
+        terminal.modes.cursorBlink = value == 0 || value % 2 == 1
+        return true
+    }
     if (command.intermediate == '!'.code && command.final == 'p'.code && command.prefix == 0) {
         terminal.softReset()
         return true
@@ -137,6 +146,7 @@ private fun applyModes(terminal: TerminalState, command: VtCsi, enabled: Boolean
             }
 
             case 9 -> updateMouse(modes, value, enabled)
+            case 12 -> modes.cursorBlink = enabled
             case 25 -> modes.cursorVisible = enabled
             case 47 -> terminal.switchScreen(enabled, false, false)
             case 66 -> modes.applicationKeypad = enabled

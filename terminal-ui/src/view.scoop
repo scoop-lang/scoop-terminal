@@ -57,6 +57,11 @@ private class TerminalViewElement(
     private var lastOutput = MonotonicInstant(0L, 0)
     private var outputRefreshLimit: MonotonicInstant? = None
     private val refreshDeadline = scope.createDeadline { refreshOutput() }
+    private var cursorBlinkVisible = true
+    private var textBlinkVisible = true
+    private val cursorBlinkDeadline = scope.createDeadline { blinkCursor() }
+    private val textBlinkDeadline = scope.createDeadline { blinkText() }
+    private var visibleTextBlinks = false
     private val composition = TerminalComposition(
         scope.nativeWindow, area,
         { value -> session.send(TerminalInput.Text(value)) },
@@ -67,6 +72,8 @@ private class TerminalViewElement(
         area.scope.defaultAction = area.scope.handler
         semantics.bindFocus(Some(focus))
         attach()
+        resetCursorBlink()
+        textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
         if (props.value.autoFocus) focus.handle.requestFocus()
     }
 
@@ -93,6 +100,8 @@ private class TerminalViewElement(
     }
 
     public override fun onUnmount() {
+        cursorBlinkDeadline.cancel()
+        textBlinkDeadline.cancel()
         attachment?.dispose()
         attachment = None
         accepted = None
@@ -104,6 +113,7 @@ private class TerminalViewElement(
         val terminal = session.reading
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
+        if (moved) resetCursorBlink()
         observedCursor = cursor
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
@@ -118,6 +128,25 @@ private class TerminalViewElement(
             outputRefreshLimit = Some(now + outputRefreshInterval)
             refreshDeadline.schedule(now + outputQuietInterval)
         }
+    }
+
+    private fun resetCursorBlink() {
+        cursorBlinkVisible = true
+        cursorBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
+    }
+
+    private fun blinkCursor() {
+        if (!scope.isMounted) return
+        cursorBlinkVisible = !cursorBlinkVisible
+        if (area.isFocusActive && session.reading.cursor.blink) scope.requestFrame()
+        cursorBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
+    }
+
+    private fun blinkText() {
+        if (!scope.isMounted) return
+        textBlinkVisible = !textBlinkVisible
+        if (area.isFocusActive && visibleTextBlinks) scope.requestFrame()
+        textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
     }
 
     private fun refreshOutput() {
@@ -211,16 +240,23 @@ private class TerminalViewElement(
         area.setCaret(caret, Some(measured.inputRevision))
         context.place(area, bounds)
         context.semantics(semantics, bounds)
+        visibleTextBlinks = measured.hasBlink
+        val textVisible = !area.isFocusActive || textBlinkVisible || !measured.hasBlink
         context
-            .drawLayer(screenPaint, bounds, measured.paintRevision) { paint ->
-                measured.drawScreen(paint.canvas)
-            }
+            .drawLayer(
+                screenPaint,
+                bounds,
+                measured.paintRevision * 2L + if (textVisible) 1L else 0L
+            ) { paint -> measured.drawScreen(paint.canvas, textVisible) }
         when (caret) {
             case Some(val rect) -> {
                 val focused = area.isFocusActive
+                val blinkVisible = cursorBlinkVisible
+                val glyph = if (focused) measured.cursorGlyph(cursor) else None
                 context
                     .draw { paint ->
-                        measured.drawCursor(paint.canvas, rect, cursor.visible, focused)
+                        measured
+                            .drawCursor(paint.canvas, rect, cursor, focused, blinkVisible, glyph)
                     }
             }
 
@@ -249,7 +285,10 @@ private class TerminalViewElement(
                 case FocusChanged(val active) -> {
                     session.send(TerminalInput.Focus(active))
                     // The surface also delivers focus loss during retirement.
-                    if (scope.isMounted) scope.requestFrame()
+                    if (scope.isMounted) {
+                        resetCursorBlink()
+                        scope.requestFrame()
+                    }
                 }
 
                 else -> {}
