@@ -1,0 +1,82 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalAsyncSearchTest {
+    @Test fun pagesYieldAndBoundWorkEvenWhenTheCallerRequestsUnlimitedScanning() {
+        val terminal = Terminal(100L, 3L, 2000L)
+        terminal.feed(Array<Byte>(100000L) { 120.toByte() })
+        val absent = asyncQuery(terminal, "z")
+        try {
+            val progressed = AtomicBoolean(false)
+            eventLoop()
+                .run {
+                    val peer = launch { progressed.store(true) }
+                    val page = absent.nextPage(Long.MAX_VALUE, Long.MAX_VALUE)
+                    assertTrue(progressed.load())
+                    assertEquals(65536L, page.scanned)
+                    assertEquals(TerminalSearchStatus.Searching, page.status)
+                    assertEquals(0L, page.matches.size)
+                    peer.join()
+                }
+        } finally {
+            absent.close()
+        }
+        val repeated = asyncQuery(terminal, "x")
+        try {
+            eventLoop()
+                .run {
+                    val page = repeated.nextPage(Long.MAX_VALUE, Long.MAX_VALUE)
+                    assertEquals(1024L, page.matches.size)
+                    assertEquals(TerminalSearchStatus.Searching, page.status)
+                    repeated.cancel()
+                    assertEquals(TerminalSearchStatus.Cancelled, repeated.nextPage().status)
+                }
+        } finally {
+            repeated.close()
+        }
+    }
+
+    @Test fun coroutineCancellationReleasesTheQueryLeaseAndWorkingMemory() {
+        val terminal = Terminal(12L, 2L, snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L))
+        terminal.feed("needle".toByteArray())
+        val search = asyncQuery(terminal, "needle")
+        try {
+            eventLoop()
+                .run {
+                    val child = launch {
+                        currentJobOrNone()!!.cancel()
+                        try {
+                            search.nextPage();
+                            fail(Some("cancelled page returned"))
+                        } catch (_: CancellationException) {
+                            Unit
+                        }
+                    }
+                    child.join()
+                }
+            assertEquals(TerminalSearchStatus.Cancelled, search.status)
+            val first = terminal.snapshot()
+            try {
+                val second = terminal.snapshot()
+                second.close()
+            } finally {
+                first.close()
+            }
+        } finally {
+            search.close()
+        }
+    }
+}
+
+private fun asyncQuery(terminal: Terminal, query: String): TerminalAsyncSearch {
+    val snapshot = terminal.snapshot()
+    try {
+        return TerminalAsyncSearch(snapshot.search(query))
+    } finally {
+        snapshot.close()
+    }
+}

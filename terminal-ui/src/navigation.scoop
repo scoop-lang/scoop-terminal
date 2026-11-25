@@ -1,0 +1,272 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+
+public enum TerminalRevealAlignment {
+    Nearest, Start, Center, End
+}
+
+public enum TerminalRevealResult {
+    Revealed, PendingLayout, Stale, Unavailable, Cancelled
+}
+
+/** Rectangles use view-local logical pixels and identify the accepted geometry they describe. */
+public struct TerminalRangeRects(
+    val rects: Array<Rect>,
+    val frameVersion: Long,
+    val presentationVersion: Long,
+    val bufferEpoch: Long
+)
+
+private struct AcceptedTerminalGeometry(val geometry: GridGeometry, val version: Long)
+
+private class PendingTerminalReveal(
+    val initial: TerminalRange,
+    val tracking: TerminalTrackedRange?,
+    val presentation: Long,
+    val alignment: TerminalRevealAlignment,
+    val match: TerminalSearchMatch?
+) : Closeable {
+    fun state(reading: TerminalReading): TerminalTrackingState {
+        val handle = tracking ?: return TerminalTrackingState.Available(initial)
+        val state = handle.state(reading)
+        return when (state) {
+            case Invalidated(val reason) ->
+                if (reason ==
+                    TerminalInvalidation.Stale &&
+                    reading.presentationVersion ==
+                    presentation
+                )
+                    TerminalTrackingState.Available(initial)
+                else
+                    state
+            case Available(_) -> state
+        }
+    }
+    public override fun close() {
+        tracking?.close()
+    }
+}
+
+/** One pending navigation request; completion requires a corresponding accepted grid. */
+internal class TerminalNavigation(private val viewport: TerminalViewport) : Closeable {
+    private var accepted: AcceptedTerminalGeometry? = None
+    private var measured = 0L
+    private var pending: PendingTerminalReveal? = None
+    val hasPending: Boolean get() = pending?.alignment != None
+
+    fun beginLayout(version: Long) {
+        measured = version
+    }
+    fun accept(geometry: GridGeometry, version: Long) {
+        if (version >= (accepted?.version ?: 0L))
+            accepted = Some(AcceptedTerminalGeometry(geometry, version))
+    }
+    fun detach() {
+        accepted = None;
+        measured = 0L
+    }
+    fun cancel(): Boolean {
+        val existed = hasPending
+        pending?.close();
+        pending = None
+        return existed
+    }
+
+    fun reveal(
+        range: TerminalRange,
+        alignment: TerminalRevealAlignment,
+        match: TerminalSearchMatch?
+    ): TerminalRevealResult {
+        pending?.close();
+        pending = None
+        val reading = viewport.terminal
+        when (match) {
+            case Some(val value) ->
+                when (value.status(reading)) {
+                    case Stale -> return TerminalRevealResult.Stale
+                    case Unavailable -> return TerminalRevealResult.Unavailable
+                    case Current -> {}
+                }
+            case None -> {}
+        }
+        val first = reading.resolve(range.start) ?: return TerminalRevealResult.Unavailable
+        val last = reading.resolve(range.end) ?: return TerminalRevealResult.Unavailable
+        if (before(last, first)) return TerminalRevealResult.Unavailable
+        val tracking = when (match) {
+            case Some(_) -> None
+            case None -> Some(viewport.trackRange(range, reading))
+        }
+        pending = Some(
+            PendingTerminalReveal(range, tracking, reading.presentationVersion, alignment, match)
+        )
+        return advance()
+    }
+
+    /** Returns a completion once, leaving PendingLayout implicit while a request is outstanding. */
+    fun update(): TerminalRevealResult? {
+        if (!hasPending) return None
+        val result = advance()
+        return if (result == TerminalRevealResult.PendingLayout) None else Some(result)
+    }
+
+    private fun finish(result: TerminalRevealResult): TerminalRevealResult {
+        pending?.close();
+        pending = None
+        return result
+    }
+
+    private fun advance(): TerminalRevealResult {
+        val request = pending ?: return TerminalRevealResult.Unavailable
+        val reading = viewport.terminal
+        when (request.match) {
+            case Some(val match) ->
+                when (match.status(reading)) {
+                    case Stale -> return finish(TerminalRevealResult.Stale)
+                    case Unavailable -> return finish(TerminalRevealResult.Unavailable)
+                    case Current -> {}
+                }
+            case None -> {}
+        }
+        val range = when (request.state(reading)) {
+            case Available(val value) -> value
+            case Invalidated(val reason) ->
+                return finish(
+                    when (reason) {
+                        case Evicted -> TerminalRevealResult.Unavailable
+                        case Closed -> TerminalRevealResult.Unavailable
+                        case _ -> TerminalRevealResult.Stale
+                    }
+                )
+        }
+        val first = reading.resolve(range.start) ?: return finish(TerminalRevealResult.Unavailable)
+        val end = reading.resolve(range.end) ?: return finish(TerminalRevealResult.Unavailable)
+        val last = end.row - if (end.column == 0L && end.row > first.row) 1L else 0L
+        val frame = accepted
+        val visible = when (frame) {
+            case Some(val value) ->
+                if (value.geometry.rows.size > 0L) value.geometry.rows.size else reading.rows
+            case None -> reading.rows
+        }
+        val old = viewport.first
+        val destination = revealTop(
+            first.row,
+            last,
+            old,
+            visible,
+            reading.historySize,
+            request.alignment
+        )
+        if (destination != old) viewport.setTop(destination)
+        val displayed = frame ?: return TerminalRevealResult.PendingLayout
+        val grid = displayed.geometry
+        if (displayed.version <
+            measured ||
+            grid.first !=
+            destination ||
+            grid.rows.size ==
+            0L ||
+            grid.reading.bufferEpoch !=
+            reading.bufferEpoch ||
+            grid.columns !=
+            reading.columns ||
+            grid.requestedRows !=
+            reading.rows ||
+            grid.reading.columns !=
+            grid.columns ||
+            grid.reading.rows !=
+            grid.requestedRows
+        )
+            return TerminalRevealResult.PendingLayout
+        val shownRange = when (request.state(grid.reading)) {
+            case Available(val value) -> value
+            case Invalidated(_) -> return TerminalRevealResult.PendingLayout
+        }
+        when (request.match) {
+            case Some(val value) ->
+                if (value.status(grid.reading) != TerminalSearchMatchStatus.Current)
+                    return TerminalRevealResult.PendingLayout
+            case None -> {}
+        }
+        val shown = grid.reading.resolve(shownRange.start) ?:
+            return TerminalRevealResult.PendingLayout
+        val shownEnd = grid.reading.resolve(shownRange.end) ?:
+            return TerminalRevealResult.PendingLayout
+        if (shown != first || shownEnd != end) return TerminalRevealResult.PendingLayout
+        return finish(TerminalRevealResult.Revealed)
+    }
+
+    fun rects(range: TerminalRange, match: TerminalSearchMatch? = None): TerminalRangeRects? {
+        val frame = accepted ?: return None
+        when (match) {
+            case Some(val value) ->
+                if (value.status(frame.geometry.reading) != TerminalSearchMatchStatus.Current)
+                    return None
+            case None -> {}
+        }
+        val rectangles = terminalRects(frame.geometry, range) ?: return None
+        return Some(
+            TerminalRangeRects(
+                rectangles, frame.version, frame.geometry.reading.presentationVersion,
+                frame.geometry.reading.bufferEpoch
+            )
+        )
+    }
+
+    fun anchorAt(point: Point): TerminalAnchor? {
+        val geometry = (accepted ?: return None).geometry
+        val(row, column) = geometry.hit(point) ?: return None
+        return geometry.reading.anchorAt(geometry.first + row, column, TerminalAffinity.Before)
+    }
+    fun linkAt(point: Point): TerminalLink? {
+        val frame = accepted ?: return None
+        return frame.geometry.linkAt(point)
+    }
+    fun commandAt(point: Point): TerminalCommandBlock? {
+        val frame = accepted ?: return None
+        val anchor = anchorAt(point) ?: return None
+        return frame.geometry.reading.commandAt(anchor)
+    }
+
+    public override fun close() {
+        pending?.close();
+        pending = None;
+        detach()
+    }
+}
+
+private fun revealTop(
+    start: Long,
+    end: Long,
+    first: Long,
+    rows: Long,
+    history: Long,
+    alignment: TerminalRevealAlignment
+): Long {
+    val result = when (alignment) {
+        case Start -> start
+        case Center -> start + (end - start) / 2L - rows / 2L
+        case End -> end - rows + 1L
+        case Nearest ->
+            if (start < first || end - start + 1L >= rows)
+                start
+            else if (end >= first + rows) end - rows + 1L else first
+    }
+    return clamp(result, 0L, history)
+}
+
+internal fun terminalRects(geometry: GridGeometry, range: TerminalRange): Array<Rect>? {
+    val reading = geometry.reading
+    val first = reading.resolve(range.start) ?: return None
+    val last = reading.resolve(range.end) ?: return None
+    if (before(last, first)) return None
+    val selection = SelectionRange(first.row, first.column, last.row, last.column, false)
+    val rects = ArrayList<Rect>()
+    for (row in 0L..<geometry.rows.size) {
+        val span = selection.onRow(geometry.first + row, geometry.rows[row]) ?: continue
+        val end = clamp(span.end, 0L, geometry.columns)
+        if (end > span.start) rects.add(geometry.rect(row, span.start, end - span.start))
+    }
+    return Some(rects.toArray())
+}

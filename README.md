@@ -16,6 +16,8 @@ OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, coun
 
 `snapshot.search(query, TerminalSearchOptions(...))` 返回可关闭的分页字面量搜索；调用 `nextPage(maxMatches, scanBudget)`，并检查每个结果的 `status(reading)` 后定位。大小写不敏感使用完整 Unicode casefold；搜索对象拥有独立快照，关闭原快照不会取消查询。组件不包含搜索框。
 
+`session.search(...)` 返回 `TerminalAsyncSearch`，在协程中调用挂起的 `nextPage()`；每页先让出执行权，再进行有限扫描，取消协程或查询会释放其快照。控制器的 `reveal(match, alignment)` 检查结果版本，等待相应的 Accepted 帧后完成；`rectsFor(match)` 返回可见矩形及帧版本。`setSearchHighlights(matches, active)` / `clearSearchHighlights()` 只更新绘制层，不改变文本样式或创建外围 UI。`SearchContentChanged` 通知已提交文本变化，宿主可检查旧结果或重新查询；它不表示全部旧结果已经失效。
+
 可创建 `TerminalViewController(session)`，用 `terminalView(session, controller = Some(controller))` 挂载。控制器提供 `select(range)`、`selectAll()`、`clearSelection()`、`scroll(lines)` 和 `copySelection(options)`；`onChanged` 通知滚动、选择变化及覆盖失效。显式控制器在视图卸载后由应用关闭，未传控制器时由视图管理。所有调用仍在会话 owner 上执行。
 
 视图支持双击按 Unicode 词选择、三击按逻辑行选择、Shift 扩展、Alt 矩形选择和越界拖动自动滚动。`TerminalViewOptions.additionalWordCharacters` 可增加路径／标识符字符。主备屏分别保留滚动与选择；矩形在重排后仍按原各行文字范围复制。`TerminalCopyOptions(trimPadding = false)` 可保留网格补齐空白，默认只去掉这些补齐格，始终保留显式输出的空格。

@@ -64,6 +64,18 @@ public class TerminalEmulatorSession private constructor(
     public val mouseReporting: Boolean get() = terminal.mouseReporting
     public val metadata: TerminalMetadata get() = terminal.metadata
     public fun snapshot(): TerminalSnapshot = terminal.snapshot()
+    /** Captures committed text; each asynchronous page yields and has a fixed maximum batch size. */
+    public fun search(
+        query: String,
+        options: TerminalSearchOptions = TerminalSearchOptions()
+    ): TerminalAsyncSearch {
+        val snapshot = terminal.snapshot()
+        try {
+            return TerminalAsyncSearch(snapshot.search(query, options))
+        } finally {
+            snapshot.close()
+        }
+    }
     internal fun track(
         range: TerminalRange,
         kind: TerminalTrackingKind,

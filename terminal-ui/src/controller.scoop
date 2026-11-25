@@ -1,5 +1,6 @@
 package scoop.ui.terminal
 
+import scoop.graphics.Point
 import scoop.terminal.emulator.*
 
 public struct TerminalViewportState(
@@ -11,7 +12,12 @@ public struct TerminalViewportState(
 )
 
 public enum TerminalViewChange {
-    Viewport, Selection, SelectionInvalidated(TerminalInvalidation)
+    Viewport, Selection, SelectionInvalidated(TerminalInvalidation), Highlights,
+    SearchContentChanged(Long, Long), RevealCompleted(TerminalRevealResult)
+}
+
+internal enum TerminalViewInvalidation {
+    Layout, Frame, Reset
 }
 
 /** Application-owned view state. Close an explicit controller after its view has unmounted. */
@@ -20,10 +26,14 @@ public class TerminalViewController internal constructor(
     internal val session: TerminalEmulatorSession? = None
 ) : Closeable {
     private var subscription: Disposable? = None
-    private var viewChanged: ((Boolean) -> Unit)? = None
+    private var viewChanged: ((TerminalViewInvalidation) -> Unit)? = None
     private var closed = false
     private var observedViewport = currentViewport()
     private var observedSelection = viewport.selection
+    private var observedText = viewport.terminal.textRevision
+    private var observedBuffer = viewport.terminal.bufferEpoch
+    private val navigation = TerminalNavigation(viewport)
+    private val highlights = TerminalSearchHighlights()
     public var onChanged: (TerminalViewChange) -> Unit = {}
 
     public constructor(session: TerminalEmulatorSession) : this(
@@ -54,6 +64,7 @@ public class TerminalViewController internal constructor(
         }
 
     public fun scroll(lines: Long): Boolean {
+        cancelReveal()
         synchronize()
         val changed = viewport.scroll(lines)
         synchronize()
@@ -87,27 +98,124 @@ public class TerminalViewController internal constructor(
         return viewport.copy(options)
     }
 
+    public fun reveal(
+        range: TerminalRange,
+        alignment: TerminalRevealAlignment = TerminalRevealAlignment.Nearest
+    ): TerminalRevealResult = revealRange(range, alignment, None)
+    public fun reveal(
+        match: TerminalSearchMatch,
+        alignment: TerminalRevealAlignment = TerminalRevealAlignment.Nearest
+    ): TerminalRevealResult = revealRange(match.range, alignment, Some(match))
+
+    private fun revealRange(
+        range: TerminalRange,
+        alignment: TerminalRevealAlignment,
+        match: TerminalSearchMatch?
+    ): TerminalRevealResult {
+        synchronize()
+        val result = navigation.reveal(range, alignment, match)
+        synchronize()
+        if (result == TerminalRevealResult.PendingLayout)
+            viewChanged?.invoke(TerminalViewInvalidation.Layout)
+        return result
+    }
+
+    public fun rectsFor(range: TerminalRange): TerminalRangeRects? {
+        ensureOpen();
+        return navigation.rects(range)
+    }
+    public fun rectsFor(match: TerminalSearchMatch): TerminalRangeRects? {
+        ensureOpen();
+        return navigation.rects(match.range, Some(match))
+    }
+    public fun anchorAt(point: Point): TerminalAnchor? {
+        ensureOpen();
+        return navigation.anchorAt(point)
+    }
+    public fun linkAt(point: Point): TerminalLink? {
+        ensureOpen();
+        return navigation.linkAt(point)
+    }
+    public fun commandAt(point: Point): TerminalCommandBlock? {
+        ensureOpen();
+        return navigation.commandAt(point)
+    }
+
+    /** Stores anchors only. Overlapping ordinary matches are painted once, with a distinct active hit. */
+    public fun setSearchHighlights(
+        matches: Array<TerminalSearchMatch>,
+        active: TerminalSearchMatch? = None
+    ) {
+        synchronize();
+        highlights.set(matches, active)
+        viewChanged?.invoke(TerminalViewInvalidation.Frame)
+        onChanged(TerminalViewChange.Highlights)
+    }
+    public fun clearSearchHighlights() {
+        ensureOpen()
+        if (highlights.isEmpty) return
+        highlights.clear();
+        viewChanged?.invoke(TerminalViewInvalidation.Frame)
+        onChanged(TerminalViewChange.Highlights)
+    }
+    public fun cancelReveal() {
+        ensureOpen()
+        if (navigation.cancel())
+            onChanged(TerminalViewChange.RevealCompleted(TerminalRevealResult.Cancelled))
+    }
+    internal fun visibleHighlights(geometry: GridGeometry): Array<TerminalHighlight> = highlights
+        .visible(geometry)
+    internal fun layoutStarted(version: Long) {
+        navigation.beginLayout(version)
+    }
+    internal fun frameAccepted(geometry: GridGeometry, version: Long) {
+        navigation.accept(geometry, version);
+        synchronize()
+    }
+
     internal fun synchronize(): ViewportUpdate {
         ensureOpen()
         val update = viewport.update()
+        val completed = navigation.update()
         val state = currentViewport()
         val selection = viewport.selection
         val moved = state != observedViewport
         val selected = !sameSelection(selection, observedSelection)
         observedViewport = state;
         observedSelection = selection
+        val reading = viewport.terminal
+        val textChanged = observedText !=
+            reading.textRevision ||
+            observedBuffer !=
+            reading.bufferEpoch
+        observedText = reading.textRevision;
+        observedBuffer = reading.bufferEpoch
         if (moved || selected || update.resetInteraction)
-            viewChanged?.invoke(update.resetInteraction)
+            viewChanged
+                ?.invoke(
+                    if (update.resetInteraction)
+                        TerminalViewInvalidation.Reset
+                    else
+                        TerminalViewInvalidation.Layout
+                )
         if (moved) onChanged(TerminalViewChange.Viewport)
         if (selected) onChanged(TerminalViewChange.Selection)
         when (update.invalidated) {
             case Some(val reason) -> onChanged(TerminalViewChange.SelectionInvalidated(reason))
             case None -> {}
         }
+        if (textChanged && !highlights.isEmpty)
+            onChanged(
+                TerminalViewChange.SearchContentChanged(reading.bufferEpoch, reading.textRevision)
+            )
+        when (completed) {
+            case Some(val result) -> onChanged(TerminalViewChange.RevealCompleted(result))
+            case None -> {}
+        }
         return update
     }
 
-    internal fun bind(owner: TerminalEmulatorSession, changed: (Boolean) -> Unit) {
+    internal fun bind(owner: TerminalEmulatorSession, changed: (TerminalViewInvalidation) -> Unit) {
         ensureOpen()
         when (session) {
             case Some(val value) ->
@@ -129,6 +237,7 @@ public class TerminalViewController internal constructor(
     internal fun unbind() {
         viewChanged = None;
         viewport.endDrag()
+        navigation.detach()
     }
 
     private fun currentViewport(): TerminalViewportState = TerminalViewportState(
@@ -153,6 +262,8 @@ public class TerminalViewController internal constructor(
         closed = true;
         subscription?.dispose();
         subscription = None
+        navigation.close();
+        highlights.clear();
         viewport.close();
         observedSelection = None
     }

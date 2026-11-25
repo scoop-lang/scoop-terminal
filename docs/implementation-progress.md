@@ -22,12 +22,12 @@
 | M2 | 同步输出 2026、序列边界提交、独立硬期限 | 已实现，完整核心 65 项通过；真实 PTY 期限在集中验收验证 |
 | M2 | 异步宿主效果的有序回复票据 | 已实现，虚拟期限/乱序完成/关闭回归通过 |
 | M2 | OSC 颜色查询/设置/重置 | 已实现，5 项协议、5 项快照及 4 项绘制/缓存用例通过 |
-| M2 | OSC 8 超链接与交互 | 核心 6 项及交互/光栅 3 项通过；公开 controller 的 point 查询随 M3 接入 |
+| M2 | OSC 8 超链接与交互 | 核心 6 项及交互/光栅 3 项通过，controller 的已接受帧 point 查询已接入 |
 | M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；真实系统剪贴板在集中验收验证 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 已实现，5 项核心用例及 UI 编译检查通过 |
 | M3 | controller、高级选择、拖动滚动、复制规则 | 已实现，9 项选择、2 项期限、1 项光栅及原视口 5 项通过；真实窗口事件在集中验收验证 |
-| M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 API 与 7 项测试通过；session 异步扫描随控制器接入 |
-| M3 | reveal、矩形、高亮与结果失效 | 待实现 |
+| M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 7 项及 session 协作式异步分页 2 项通过；独立后台执行器随 M5 接入 |
+| M3 | reveal、矩形、高亮与结果失效 | 已实现，6 项定位与 3 项高亮/光栅验证通过 |
 | M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
 | M4 | 连字、网格校验、字体 fallback、装饰及缓存 | 待实现 |
 | M5 | 串行后台 model、图片 store/decoder/cache、预算 | 待实现 |
@@ -59,6 +59,7 @@
 - `TerminalViewOptions.commandSeparators` 默认 false；开启后只在后续主提示符所在物理行顶部画中性线，不增加行高、文字或光标移动。像素回归确认首条/次级提示符不新增线，关闭时没有线，绘制前后文字和光标相同。没有新增搜索框、命令工具栏或 shell hook 注入。
 - `LiteralSearchTest` 7/7 通过。`snapshot.search` 使用流式字面量匹配，分页同时限制命中数与扫描工作量；单个长字素和空行也分步推进。覆盖跨 soft wrap、硬行边界、重叠命中、`ß`/sigma/`İ` 完整 casefold、字素内部的精确原文 UTF-8 范围、无 normalization、部分历史前缀、冻结快照语义、取消、句柄/查询/工作内存/命中上限，以及 reflow 有效、改色有效、文字覆盖 Stale 和 reset Unavailable。关闭或完成会释放查询独立快照与工作数组，工作内存纳入快照总预算；每页返回源版本、查询代次与下一扫描位置。
 - 高级选择：`TerminalSelectionTest` 9/9、`TerminalSelectionScrollTest` 2/2、`TerminalSelectionPaintTest` 1/1，原视口 5/5、锚点 6/6 通过。覆盖 Unicode 词与额外路径字符、软换行逻辑行、宽字素矩形与重排后逐原行复制、显式空格/补齐策略、编辑迁移与覆盖通知、主备屏独立状态、历史裁剪后 Shift 扩展、冻结及过期帧拒绝。绝对单调期限随越界距离调速，不被连续指针移动推迟；光栅验证逐行选区而非整个包围框。`TerminalViewController` 支持显式选择、全选、滚动、复制及变更通知，关闭释放跟踪与订阅。修复旧 Accepted 帧在纯 reflow 后新注册的初始版本，以及跨宽字符软换行的跟踪范围错误保留补齐格的问题。
+- 搜索视图 API：`TerminalNavigationTest` 6/6、`TerminalSearchHighlightTest` 3/3、`TerminalAsyncSearchTest` 2/2，通过后选择 9/9 回归。覆盖 Nearest/Start/Center/End、未挂载/resize/旧帧等待、滚动取消、Stale/Unavailable、冻结历史定位且不提交隐藏输出、已接受帧的 anchor/link/command 命中、重排/字素扩展、部分淘汰、普通/当前匹配实际像素、复用同一 frame 清除高亮，以及协程公平性、强制页上限和取消释放。高亮使用按逻辑行版本的区间索引，只查询可见行并合并重叠；只请求绘制帧，不重新排版文字。新增 `SearchContentChanged` 作为查询源变化通知，各结果仍独立核对状态。没有增加搜索框、按钮或结果列表。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。

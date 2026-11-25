@@ -41,6 +41,8 @@ internal struct ViewportUpdate(
 private class BufferViewport {
     var epoch = -1L
     var top: TerminalTrackedRange? = None
+    var topFallback: TerminalAnchor? = None
+    var topPresentation = -1L
     var ranges: Array<TerminalTrackedRange> = []
     var origin: TerminalTrackedRange? = None
     var mode = TerminalSelectionMode.Linear
@@ -70,6 +72,11 @@ internal class TerminalViewport(
     ) -> TerminalTrackedRange
 ) : Closeable {
     val terminal: TerminalReading get() = current()
+    fun trackRange(range: TerminalRange, reading: TerminalReading): TerminalTrackedRange = track(
+        range,
+        TerminalTrackingKind.Content,
+        reading
+    )
     private val main = BufferViewport()
     private val alternate = BufferViewport()
     private val words = TerminalWordSelection()
@@ -96,7 +103,15 @@ internal class TerminalViewport(
             return when (top.state(reading)) {
                 case Available(val range) ->
                     clamp(reading.resolve(range.start)?.row ?: 0L, 0L, reading.historySize)
-                case Invalidated(_) -> 0L
+
+                case Invalidated(_) -> {
+                    val state = buffer()
+                    val fallback = state.topFallback
+                    if (state.topPresentation == reading.presentationVersion && fallback != None)
+                        clamp(reading.resolve(fallback!!)?.row ?: 0L, 0L, reading.historySize)
+                    else
+                        0L
+                }
             }
         }
     val atBottom: Boolean get() = first == terminal.historySize
@@ -120,9 +135,15 @@ internal class TerminalViewport(
             case Some(val handle) ->
                 when (handle.state(reading)) {
                     case Invalidated(_) -> {
-                        handle.close();
-                        state.top = None
-                        if (reading.historySize > 0L) setTop(0L)
+                        if (state.topPresentation !=
+                            reading.presentationVersion ||
+                            state.topFallback ==
+                            None
+                        ) {
+                            handle.close();
+                            state.top = None
+                            if (reading.historySize > 0L) setTop(0L)
+                        }
                     }
 
                     case Available(_) -> {}
@@ -198,6 +219,11 @@ internal class TerminalViewport(
         val state = buffer()
         val reading = terminal
         val destination = clamp(row, 0L, reading.historySize)
+        state.topFallback = if (destination == reading.historySize)
+            None
+        else
+            reading.anchorAt(destination, 0L)
+        state.topPresentation = reading.presentationVersion
         val next = if (destination == reading.historySize)
             None
         else {

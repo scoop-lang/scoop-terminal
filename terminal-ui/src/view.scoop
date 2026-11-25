@@ -110,10 +110,17 @@ private class TerminalViewElement(
         clipboardAdapter = Some(clipboard)
         attachment = Some(session.attach(Some(clipboard)) { if (scope.isMounted) modelChanged() })
         controller
-            .bind(session) { reset ->
+            .bind(session) { invalidation ->
                 if (scope.isMounted) {
-                    if (reset) cancelInteraction()
-                    refresh()
+                    when (invalidation) {
+                        case Reset -> {
+                            cancelInteraction();
+                            refresh()
+                        }
+
+                        case Layout -> refresh()
+                        case Frame -> scope.requestFrame()
+                    }
                 }
             }
         refresh()
@@ -289,6 +296,7 @@ private class TerminalViewElement(
             first == terminal.historySize, terminal, scope.nativeWindow.metrics?.scaleFactor ?: 1.0
         )
         paintRevision += 1L
+        controller.layoutStarted(paintRevision)
         val frame = TerminalFrame(
             geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
             props.value.options.commandSeparators
@@ -325,6 +333,9 @@ private class TerminalViewElement(
                 measured.paintRevision * 2L + if (textVisible) 1L else 0L
             ) { paint -> measured.drawScreen(paint.canvas, textVisible) }
         val link = hovered
+        val highlights = controller.visibleHighlights(geometry)
+        if (highlights.size > 0L)
+            context.draw { paint -> measured.drawSearchHighlights(paint.canvas, highlights) }
         context.draw { paint -> measured.drawLinks(paint.canvas, link) }
         when (caret) {
             case Some(val rect) -> {
@@ -349,6 +360,7 @@ private class TerminalViewElement(
                     FrameSubmission.Accepted
                 ) {
                     accepted = Some(geometry)
+                    controller.frameAccepted(geometry, measured.paintRevision)
                     updateHover(geometry)
                     if (geometry.columns > 0L && geometry.requestedRows > 0L)
                         owner
@@ -538,6 +550,7 @@ private class TerminalViewElement(
             }
             if (mapped == TerminalMouseButton.Left) {
                 if (!area.scope.claimPointer(mouse)) return false
+                controller.cancelReveal()
                 val location = location(frame, row, column)
                 val activate = if (operatingSystem == OperatingSystem.Darwin)
                     modifiers.superKey
@@ -693,7 +706,7 @@ private class TerminalViewElement(
                 )
             return true
         }
-        if (viewport.scroll(-steps)) {
+        if (controller.scroll(-steps)) {
             refresh()
             return true
         }
@@ -777,7 +790,7 @@ private class TerminalViewElement(
         val point = pointerPoint ?: return
         val lines = selectionScroll.tick(MonotonicTimeSource.now())
         if (lines != 0L) {
-            if (!viewport.scroll(lines)) {
+            if (!controller.scroll(lines)) {
                 stopSelectionScroll();
                 return
             }

@@ -1,0 +1,40 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+
+/** Owner-bound, cooperatively scheduled pages; cancellation releases the retained text snapshot. */
+public class TerminalAsyncSearch internal constructor(private val search: TerminalSearch) :
+    Closeable {
+    private var scanning = false
+    public val query: String get() = search.query
+    public val generation: Long get() = search.generation
+    public val status: TerminalSearchStatus get() = search.status
+
+    /** Yields before each page, bounded to 65536 scan steps and 1024 matches even for larger requests. */
+    public suspend fun nextPage(
+        maxMatches: Long = 128L,
+        scanBudget: Long = 16384L
+    ): TerminalSearchPage {
+        if (maxMatches <= 0L || scanBudget <= 0L)
+            throw IllegalArgumentException(Some("search page limits must be positive"))
+        if (scanning)
+            throw IllegalStateException(Some("terminal search already has a pending page"))
+        scanning = true
+        try {
+            yieldCoroutine()
+            return search.nextPage(clamp(maxMatches, 1L, 1024L), clamp(scanBudget, 1L, 65536L))
+        } catch (error: CancellationException) {
+            search.cancel();
+            throw error
+        } finally {
+            scanning = false
+        }
+    }
+
+    public fun cancel() {
+        search.cancel()
+    }
+    public override fun close() {
+        search.close()
+    }
+}

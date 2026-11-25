@@ -323,6 +323,12 @@ OSC 8 将 `id`、URI 和扩展参数解析为不可变链接记录；单元格�
 
 同步输出冻结期间，搜索与高亮针对正在展示的快照；reveal 不强制解冻应用画面。若视图尚未挂载或正在 resize，保存一次待定位请求，在对应 Accepted 帧后完成，不使用旧 geometry 假报成功。
 
+已实现的 session adapter 为 `session.search(...) -> TerminalAsyncSearch`；挂起的 `nextPage` 每次先 yield，默认最多扫描 16384 个步骤，绝对上限为 65536 个步骤／1024 个命中。协程取消释放核心查询租约，禁止同一查询同时请求两页。当前批次在会话 owner 上协作执行，独立后台扫描与 M5 的串行 model 一起迁移。
+
+`reveal` 同时提供 range 和 `TerminalSearchMatch` 重载；后者核对文字版本。待布局完成通过 `onChanged(RevealCompleted(...))` 通知，可显式 `cancelReveal()`，本地点击或滚动也会取消未完成定位。`rectsFor` 返回 `TerminalRangeRects`，包含帧版本、presentationVersion、bufferEpoch；有效但不在可见区的范围返回空矩形。其坐标描述实际已接受的帧，因此正在等待新布局时仍可明确查询上一已接受帧。`anchorAt(point)`、`linkAt(point)`、`commandAt(point)` 使用相同几何来源。
+
+高亮最多保留 100000 个命中的锚点元数据，按 buffer／逻辑行／文字版本建立静态区间索引；绘制时只查询可见行，合并重叠范围，并从普通高亮中扣除当前匹配，避免重复叠色。部分淘汰的匹配不显示其残片。`SearchContentChanged(bufferEpoch, textRevision)` 是文本快照需要复核／更新的通知，追加输出也可触发；各结果仍以 `status(reading)` 为准，不能将通知解释成全部结果 Stale。
+
 ## 8. 字体连字与文字绘制
 
 把“每个 cell 一个 Paragraph”改为按物理行内的兼容字形样式组成 `TerminalTextRun`。run 不跨行，不跨字体、字号、粗斜体、OpenType 特性和方向策略边界。背景、选择、搜索、链接 ID 和命令分割线不应仅因存在就打断 shaping。

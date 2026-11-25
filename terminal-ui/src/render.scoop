@@ -197,6 +197,23 @@ internal class TerminalFrame(
         canvas.restore()
     }
 
+    fun drawSearchHighlights(canvas: Canvas, highlights: Array<TerminalHighlight>) {
+        canvas.save();
+        canvas.clipRect(clip)
+        for (highlight in highlights)
+            canvas
+                .drawRect(
+                    highlight.bounds,
+                    Paint(
+                        if (highlight.active)
+                            appearance.activeSearchHighlight
+                        else
+                            appearance.searchHighlight
+                    )
+                )
+        canvas.restore()
+    }
+
     fun drawCursor(
         canvas: Canvas,
         rect: Rect,
