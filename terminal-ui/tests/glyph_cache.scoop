@@ -115,7 +115,7 @@ private class TerminalGlyphLruTest {
                                 fail(Some("missing cursor glyph"))
                             cursor
                                 .use { value ->
-                                    assertEquals("a", value.layout.text)
+                                    assertEquals("a != b", value.layout.text)
                                     assertEquals(0, value.layout.unresolvedGlyphCount)
                                 }
                             assertEquals(2L, cache.cachedCount)

@@ -47,6 +47,17 @@ internal class TerminalGlyphCache(
             return false
         for (index in 0L..<appearance.families.size)
             if (this.appearance.families[index] != appearance.families[index]) return false
+        if ((this.appearance.ligatures == TerminalLigatures.Disabled) !=
+            (appearance.ligatures == TerminalLigatures.Disabled) ||
+            this.appearance.fontFeatures.size !=
+            appearance.fontFeatures.size
+        )
+            return false
+        for (index in 0L..<appearance.fontFeatures.size) {
+            val previous = this.appearance.fontFeatures[index]
+            val next = appearance.fontFeatures[index]
+            if (previous.tag != next.tag || previous.value != next.value) return false
+        }
         return true
     }
 
@@ -185,6 +196,19 @@ private class GlyphCacheEntry(
 
 internal class TerminalGlyphResource(val layout: TextLayout) {
     private var references = 1L
+    private var grid: GlyphGridCheck? = None
+    fun gridAligned(boundaries: Array<Long>, width: Double): Boolean {
+        when (grid) {
+            case Some(val previous) -> {
+                if (previous.matches(boundaries, width)) return previous.aligned
+            }
+
+            case None -> {}
+        }
+        val aligned = terminalRunFitsGrid(layout, boundaries, width)
+        grid = Some(GlyphGridCheck(boundaries, width, aligned))
+        return aligned
+    }
     fun retain() {
         references += 1L
     }
@@ -205,10 +229,27 @@ internal class TerminalGlyphLease(private val resource: TerminalGlyphResource) :
     init {
         resource.retain()
     }
+    fun gridAligned(boundaries: Array<Long>, width: Double): Boolean {
+        if (closed) throw IllegalStateException(Some("terminal glyph lease is closed"))
+        return resource.gridAligned(boundaries, width)
+    }
     public override fun close() {
         if (closed) return
         closed = true
         resource.release()
+    }
+}
+
+private class GlyphGridCheck(
+    val boundaries: Array<Long>,
+    val width: Double,
+    val aligned: Boolean
+) {
+    fun matches(next: Array<Long>, width: Double): Boolean {
+        if (this.width != width || boundaries.size != next.size) return false
+        for (index in 0L..<next.size)
+            if (boundaries[index] != next[index]) return false
+        return true
     }
 }
 
@@ -261,6 +302,27 @@ private fun shapeText(
         color = foreground
         weight = if (bold) 700 else 400
         slant = if (italic) FontSlant.Italic else FontSlant.Upright
+        features = terminalFontFeatures(appearance)
     }
     return Paragraph(fonts, value, style).use { paragraph -> paragraph.layoutUnwrapped() }
+}
+
+private fun terminalFontFeatures(appearance: TerminalAppearance): Array<FontFeature> {
+    if (appearance.ligatures != TerminalLigatures.Disabled) return appearance.fontFeatures
+    val features = ArrayList<FontFeature>()
+    for (feature in appearance.fontFeatures) {
+        if (feature.tag !=
+            "liga" &&
+            feature.tag !=
+            "clig" &&
+            feature.tag !=
+            "calt" &&
+            feature.tag !=
+            "dlig"
+        )
+            features.add(feature)
+    }
+    for (tag in ["liga", "clig", "calt", "dlig"])
+        features.add(FontFeature(tag, 0))
+    return features.toArray()
 }

@@ -1,11 +1,19 @@
 package scoop.ui.terminal
 
 import scoop.graphics.Color
+import scoop.graphics.text.FontFeature
 import scoop.terminal.emulator.*
+
+/** AtCursor isolates the cursor's grapheme while preserving other contextual glyphs. */
+public enum TerminalLigatures {
+    Enabled, Disabled, AtCursor
+}
 
 public struct TerminalAppearance(
     val families: Array<String> = ["Menlo", "Consolas", "DejaVu Sans Mono", "monospace"],
     val fontSize: Double = 14.0,
+    val ligatures: TerminalLigatures = TerminalLigatures.Enabled,
+    val fontFeatures: Array<FontFeature> = [],
     val foreground: Color = Color(0.88, 0.90, 0.92),
     val background: Color = Color(0.08, 0.09, 0.11),
     val selection: Color = Color(0.23, 0.43, 0.68, 0.65),

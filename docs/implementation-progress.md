@@ -30,7 +30,7 @@
 | M3 | reveal、矩形、高亮与结果失效 | 已实现，6 项定位与 3 项高亮/光栅验证通过 |
 | M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
 | M4 | 独立字体副本、LRU 与帧排版租约 | 已实现，3 项淘汰/寿命/像素及原有 4 项绘制回归通过 |
-| M4 | 连字 run、逐列网格校验、字体 fallback 与装饰 | 待实现 |
+| M4 | 连字 run、逐列网格校验、字体 fallback 与装饰 | 已实现，8 项连字/退回用例及完整 UI 53 项通过；真实窗口字体更新随集中验收验证 |
 | M5 | 串行后台 model、图片 store/decoder/cache、预算 | 待实现 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 待实现 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
@@ -71,10 +71,11 @@
 - Scoop 底层已补齐完整字素宽度、显式 ambiguous 策略及统一的 Unicode 17 字素分段，独立提交并合并 [PR #220](https://github.com/scoop-lang/scoop/pull/220) 和 [PR #221](https://github.com/scoop-lang/scoop/pull/221)。release clippy、charset 用例、原生 ABI 均通过。开发 sysroot 已使用安装编译器完整重建，后续命令显式传 `--sysroot ../scoop/sysroot`；没有修改编译器。
 - 无排版分词入口 `scoop.charset.wordBoundaries` 已在 Scoop 独立提交、推送并合并 [PR #223](https://github.com/scoop-lang/scoop/pull/223)，main 已回合并到该修复分支并推送。复用现有 ICU4X dictionary 数据，未下载新依赖；release Clippy、2 项适配、3 项原生 ABI、实际示例与 API 文档检索通过，开发 sysroot 已更新。本轮 PR 文本与局部文档临时目录已清理。
 
-## 后续执行约束
-
 - 字体缓存：`TerminalGlyphLruTest` 3/3，原 `TerminalGlyphCacheTest` 4/4 通过。验证 LRU 最近访问、缓存满后继续复用、条目/估算字节上限、超大布局不驻留、幂等租约关闭、缓存关闭后的独立绘制，以及旧帧在淘汰和字体来源关闭后的逐像素一致性。固定官方 Fira Code 6.2，字体来源、摘要和 OFL 许可随测试保存；下载使用指定代理，依赖压缩包留在 `~/repos/scoop-dep/terminal-fonts`。
 - `FontCollection.copy()` 已在 Scoop 独立分支提交并合并 [PR #224](https://github.com/scoop-lang/scoop/pull/224)，main 已回合并修复分支并推送。4 项字体集合用例、原生 `-Werror` 编译、局部 API 文档检索及关闭来源后延迟排版的实际示例通过。开发 sysroot 已更新；本轮探测程序、字体临时副本、PR 文本和局部 API 文档已清理。
+- 连字：`TerminalLigatureTest` 5/5、`TerminalRunFallbackTest` 3/3，通过后完整 `terminal-ui` 53/53。实际像素对照原生 Fira Code 排版，验证 Enabled/Disabled/显式 feature 优先级、所有 caret 列、组合字素、背景/链接/装饰/选择不打断兼容 run、跨行边界、原文复制和块光标裁剪重着色。AtCursor 计数验证只新排版当前片段，移开后原行像素恢复，重复绘制命中缓存；比例字体以“总宽一致、内部不同”的反例验证退回，固定 CJK 缺字 fallback 与双宽尾格、bidi 重排也有覆盖。Roboto/CJK 字体复用本地既有资料，许可证和摘要随测试保存，没有额外下载。
+
+## 后续执行约束
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。
 

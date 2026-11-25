@@ -64,7 +64,6 @@ internal struct GridGeometry(
 
 private struct PaintCell(
     val bounds: Rect,
-    val layout: TextLayout?,
     val foreground: Color,
     val background: Color,
     val underline: TerminalUnderline,
@@ -89,7 +88,7 @@ internal class TerminalFrame(
     private val background = colors.background.color()
     private val cursorColor = colors.cursor.color()
     private val cells = ArrayList<PaintCell>()
-    private val leases = ArrayList<TerminalGlyphLease>()
+    private val runs = ArrayList<TerminalPaintRun>()
     private val selection = ArrayList<Rect>()
     private val links = ArrayList<PaintLink>()
     private val separators = ArrayList<Double>()
@@ -105,13 +104,13 @@ internal class TerminalFrame(
     fun shape(ranges: Array<SelectionRange>, composition: String) {
         var index = 0L
         for (line in geometry.rows) {
-            val last = clamp(line.cells.size, 0L, geometry.columns)
-            var column = 0L
-            while (column < last) {
-                val cell = line.cells[column]
-                if (cell.width != 0L && column + cell.width <= last) addCell(index, column, cell)
-                column += 1L
-            }
+            val row = index
+            for (
+                run in terminalTextRuns(row, line, geometry.columns) { column, cell ->
+                    addCell(row, column, cell)
+                }
+            )
+                runs.add(TerminalPaintRun(run, glyphs, geometry.metrics.width))
             for (range in ranges) {
                 when (val selected = range.onRow(geometry.first + index, line)) {
                     case Some(val span) -> {
@@ -141,7 +140,7 @@ internal class TerminalFrame(
         }
     }
 
-    private fun addCell(row: Long, column: Long, cell: TerminalCell) {
+    private fun addCell(row: Long, column: Long, cell: TerminalCell): TerminalRunStyle? {
         val foregroundInk = resolveColor(cell.style.foreground, foreground, colors)
         val backgroundInk = resolveColor(cell.style.background, background, colors)
         val fullInk = if (cell.style.inverse) backgroundInk else foregroundInk
@@ -155,12 +154,6 @@ internal class TerminalFrame(
             fullInk
         val visible = cell.text != "" && !cell.style.concealed
         if (cell.style.blink && !cell.style.concealed) blinkingText = true
-        val glyph = if (visible) {
-            val lease = glyphs.acquire(cell, ink)
-            leases.add(lease)
-            Some(lease.layout)
-        } else
-            None
         if (!cell.style.concealed) {
             when (val link = geometry.reading.link(cell.linkId)) {
                 case Some(val value) ->
@@ -172,7 +165,7 @@ internal class TerminalFrame(
             cells
                 .add(
                     PaintCell(
-                        geometry.rect(row, column, cell.width), glyph, ink, paper,
+                        geometry.rect(row, column, cell.width), ink, paper,
                         if (cell.style.concealed)
                             TerminalUnderline.None
                         else
@@ -182,11 +175,34 @@ internal class TerminalFrame(
                         cell.style.blink
                     )
                 )
+        return if (visible)
+            Some(TerminalRunStyle(cell.style.bold, cell.style.italic, ink, cell.style.blink))
+        else
+            None
     }
 
     private val clip: Rect get() = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
 
-    fun drawScreen(canvas: Canvas, blinkVisible: Boolean = true) {
+    fun textCursorKey(cursor: TerminalCursor): Long = if (appearance.ligatures ==
+        TerminalLigatures.AtCursor &&
+        geometry.atBottom &&
+        cursor.visible &&
+        cursor.row <
+        geometry.rows.size &&
+        cursor.column <
+        geometry.columns
+    )
+        1L + cursor.row * 32768L + cursor.column
+    else
+        0L
+
+    fun drawScreen(
+        canvas: Canvas,
+        blinkVisible: Boolean = true,
+        activeCursor: TerminalCursor? = None
+    ) {
+        val current = activeCursor ?: cursor
+        val split = textCursorKey(current) != 0L
         canvas.save()
         canvas.clipRect(clip)
         canvas.drawRect(clip, Paint(background))
@@ -195,8 +211,16 @@ internal class TerminalFrame(
         }
         for (highlight in selection)
             canvas.drawRect(highlight, Paint(appearance.selection))
+        for (run in runs) {
+            if (!run.source.style.blink || blinkVisible)
+                run
+                    .draw(
+                        canvas, geometry,
+                        if (split && run.source.row == current.row) Some(current.column) else None
+                    )
+        }
         for (cell in cells) {
-            if (!cell.blink || blinkVisible) drawGlyph(canvas, cell)
+            if (!cell.blink || blinkVisible) drawDecoration(canvas, cell)
         }
         val separator = Paint(Color(foreground.red, foreground.green, foreground.blue, 0.2))
         for (y in separators)
@@ -227,7 +251,7 @@ internal class TerminalFrame(
         cursor: TerminalCursor,
         focused: Boolean,
         blinkVisible: Boolean,
-        glyph: TextLayout? = None
+        glyph: TerminalCursorGlyph? = None
     ) {
         canvas.save()
         canvas.clipRect(clip)
@@ -256,14 +280,15 @@ internal class TerminalFrame(
                     case Block -> {
                         canvas.drawRect(rect, Paint(cursorColor))
                         when (glyph) {
-                            case Some(val text) -> {
+                            case Some(val value) -> {
+                                val text = value.layout
                                 canvas.save()
                                 canvas.clipRect(rect)
                                 canvas
                                     .drawText(
                                         text,
                                         Point(
-                                            rect.x,
+                                            rect.x + value.offset,
                                             rect.y +
                                                 geometry.metrics.baseline -
                                                 text.alphabeticBaseline
@@ -315,8 +340,8 @@ internal class TerminalFrame(
         canvas.restore()
     }
 
-    // A cursor-only scene can recolor one cached glyph without reshaping the grid.
-    fun cursorGlyph(cursor: TerminalCursor): TerminalGlyphLease? {
+    // Recolor the same shaped fragment, then clip it to the cursor's unchanged grid cell.
+    fun cursorGlyph(cursor: TerminalCursor): TerminalCursorGlyph? {
         if (cursor.shape !=
             TerminalCursorShape.Block ||
             !cursor.visible ||
@@ -327,27 +352,27 @@ internal class TerminalFrame(
         )
             return None
         val cell = geometry.rows[cursor.row].cells[cursor.column]
-        if (cell.width == 0L || cell.text == "" || cell.style.concealed) return None
+        if ((cell.width != 0L && cell.text == "") || cell.style.concealed) return None
         val paper = if (cell.style.inverse)
             resolveColor(cell.style.foreground, foreground, colors)
         else
             resolveColor(cell.style.background, background, colors)
-        return Some(glyphs.acquire(cell, paper))
+        for (run in runs) {
+            if (run.source.row == cursor.row && run.source.contains(cursor.column))
+                return Some(
+                    run
+                        .cursorGlyph(
+                            cursor.column, paper,
+                            textCursorKey(cursor) != 0L, geometry.metrics.width
+                        )
+                )
+        }
+        return None
     }
 
-    private fun drawGlyph(canvas: Canvas, cell: PaintCell) {
+    private fun drawDecoration(canvas: Canvas, cell: PaintCell) {
         val rect = cell.bounds
         val baseline = geometry.metrics.baseline
-        when (cell.layout) {
-            case Some(val text) -> {
-                canvas.save()
-                canvas.clipRect(rect)
-                canvas.drawText(text, Point(rect.x, rect.y + baseline - text.alphabeticBaseline))
-                canvas.restore()
-            }
-
-            case None -> {}
-        }
         drawUnderline(canvas, rect, cell.underline, cell.underlineColor)
         if (cell.struck)
             canvas
@@ -362,9 +387,9 @@ internal class TerminalFrame(
         closed = true
         try {
             preedit?.close()
-            for (lease in leases)
-                lease.close()
-            leases.clear()
+            for (run in runs)
+                run.close()
+            runs.clear()
         } finally {
             glyphs.release()
         }

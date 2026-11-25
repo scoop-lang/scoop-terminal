@@ -1,0 +1,292 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalLigatureTest {
+    @Test
+    fun fixedFontLigaturesKeepEveryCaretColumnAndOriginalText() {
+        for (text in ["!=", "->", "===", "a!=b -> c", "e\u0301=>"]) {
+            withTerminalRunFrame(text) { terminal, cache, frame ->
+                val reading = terminal.reading
+                val count = reading.cursor.column
+                val cells = reading.lines(0L, 1L)[0L].cells
+                val boundaries = ArrayList<Long>()
+                var bytes = 0L
+                boundaries.add(0L)
+                for (column in 0L..<count) {
+                    assertEquals(1L, cells[column].width)
+                    bytes += cells[column].text.byteLength
+                    boundaries.add(bytes)
+                }
+                cache
+                    .acquire(text, false, false, Color.White)
+                    .use { lease ->
+                        assertTrue(lease.gridAligned(boundaries.toArray(), cache.metrics.width))
+                        for (index in 0L..<boundaries.size) {
+                            val x = lease.layout.caret(TextPosition(boundaries[index]))!!.x
+                            val expected = index.toDouble() * cache.metrics.width
+                            assertTrue(x > expected - 0.05 && x < expected + 0.05)
+                        }
+                    }
+                assertEquals(1L, cache.shapeCount)
+                val range = TerminalRange(reading.anchorAt(0L, 0L)!!, reading.anchorAt(0L, count)!!)
+                assertEquals(Some(text), reading.text(range))
+                val(row, column) = frame.geometry.hit(Point(cache.metrics.width * 1.5, 1.0))!!
+                assertEquals(0L, row)
+                assertEquals(1L, column)
+            }
+        }
+    }
+
+    @Test
+    fun enabledPixelsMatchNativeShapingAndDisabledReallyChangesGlyphs() {
+        val text = "!= -> ==="
+        val appearance = terminalTestAppearance()
+        val enabled = withTerminalRunFrame(text, appearance) { _, cache, frame ->
+            val actual = terminalRunPixels(frame)
+            val reference = nativeLigaturePixels(text, appearance, cache.metrics)
+            assertTrue(sameTerminalPixels(actual, reference))
+            actual
+        }
+        val disabled = withTerminalRunFrame(
+            text,
+            appearance.{ligatures: TerminalLigatures.Disabled}
+        ) { _, _, frame -> terminalRunPixels(frame) }
+        assertFalse(sameTerminalPixels(enabled, disabled))
+        val explicitOff = withTerminalRunFrame(
+            text,
+            appearance.{fontFeatures: [FontFeature("calt", 0)]}
+        ) { _, _, frame -> terminalRunPixels(frame) }
+        assertTrue(sameTerminalPixels(disabled, explicitOff))
+        val disabledWins = withTerminalRunFrame(
+            text,
+            appearance.{
+                ligatures: TerminalLigatures.Disabled,
+                fontFeatures: [FontFeature("calt", 1)]
+            }
+        ) { _, _, frame -> terminalRunPixels(frame) }
+        assertTrue(sameTerminalPixels(disabled, disabledWins))
+    }
+
+    @Test
+    fun backgroundLinksAndDecorationsDoNotSplitCompatibleShaping() {
+        val stream = "!\u001b[41m=\u001b[49;4m-\u001b]8;;https://example.test\u0007>" +
+            "\u001b]8;;\u0007\u001b[24;9m=\u001b[29m"
+        withTerminalRunFrame(stream) { terminal, cache, frame ->
+            assertEquals(1L, cache.shapeCount)
+            val reading = terminal.reading
+            assertEquals(
+                Some("!=->="),
+                reading
+                    .text(
+                        TerminalRange(
+                            reading.anchorAt(0L, 0L)!!, reading.anchorAt(0L, 5L)!!
+                        )
+                    )
+            )
+            assertEquals("https://example.test", reading.linkAt(0L, 3L)!!.uri)
+            val viewport = testViewport(terminal)
+            try {
+                val id = reading.lines(0L, 1L)[0L].id
+                viewport.select(CellLocation(id, 0L))
+                viewport.extend(CellLocation(id, 4L))
+                TerminalFrame(
+                    frame.geometry,
+                    2L,
+                    reading.cursor,
+                    0L,
+                    terminalTestAppearance(),
+                    cache
+                )
+                    .use { selected ->
+                        selected.shape(viewport.ranges(), "")
+                        assertEquals(1L, cache.shapeCount)
+                        assertEquals(Some("!=->="), viewport.copy())
+                        assertFalse(
+                            sameTerminalPixels(
+                                terminalRunPixels(frame),
+                                terminalRunPixels(selected)
+                            )
+                        )
+                    }
+            } finally {
+                viewport.close()
+            }
+        }
+    }
+
+    @Test
+    fun cursorSplittingOnlyShapesItsRunAndRestoresThePreviousRow() {
+        val appearance = terminalTestAppearance().{ligatures: TerminalLigatures.AtCursor}
+        withTerminalRunFrame("first!=one\r\nsecond->two\r\nthird===three", appearance) {
+            _,
+            cache,
+            frame
+            ->
+            val baseline = cache.shapeCount
+            assertEquals(3L, baseline)
+            val hidden = frame.cursor.{visible: false}
+            val full = terminalRunPixels(frame, Some(hidden))
+            val first = frame.cursor.{row: 0L, column: 6L}
+            val atFirst = terminalRunPixels(frame, Some(first))
+            assertFalse(sameTerminalPixels(full, atFirst))
+            assertTrue(cache.shapeCount > baseline && cache.shapeCount <= baseline + 3L)
+            val afterFirst = cache.shapeCount
+            terminalRunPixels(frame, Some(first))
+            assertEquals(afterFirst, cache.shapeCount)
+            val next = first.{row: 1L, column: 7L}
+            val atNext = terminalRunPixels(frame, Some(next))
+            assertTrue(cache.shapeCount <= afterFirst + 3L)
+            assertTrue(frame.textCursorKey(first) != frame.textCursorKey(next))
+            for (index in 0L..<cache.metrics.height.toLong() * 320L * 4L)
+                assertEquals(full[index], atNext[index])
+            frame
+                .cursorGlyph(first)!!
+                .use { glyph ->
+                    assertEquals("=", glyph.layout.text)
+                    assertEquals(0.0, glyph.offset)
+                }
+            assertEquals(0L, frame.textCursorKey(hidden))
+        }
+    }
+
+    @Test
+    fun blockCursorClipsTheOriginalLigatureAndRunsNeverCrossRows() {
+        withTerminalRunFrame("!=->", columns = 2L) { terminal, cache, frame ->
+            assertEquals(2L, cache.shapeCount)
+            val cursor = frame.cursor.{row: 0L, column: 1L}
+            frame
+                .cursorGlyph(cursor)!!
+                .use { glyph ->
+                    assertEquals("!=", glyph.layout.text)
+                    assertEquals(-cache.metrics.width, glyph.offset)
+                    RasterSurface(320, 100)
+                        .use { surface ->
+                            surface
+                                .draw { canvas ->
+                                    frame.drawScreen(canvas)
+                                    frame
+                                        .drawCursor(
+                                            canvas,
+                                            frame.geometry.caret(cursor)!!,
+                                            cursor,
+                                            true,
+                                            true,
+                                            Some(glyph)
+                                        )
+                                }
+                            assertTrue(
+                                sameTerminalPixels(
+                                    surface.readPixels(), nativeCursorPixels(
+                                        frame,
+                                        cursor,
+                                        cache.metrics
+                                    )
+                                )
+                            )
+                        }
+                }
+            val reading = terminal.reading
+            val range = TerminalRange(reading.anchorAt(0L, 0L)!!, reading.anchorAt(1L, 2L)!!)
+            assertEquals(Some("!=->"), reading.text(range))
+        }
+    }
+}
+
+private fun nativeCursorPixels(
+    frame: TerminalFrame,
+    cursor: TerminalCursor,
+    metrics: CellMetrics
+): Array<Byte> = terminalTestFonts()
+    .use { fonts ->
+        Paragraph(
+            fonts,
+            "!=",
+            textStyle {
+                families = ["Terminal Test Mono"]
+                fontSize = 20.0
+                color = Color.Black
+            }
+        )
+            .use { paragraph ->
+                paragraph
+                    .layoutUnwrapped()
+                    .use { layout ->
+                        RasterSurface(320, 100)
+                            .use { surface ->
+                                surface
+                                    .draw { canvas ->
+                                        frame.drawScreen(canvas)
+                                        val rect = frame.geometry.caret(cursor)!!
+                                        canvas
+                                            .drawRect(
+                                                rect,
+                                                Paint(frame.geometry.reading.colors.cursor.color())
+                                            )
+                                        canvas.clipRect(rect)
+                                        canvas
+                                            .drawText(
+                                                layout,
+                                                Point(
+                                                    0.0,
+                                                    metrics.baseline - layout.alphabeticBaseline
+                                                )
+                                            )
+                                    }
+                                surface.readPixels()
+                            }
+                    }
+            }
+    }
+
+private fun nativeLigaturePixels(
+    text: String,
+    appearance: TerminalAppearance,
+    metrics: CellMetrics
+): Array<Byte> = terminalTestFonts()
+    .use { fonts ->
+        Paragraph(
+            fonts,
+            text,
+            textStyle {
+                families = appearance.families
+                fontSize = appearance.fontSize
+                color = Color.White
+            }
+        )
+            .use { paragraph ->
+                paragraph
+                    .layoutUnwrapped()
+                    .use { layout ->
+                        RasterSurface(320, 100)
+                            .use { surface ->
+                                surface
+                                    .draw { canvas ->
+                                        canvas.clear(Color.Black)
+                                        canvas
+                                            .clipRect(
+                                                Rect(
+                                                    0.0,
+                                                    0.0,
+                                                    text.charLength.toDouble() * metrics.width,
+                                                    metrics.height
+                                                )
+                                            )
+                                        canvas
+                                            .drawText(
+                                                layout,
+                                                Point(
+                                                    0.0,
+                                                    metrics.baseline - layout.alphabeticBaseline
+                                                )
+                                            )
+                                    }
+                                surface.readPixels()
+                            }
+                    }
+            }
+    }

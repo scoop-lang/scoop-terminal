@@ -52,6 +52,7 @@ private class TerminalViewElement(
     private var clipboardAdapter: WindowTerminalClipboardAdapter? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
+    private var fontSubscription: Closeable? = None
     private var observedScreen = session.reading.screenRevision
     private var observedCursor = session.reading.cursor
     private var observedColors = session.reading.colors
@@ -59,6 +60,10 @@ private class TerminalViewElement(
     private var themeAppearance = props.value.appearance
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
+    private var screenPaintRevision = 0L
+    private var screenPaintFrame = -1L
+    private var screenPaintCursor = -1L
+    private var screenPaintBlink = false
     private var selecting = false
     private val selectionScroll = TerminalSelectionScroll()
     private val selectionDeadline = scope.createDeadline { scrollSelection() }
@@ -179,6 +184,8 @@ private class TerminalViewElement(
         clipboardAdapter?.close()
         clipboardAdapter = None
         accepted = None
+        fontSubscription?.close()
+        fontSubscription = None
         glyphCache?.release()
         glyphCache = None
     }
@@ -268,6 +275,14 @@ private class TerminalViewElement(
             case None -> {}
         }
         val next = TerminalGlyphCache(fonts, appearance)
+        val subscription = try {
+            fonts.observeChanges { _ -> if (scope.isMounted) scope.requestLayout() }
+        } catch (error: Throwable) {
+            next.release()
+            throw error
+        }
+        fontSubscription?.close()
+        fontSubscription = Some(subscription)
         glyphCache = Some(next)
         previous?.release()
         return next
@@ -326,12 +341,25 @@ private class TerminalViewElement(
         context.semantics(semantics, bounds)
         visibleTextBlinks = measured.hasBlink
         val textVisible = !area.isFocusActive || textBlinkVisible || !measured.hasBlink
+        val textCursor = measured.textCursorKey(cursor)
+        if (screenPaintFrame !=
+            measured.paintRevision ||
+            screenPaintCursor !=
+            textCursor ||
+            screenPaintBlink !=
+            textVisible
+        ) {
+            screenPaintRevision += 1L
+            screenPaintFrame = measured.paintRevision
+            screenPaintCursor = textCursor
+            screenPaintBlink = textVisible
+        }
         context
             .drawLayer(
                 screenPaint,
                 bounds,
-                measured.paintRevision * 2L + if (textVisible) 1L else 0L
-            ) { paint -> measured.drawScreen(paint.canvas, textVisible) }
+                screenPaintRevision
+            ) { paint -> measured.drawScreen(paint.canvas, textVisible, Some(cursor)) }
         val link = hovered
         val highlights = controller.visibleHighlights(geometry)
         if (highlights.size > 0L)
@@ -347,7 +375,7 @@ private class TerminalViewElement(
                         .draw { paint ->
                             measured
                                 .drawCursor(
-                                    paint.canvas, rect, cursor, focused, blinkVisible, glyph?.layout
+                                    paint.canvas, rect, cursor, focused, blinkVisible, glyph
                                 )
                         }
                 } finally {

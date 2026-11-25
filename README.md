@@ -24,6 +24,8 @@ OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, coun
 
 文字缓存持有独立字体副本，按 LRU 局部淘汰；默认最多 1024 项、16 MiB 估算权重。正在展示的帧独立持有其排版引用，淘汰不会关闭帧仍需使用的资源；字体来源更新或关闭后，旧帧的延迟光标排版仍使用原字体。
 
+`TerminalAppearance.ligatures` 默认为 `TerminalLigatures.Enabled`，也可设为 `Disabled` 或 `AtCursor`。后者将光标所在字素与相邻文字分开排版，其他 run 继续复用。`fontFeatures` 接受 OpenType 特性；Disabled 会覆盖 `liga`、`clig`、`calt`、`dlig` 为 0，其他显式特性仍保留。连字只改变字形，复制、搜索、命中和光标继续使用终端列；不满足逐列 caret 校验的文本退回逐字素绘制。
+
 ## 开发
 
 使用包含伪终端接口、纯文本 `scoop.charset.wordBoundaries` 及 `FontCollection.copy()` 的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
