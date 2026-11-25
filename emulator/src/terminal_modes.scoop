@@ -1,6 +1,7 @@
 package scoop.terminal.emulator
 
 internal class TerminalModes {
+    var horizontalMargins = false
     var autoWrap = true
     var insert = false
     var lineFeedNewLine = false

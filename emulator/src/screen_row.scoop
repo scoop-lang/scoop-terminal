@@ -147,12 +147,18 @@ internal class ScreenRow(
         if (right == cells.size) softWrapped = false
     }
 
-    fun shift(start: Long, amount: Long, insert: Boolean, style: TerminalStyle) {
-        val count = clamp(amount, 0L, cells.size - start)
+    fun shift(
+        start: Long,
+        amount: Long,
+        insert: Boolean,
+        style: TerminalStyle,
+        end: Long
+    ) {
+        val count = clamp(amount, 0L, end - start)
         if (count == 0L) return
         val blank = TerminalCell(style = style)
         if (insert) {
-            var index = cells.size - 1L
+            var index = end - 1L
             while (index >= start + count) {
                 cells[index] = cells[index - count]
                 index -= 1L
@@ -160,9 +166,9 @@ internal class ScreenRow(
             for (column in start..<start + count)
                 cells[column] = blank
         } else {
-            for (column in start..<cells.size - count)
+            for (column in start..<end - count)
                 cells[column] = cells[column + count]
-            for (column in cells.size - count..<cells.size)
+            for (column in end - count..<end)
                 cells[column] = blank
         }
         repair(style)
@@ -170,6 +176,23 @@ internal class ScreenRow(
         trim()
         softWrapped = false
         invalidate()
+    }
+
+    fun replaceRange(source: TerminalLine?, start: Long, end: Long, style: TerminalStyle) {
+        erase(start, end, style)
+        when (source) {
+            case Some(val line) -> {
+                var column = start
+                while (column < end) {
+                    val cell = line.cells[column]
+                    if (cell.width > 0L && column + cell.width <= end) putCell(column, cell)
+                    column += if (cell.width > 0L) cell.width else 1L
+                }
+            }
+
+            case None -> {}
+        }
+        softWrapped = false
     }
 
     fun resize(columns: Long, style: TerminalStyle) {

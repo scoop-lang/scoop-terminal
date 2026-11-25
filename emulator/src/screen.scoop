@@ -40,6 +40,8 @@ internal class Screen(
     var column = 0L
     var top = 0L
     var bottom = rows - 1L
+    var left = 0L
+    var right = columns - 1L
     var pendingWrap = false
     var origin = false
     private var saved = SavedPosition(0L, 0L, false, false, TerminalStyle())
@@ -52,6 +54,10 @@ internal class Screen(
     val rows: Long get() = cells.size
     val historySize: Long get() = history.size
     val current: ScreenRow get() = cells[row]
+    val insideHorizontalMargins: Boolean get() = column >= left && column <= right
+    val insideMargins: Boolean get() = insideHorizontalMargins && row >= top && row <= bottom
+    val writeLeft: Long get() = if (insideHorizontalMargins) left else 0L
+    val writeRight: Long get() = if (insideHorizontalMargins) right else columns - 1L
 
     private fun blank(style: TerminalStyle): ScreenRow = ScreenRow(
         ids.take(),
@@ -146,17 +152,30 @@ internal class Screen(
     }
 
     fun position(targetRow: Long, targetColumn: Long) {
-        row = if (origin) clamp(top + targetRow, top, bottom) else clamp(targetRow, 0L, rows - 1L)
-        column = clamp(targetColumn, 0L, columns - 1L)
+        positionRow(targetRow)
+        positionColumn(targetColumn)
+    }
+
+    fun positionRow(target: Long) {
+        row = if (origin) clamp(top + target, top, bottom) else clamp(target, 0L, rows - 1L)
+        pendingWrap = false
+    }
+
+    fun positionColumn(target: Long) {
+        column = if (origin) clamp(left + target, left, right) else clamp(target, 0L, columns - 1L)
         pendingWrap = false
     }
 
     fun move(rows: Long, columns: Long) {
         val inside = row >= top && row <= bottom
-        val low = if (inside) top else 0L
-        val high = if (inside) bottom else this.rows - 1L
-        row = clamp(row + rows, low, high)
-        moveColumn(column + columns)
+        row = clamp(row + rows, if (inside) top else 0L, if (inside) bottom else this.rows - 1L)
+        val horizontal = insideHorizontalMargins
+        column = clamp(
+            column + columns,
+            if (horizontal) left else 0L,
+            if (horizontal) right else this.columns - 1L
+        )
+        pendingWrap = false
     }
 
     fun moveColumn(target: Long) {
@@ -164,20 +183,34 @@ internal class Screen(
         pendingWrap = false
     }
 
+    fun carriageReturn() {
+        moveColumn(if (column >= left) left else 0L)
+    }
+
+    fun shiftColumns(count: Long, insert: Boolean, style: TerminalStyle) {
+        if (insideHorizontalMargins) current.shift(column, count, insert, style, right + 1L)
+        pendingWrap = false
+    }
+
     fun lineFeed(style: TerminalStyle, wrapped: Boolean = false) {
         val before = current
-        before.softWrapped = wrapped
+        val joins = wrapped && left == 0L && right == columns - 1L
+        before.softWrapped = joins
         pendingWrap = false
-        if (row == bottom) scrollUp(top, bottom, 1L, style) else if (row + 1L < rows) row += 1L
-        if (wrapped && before !== current)
+        if (row == bottom && insideHorizontalMargins)
+            scrollUp(top, bottom, 1L, style)
+        else if (row + 1L < rows) row += 1L
+        if (joins && before !== current)
             current.rebase(before.logical, before.logicalOffset + before.logicalLength)
-        else if (!wrapped && before !== current && current.logical === before.logical)
+        else if (!joins && before !== current && current.logical === before.logical)
             current.rebase(LogicalLine(ids.take()), 0L)
     }
 
     fun reverseIndex(style: TerminalStyle) {
         pendingWrap = false
-        if (row == top) scrollDown(top, bottom, 1L, style) else if (row > 0L) row -= 1L
+        if (row == top && insideHorizontalMargins)
+            scrollDown(top, bottom, 1L, style)
+        else if (row > 0L) row -= 1L
     }
 
     fun setMargins(first: Long, last: Long) {
@@ -185,6 +218,27 @@ internal class Screen(
         top = first
         bottom = last
         position(0L, 0L)
+    }
+
+    fun setHorizontalMargins(first: Long, last: Long) {
+        if (first < 0L || last >= columns || first >= last) return
+        left = first
+        right = last
+        position(0L, 0L)
+    }
+
+    fun resetHorizontalMargins(clearWrap: Boolean = true) {
+        left = 0L
+        right = columns - 1L
+        if (clearWrap) pendingWrap = false
+    }
+
+    fun softReset() {
+        origin = false
+        top = 0L
+        bottom = rows - 1L
+        resetHorizontalMargins()
+        saved = SavedPosition(0L, 0L, false, false, TerminalStyle())
     }
 
     fun save(style: TerminalStyle) {
@@ -195,7 +249,7 @@ internal class Screen(
         origin = saved.origin
         row = clamp(saved.row, 0L, rows - 1L)
         column = clamp(saved.column, 0L, columns - 1L)
-        pendingWrap = saved.pendingWrap && column == columns - 1L
+        pendingWrap = saved.pendingWrap && column == writeRight
         return saved.style
     }
 
@@ -244,9 +298,15 @@ internal class Screen(
         style: TerminalStyle,
         record: Boolean = true
     ) {
+        pendingWrap = false
+        if (left != 0L || right != columns - 1L) {
+            scrollRectangle(first, last, count, true, style)
+            return
+        }
+        val toHistory = record && first == 0L && last == rows - 1L
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
             val removed = cells.removeAt(first)
-            if (record && first == 0L) remember(removed)
+            if (toHistory) remember(removed)
             cells.add(last, blank(style))
             changes.pending = true
             changes.textPending = true
@@ -254,11 +314,39 @@ internal class Screen(
     }
 
     fun scrollDown(first: Long, last: Long, count: Long, style: TerminalStyle) {
+        pendingWrap = false
+        if (left != 0L || right != columns - 1L) {
+            scrollRectangle(first, last, count, false, style)
+            return
+        }
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
             cells.removeAt(last)
             cells.add(first, blank(style))
             changes.pending = true
             changes.textPending = true
+        }
+    }
+
+    private fun scrollRectangle(
+        first: Long,
+        last: Long,
+        count: Long,
+        up: Boolean,
+        style: TerminalStyle
+    ) {
+        val height = last - first + 1L
+        val amount = clamp(count, 0L, height)
+        if (amount == 0L) return
+        val source = Array<TerminalLine>(height) { index -> cells[first + index].snapshot() }
+        for (index in 0L..<height) {
+            val from = index + if (up) amount else -amount
+            cells[first + index]
+                .replaceRange(
+                    if (from >= 0L && from < height) Some(source[from]) else None,
+                    left,
+                    right + 1L,
+                    style
+                )
         }
     }
 
@@ -279,6 +367,7 @@ internal class Screen(
             return
         }
         columns = width
+        resetHorizontalMargins(previousWidth != width || left != 0L || right != width - 1L)
         while (
             cells.size >
                 height &&
@@ -364,6 +453,7 @@ internal class Screen(
             if (oldTop > start) start = oldTop
         }
         columns = width
+        resetHorizontalMargins()
         history.clear()
         cells.clear()
         val retained = if (start > historyLimit) start - historyLimit else 0L
@@ -415,6 +505,7 @@ internal class Screen(
         top = 0L
         bottom = rows - 1L
         origin = false
+        resetHorizontalMargins()
         position(0L, 0L)
         save(style)
         changes.pending = true

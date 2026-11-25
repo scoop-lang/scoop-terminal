@@ -20,6 +20,7 @@ internal class TerminalState(
     private var tabs = defaultTabs(columns)
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
+    private val savedWrap = MutableArray<Boolean>(2L) { true }
     private var combining: ScreenRow? = None
     private var startColumn = 0L
     private var lastPrinted = TerminalCell()
@@ -113,7 +114,7 @@ internal class TerminalState(
         val combined = cell.text + text
         if (graphemeBoundaries(combined).size != 2L) return false
         val width = clusterWidth(combined)
-        if (startColumn + width > screen.columns) {
+        if (startColumn + width > screen.writeRight + 1L) {
             row.erase(startColumn, startColumn + cell.width, style)
             screen.moveColumn(startColumn)
             put(combined, width)
@@ -129,18 +130,19 @@ internal class TerminalState(
     private fun put(text: String, width: Long) {
         val grid = screen
         val length = if (width <= grid.columns) width else 1L
-        if (modes.autoWrap && (grid.pendingWrap || grid.column + length > grid.columns)) {
-            grid.moveColumn(0L)
+        val right = grid.writeRight
+        if (modes.autoWrap && (grid.pendingWrap || grid.column + length > right + 1L)) {
+            grid.moveColumn(grid.writeLeft)
             grid.lineFeed(style, wrapped = true)
         }
-        val fits = length == width && grid.column + length <= grid.columns
+        val fits = length == width && grid.column + length <= grid.writeRight + 1L
         val narrow = width == 2L && grid.columns == 1L && !alternateScreen
         val displayed = if (fits || narrow) text else "�"
         val occupied = if (fits) length else 1L
         val intrinsic = if (narrow) width else 0L
         val row = grid.current
         val position = grid.column
-        if (modes.insert) row.shift(position, occupied, true, style)
+        if (modes.insert) grid.shiftColumns(occupied, true, style)
         row.put(position, displayed, occupied, style, intrinsic)
         combining = Some(row)
         startColumn = position
@@ -152,8 +154,9 @@ internal class TerminalState(
     private fun moveAfter(column: Long, occupied: Long) {
         val grid = screen
         val end = column + occupied
-        grid.column = clamp(end, 0L, grid.columns - 1L)
-        grid.pendingWrap = modes.autoWrap && end == grid.columns
+        val right = grid.writeRight
+        grid.column = clamp(end, 0L, right)
+        grid.pendingWrap = modes.autoWrap && end == right + 1L
     }
 
     public override fun control(code: Int) {
@@ -173,7 +176,7 @@ internal class TerminalState(
             case 12 -> lineFeed(modes.lineFeedNewLine)
 
             case 13 -> {
-                grid.moveColumn(0L)
+                grid.carriageReturn()
                 changed = true
             }
 
@@ -230,7 +233,7 @@ internal class TerminalState(
 
     private fun lineFeed(returns: Boolean) {
         val grid = screen
-        if (returns) grid.moveColumn(0L)
+        if (returns) grid.carriageReturn()
         grid.lineFeed(style)
         changed = true
     }
@@ -238,7 +241,7 @@ internal class TerminalState(
     fun tab(count: Long, forward: Boolean) {
         val grid = screen
         val step = if (forward) 1L else -1L
-        val edge = if (forward) grid.columns - 1L else 0L
+        val edge = if (forward) grid.writeRight else grid.writeLeft
         var column = grid.column
         var left = count
         while (column != edge && left > 0L) {
@@ -265,12 +268,16 @@ internal class TerminalState(
 
     fun saveCursor() {
         screen.save(style)
-        savedCharset[if (alternateScreen) 1L else 0L] = charset
+        val index = if (alternateScreen) 1L else 0L
+        savedCharset[index] = charset
+        savedWrap[index] = modes.autoWrap
     }
 
     fun restoreCursor() {
         style = screen.restore()
-        charset = savedCharset[if (alternateScreen) 1L else 0L]
+        val index = if (alternateScreen) 1L else 0L
+        charset = savedCharset[index]
+        modes.autoWrap = savedWrap[index]
         changed = true
     }
 
@@ -281,10 +288,33 @@ internal class TerminalState(
         if (enabled && clear) {
             alternate.reset(TerminalStyle())
             savedCharset[1L] = 0
+            savedWrap[1L] = true
         }
         if (!enabled && save) restoreCursor()
         screenChanges.pending = true
         screenChanges.textPending = true
+        changed = true
+    }
+
+    fun setHorizontalMargins(enabled: Boolean) {
+        modes.horizontalMargins = enabled
+        if (!enabled) {
+            main.resetHorizontalMargins()
+            alternate.resetHorizontalMargins()
+        }
+    }
+
+    fun softReset() {
+        modes = TerminalModes()
+        style = TerminalStyle()
+        screen.softReset()
+        main.resetHorizontalMargins()
+        alternate.resetHorizontalMargins()
+        charset = 0
+        val index = if (alternateScreen) 1L else 0L
+        savedCharset[index] = 0
+        savedWrap[index] = true
+        combining = None
         changed = true
     }
 
@@ -298,6 +328,8 @@ internal class TerminalState(
         charset = 0
         savedCharset[0L] = 0
         savedCharset[1L] = 0
+        savedWrap[0L] = true
+        savedWrap[1L] = true
         lastPrinted = TerminalCell()
         changed = true
     }

@@ -13,7 +13,8 @@
 | M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 待实现 |
 | M1 | 已提交快照、变化集、session reading 与消费者迁移 | 已实现，快照与视图回归通过 |
 | M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
-| M1 | VT 编辑/边距/复位/Unicode、传统键鼠、样式与光标 | 待实现 |
+| M1 | 上下/左右边距、矩形滚动、宽字符编辑、DECSC/DECSTR/RIS | 已实现，核心 40 项测试通过 |
+| M1 | Unicode 宽度策略、传统键鼠、样式与光标 | 待实现 |
 | M1 | 能力查询、准确的 capability 表、terminfo | 待实现 |
 | M2 | 同步输出 2026、期限、流顺序与有序效果 | 待实现 |
 | M2 | OSC 颜色查询/设置/重置 | 待实现 |
@@ -37,7 +38,7 @@
 ## 已执行验证
 
 - 工具链：`~/.scoop/bin/scoop`，`0.0.0-dev.20261126`，编译器 `bb295704d`。
-- `scoop test --release emulator`：28/28 通过，包括 3 项存储、11 项 reflow 及 5 项快照测试。
+- `scoop test --release emulator`：40/40 通过，包括 8 项边距/编辑/复位、6 项解析、3 项存储、11 项 reflow 及 5 项快照测试。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。
 - `scoop test --release emulator --filter ParserTest`：6/6 通过，包括每个字节边界的切分、冒号子参数/中间字节、CAN/SUB/EOF、非法 DCS header、OSC 精确上限与超限整串丢弃。
