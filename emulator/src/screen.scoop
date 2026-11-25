@@ -133,14 +133,15 @@ internal class Screen(
         cursorBlink: Boolean,
         pixels: TerminalPixelSize?,
         colors: TerminalColors,
-        metadata: TerminalMetadata
+        metadata: TerminalMetadata,
+        commands: CommandReading
     ): TerminalReadingData = TerminalReadingData(
         columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
         presentationVersion,
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
         Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
-        changes.links.snapshot(), changes.tracking.snapshot()
+        changes.links.snapshot(), changes.tracking.snapshot(), commands
     )
 
     fun reconcileLogicalLines() {
@@ -207,6 +208,7 @@ internal class Screen(
     fun lineFeed(style: TerminalStyle, wrapped: Boolean = false) {
         val before = current
         val joins = wrapped && left == 0L && right == columns - 1L
+        val followers = if (joins) changes.tracking.takeWrap(before) else []
         before.softWrapped = joins
         pendingWrap = false
         if (row == bottom && insideHorizontalMargins)
@@ -216,6 +218,7 @@ internal class Screen(
             current.rebase(before.logical, before.logicalOffset + before.logicalLength)
         else if (!joins && before !== current && current.logical === before.logical)
             current.rebase(LogicalLine(ids.take()), 0L)
+        changes.tracking.finishWrap(followers, current)
     }
 
     fun reverseIndex(style: TerminalStyle) {

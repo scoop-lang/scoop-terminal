@@ -8,6 +8,23 @@ internal class SnapshotIndex<T>(
     val right: SnapshotIndex<T>? = None
 ) {
     val height: Int = 1 + maximum(left?.height ?: 0, right?.height ?: 0)
+    val size: Long = 1L + (left?.size ?: 0L) + (right?.size ?: 0L)
+}
+
+internal fun <T> indexAt(root: SnapshotIndex<T>?, position: Long): T? {
+    var current = root
+    var offset = position
+    while (true) {
+        val node = current ?: return None
+        val left = node.left?.size ?: 0L
+        if (offset == left) return Some(node.value)
+        if (offset < left)
+            current = node.left
+        else {
+            offset -= left + 1L;
+            current = node.right
+        }
+    }
 }
 
 internal fun <T> indexValue(root: SnapshotIndex<T>?, key: Long): T? {

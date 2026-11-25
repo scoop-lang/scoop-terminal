@@ -20,6 +20,10 @@ public interface TerminalReading {
     public fun link(key: Long): TerminalLink?
     public val trackingVersion: Long
     public fun trackedRange(id: Long): TerminalTrackingState?
+    public val commandCount: Long
+    public val commandVersion: Long
+    public fun command(id: Long): TerminalCommandBlock?
+    public fun commands(start: Long, count: Long): Array<TerminalCommandBlock>
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -46,20 +50,30 @@ internal class TerminalReadingData(
     public override val colors: TerminalColors,
     public override val metadata: TerminalMetadata,
     private val links: LinkReading,
-    private val tracking: TrackingReading
+    private val tracking: TrackingReading,
+    private val commandData: CommandReading
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
     public override val linkCount: Long get() = links.count
     public override val trackingVersion: Long get() = tracking.version
     public override fun trackedRange(id: Long): TerminalTrackingState? = tracking.get(id)
+    public override val commandCount: Long get() = commandData.count
+    public override val commandVersion: Long get() = commandData.version
+    public override fun command(id: Long): TerminalCommandBlock? = commandData.command(id, this)
+    public override fun commands(start: Long, count: Long): Array<TerminalCommandBlock> {
+        if (start < 0L || count < 0L || start > commandCount || count > commandCount - start)
+            throw IndexOutOfBoundsException()
+        return Array<TerminalCommandBlock>(count) { offset -> commandData.at(start + offset, this) }
+    }
     public override fun link(key: Long): TerminalLink? = links.get(key)
     val retainedBytes: Long = readingBytes(history, screenLines) +
         8384L +
         metadataBytes(metadata) +
         links.bytes +
         tracking.count *
-        256L
+        256L +
+        commandData.bytes
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]

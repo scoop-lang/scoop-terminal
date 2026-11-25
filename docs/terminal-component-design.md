@@ -259,6 +259,8 @@ OSC 8 将 `id`、URI 和扩展参数解析为不可变链接记录；单元格�
 
 提供 `commandAt(anchor)`、`commandsIn(range)` 和命令范围读取；组件不提供“重新执行命令”。标记必须由 shell/程序发送才出现。此阶段不自动修改 shell 配置或注入脚本；协议测试直接回放标记，后续 demo 再提供显式的最小 shell hook 接入。
 
+当前实现还提供 `reading.commands(start, count)` 分页读取与 `reading.text(range)` 原文读取。命令元数据默认限制为总计 2048 块、8 MiB，可通过 `TerminalCommandLimits` 调整；淘汰最旧记录时关闭对应的锚点注册。擦除正在编辑的提示符后，每个 buffer 可暂留一个计入预算的重绘上下文，使随后同一位置的 A 在任意 feed 切分下都不会生成额外分割线；这个上下文没有可见标记，也不会出现在命令查询结果中。
+
 ### 6.7 OSC 9;4：进度
 
 归一为 `Inactive`、`Running(percent)`、`Error(percent?)`、`Indeterminate`、`Paused(percent?)`。缺省值、保留上次百分比及 0..100 的范围按协议处理，非法状态不改变现值。

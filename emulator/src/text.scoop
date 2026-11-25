@@ -1,0 +1,32 @@
+package scoop.terminal.emulator
+
+/** Reads a half-open text range, joining soft wraps and preserving explicitly printed spaces. */
+public fun TerminalReading.text(range: TerminalRange, trimPadding: Boolean = true): String? {
+    val start = resolve(range.start) ?: return None
+    val end = resolve(range.end) ?: return None
+    if (end.row < start.row || (end.row == start.row && end.column < start.column)) return None
+    val result = StringBuilder()
+    for (row in start.row..end.row) {
+        val line = lines(row, 1L)[0L]
+        val first = if (row == start.row) start.column else 0L
+        var last = if (row == end.row) end.column else line.cells.size
+        if (line.softWrapped && last > line.usedColumns) last = line.usedColumns
+        if (trimPadding) {
+            while (
+                last >
+                    first &&
+                    line.cells[last - 1L].text ==
+                    "" &&
+                    line.cells[last - 1L].width ==
+                    1L
+            )
+                last -= 1L
+        }
+        for (column in first..<last) {
+            val cell = line.cells[column]
+            if (cell.width > 0L) result.append(if (cell.text == "") " " else cell.text)
+        }
+        if (row < end.row && !line.softWrapped) result.append('\n')
+    }
+    return Some(result.toString())
+}

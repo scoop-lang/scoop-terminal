@@ -48,6 +48,7 @@ private class TerminalViewElement(
     private var observedScreen = session.reading.screenRevision
     private var observedCursor = session.reading.cursor
     private var observedColors = session.reading.colors
+    private var observedCommands = session.reading.commandVersion
     private var themeAppearance = props.value.appearance
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
@@ -94,6 +95,7 @@ private class TerminalViewElement(
         observedScreen = session.reading.screenRevision
         observedCursor = session.reading.cursor
         observedColors = session.reading.colors
+        observedCommands = session.reading.commandVersion
         clipboardAdapter?.close()
         val clipboard = WindowTerminalClipboardAdapter(scope.nativeWindow)
         clipboardAdapter = Some(clipboard)
@@ -149,13 +151,15 @@ private class TerminalViewElement(
         val terminal = session.reading
         val colorsChanged = observedColors !== terminal.colors
         observedColors = terminal.colors
+        val commandsChanged = observedCommands != terminal.commandVersion
+        observedCommands = terminal.commandVersion
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
         if (moved) resetCursorBlink()
         observedCursor = cursor
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
-            if (colorsChanged)
+            if (colorsChanged || commandsChanged)
                 refresh()
             else if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
             return
@@ -255,7 +259,8 @@ private class TerminalViewElement(
         )
         paintRevision += 1L
         val frame = TerminalFrame(
-            geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs
+            geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
+            props.value.options.commandSeparators
         )
         try {
             frame.shape(viewport.range(), composition.text)

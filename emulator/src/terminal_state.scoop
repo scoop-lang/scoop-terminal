@@ -12,7 +12,8 @@ internal class TerminalState(
     colors: TerminalColors,
     val clipboardPolicy: TerminalClipboardPolicy,
     linkLimits: TerminalLinkLimits,
-    trackingLimits: TerminalTrackingLimits
+    trackingLimits: TerminalTrackingLimits,
+    commandLimits: TerminalCommandLimits
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges(
@@ -21,6 +22,7 @@ internal class TerminalState(
     )
     val links: TerminalLinkStore get() = screenChanges.links
     val tracking: TerminalTracking get() = screenChanges.tracking
+    val commands = TerminalCommands(tracking, commandLimits)
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     var alternateScreen = false
@@ -59,7 +61,7 @@ internal class TerminalState(
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
-                .cursorBlink, pixelSize, colorState.current, metadata
+                .cursorBlink, pixelSize, colorState.current, metadata, commands.snapshot(screen)
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -72,6 +74,8 @@ internal class TerminalState(
         val before = committed
         parser.finish()
         combining = None
+        commands.finish(this, main)
+        commands.finish(this, alternate)
         setSynchronizedOutput(false)
         progressPercent = None
         setProgress(TerminalProgress.Inactive)
@@ -80,6 +84,7 @@ internal class TerminalState(
 
     private fun flush(publish: Boolean) {
         screen.reconcileLogicalLines()
+        commands.prune()
         val screenChanged = updateScreenRevision()
         val trackedChanged = tracking.takeChanged()
         val modified = changed || screenChanged || trackedChanged
@@ -308,6 +313,10 @@ internal class TerminalState(
     }
 
     public override fun osc(selector: Int, bytes: Array<Byte>) {
+        if (selector == 133) {
+            commands.osc(this, bytes);
+            return
+        }
         if (colorOsc(this, selector, bytes)) return
         if (metadataOsc(this, selector, bytes)) return
         if (selector == 8) {
@@ -410,6 +419,7 @@ internal class TerminalState(
         if (enabled && save) saveCursor()
         alternateScreen = enabled
         if (enabled && clear) {
+            commands.reset(alternate.bufferEpoch)
             alternate.reset(TerminalStyle())
             savedCharset[1L] = 0
             savedWrap[1L] = true
@@ -455,6 +465,8 @@ internal class TerminalState(
         setProgress(TerminalProgress.Inactive)
         style = TerminalStyle()
         modes = TerminalModes()
+        commands.reset(main.bufferEpoch)
+        commands.reset(alternate.bufferEpoch)
         main.reset(style)
         alternate.reset(style)
         alternateScreen = false

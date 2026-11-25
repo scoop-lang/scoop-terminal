@@ -5,7 +5,8 @@ import scoop.terminal.emulator.*
 /** Component behavior only; URI policy and any preview belong to the embedding application. */
 public struct TerminalViewOptions(
     val onLinkActivated: (TerminalLink) -> Unit = {},
-    val onLinkHovered: (TerminalLink?) -> Unit = {}
+    val onLinkHovered: (TerminalLink?) -> Unit = {},
+    val commandSeparators: Boolean = false
 )
 
 private struct LinkPress(

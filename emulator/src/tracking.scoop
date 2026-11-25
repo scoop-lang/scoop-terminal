@@ -80,6 +80,7 @@ internal class TrackedEntry(
     }
     var invalid: TerminalInvalidation? = None
     var dirty = false
+    var onChange: (() -> Unit)? = None
     fun state(): TerminalTrackingState = when (invalid) {
         case Some(val reason) -> TerminalTrackingState.Invalidated(reason)
         case None ->
@@ -169,6 +170,36 @@ internal class TerminalTracking(
                 }
             }
         }
+        return create(screen, range, kind, first, last, valid, reading.presentationVersion)
+    }
+
+    fun registerLive(
+        screen: Screen,
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        presentation: Long
+    ): TerminalTrackedRange {
+        val first = screen.resolve(range.start)
+        val last = screen.resolve(range.end)
+        return create(screen, range, kind, first, last, first != None && last != None, presentation)
+    }
+
+    fun current(id: Long): TerminalTrackingState? = entries[id]?.state()
+    fun watch(id: Long, changed: () -> Unit) {
+        entries[id]!!.onChange = Some(changed)
+    }
+
+    private fun create(
+        screen: Screen,
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        first: TerminalPosition?,
+        last: TerminalPosition?,
+        valid: Boolean,
+        presentation: Long
+    ): TerminalTrackedRange {
+        if (entries.size >= limits.maxHandles)
+            throw IllegalStateException(Some("terminal tracking handle limit exceeded"))
         val start = if (valid) first!! else TerminalPosition(0L, 0L)
         val end = if (valid) last!! else start
         val rows = if (valid)
@@ -192,13 +223,14 @@ internal class TerminalTracking(
         attach(entry)
         mark(entry)
         val initial = if (valid) TerminalTrackingState.Available(range) else entry.state()
-        return TerminalTrackedRange(id, this, initial, reading.presentationVersion)
+        return TerminalTrackedRange(id, this, initial, presentation)
     }
 
     fun remove(id: Long) {
         val entry = entries[id] ?: return
         detach(entry)
         entry.dirty = false
+        entry.onChange = None
         entry.releasePoints()
         entries.remove(id)
         root = indexRemoved(root, id)
@@ -232,6 +264,7 @@ internal class TerminalTracking(
         }
         pending = true
         version += 1L
+        entry.onChange?.invoke()
     }
 
     private fun invalidate(entry: TrackedEntry, reason: TerminalInvalidation) {
@@ -244,6 +277,41 @@ internal class TerminalTracking(
     fun rebased(row: ScreenRow) {
         for (entry in row.tracked)
             mark(entry)
+    }
+
+    fun takeWrap(row: ScreenRow): Array<TrackedEntry> {
+        val followers = ArrayList<TrackedEntry>()
+        for (entry in row.tracked.toArray()) {
+            if (entry.kind !=
+                TerminalTrackingKind.Content &&
+                entry.start.row ===
+                row &&
+                entry.end.row ===
+                row &&
+                entry.start.column ==
+                row.columns &&
+                entry.end.column ==
+                row.columns &&
+                entry.start.affinity ==
+                TerminalAffinity.After &&
+                entry.end.affinity ==
+                TerminalAffinity.After
+            ) {
+                detach(entry)
+                followers.add(entry)
+            }
+        }
+        return followers.toArray()
+    }
+
+    fun finishWrap(entries: Array<TrackedEntry>, row: ScreenRow) {
+        for (entry in entries) {
+            entry.start = TrackedPoint(row, 0L, TerminalAffinity.After)
+            entry.end = entry.start
+            entry.rows = [row]
+            attach(entry)
+            mark(entry)
+        }
     }
 
     fun replace(row: ScreenRow, start: Long, end: Long, erased: Boolean) {
@@ -393,11 +461,7 @@ private fun pointInside(
     row &&
     point.column <
     end &&
-    (
-        point.column >
-            start ||
-            (point.column == start && (erased || point.affinity == TerminalAffinity.After))
-    )
+    (point.column > start || (point.column == start && erased))
 
 private fun shifted(
     point: TrackedPoint,

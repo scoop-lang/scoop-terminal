@@ -81,7 +81,8 @@ internal class TerminalFrame(
     val cursor: TerminalCursor,
     val inputRevision: Long,
     private val appearance: TerminalAppearance,
-    private val glyphs: TerminalGlyphCache
+    private val glyphs: TerminalGlyphCache,
+    private val commandSeparators: Boolean = false
 ) : Closeable {
     private val colors = geometry.reading.colors
     private val foreground = colors.foreground.color()
@@ -90,6 +91,7 @@ internal class TerminalFrame(
     private val cells = ArrayList<PaintCell>()
     private val selection = ArrayList<Rect>()
     private val links = ArrayList<PaintLink>()
+    private val separators = ArrayList<Double>()
     private var preedit: TextLayout? = None
     private var blinkingText = false
     val hasBlink: Boolean get() = blinkingText
@@ -124,6 +126,19 @@ internal class TerminalFrame(
             index += 1L
         }
         if (composition != "") preedit = Some(glyphs.shapePreedit(composition, foreground))
+        if (commandSeparators && !geometry.reading.alternateScreen) {
+            val occupied = MutableArray<Boolean>(geometry.rows.size) { false }
+            for (index in 0L..<geometry.reading.commandCount) {
+                val block = geometry.reading.commands(index, 1L)[0L]
+                if (!block.separator) continue
+                val anchor = block.prompt ?: continue
+                val position = geometry.reading.resolve(anchor) ?: continue
+                val row = position.row - geometry.first
+                if (row >= 0L && row < occupied.size) occupied[row] = true
+            }
+            for (row in 0L..<occupied.size)
+                if (occupied[row]) separators.add(row.toDouble() * geometry.metrics.height)
+        }
     }
 
     private fun addCell(row: Long, column: Long, cell: TerminalCell) {
@@ -178,6 +193,9 @@ internal class TerminalFrame(
         for (cell in cells) {
             if (!cell.blink || blinkVisible) drawGlyph(canvas, cell)
         }
+        val separator = Paint(Color(foreground.red, foreground.green, foreground.blue, 0.2))
+        for (y in separators)
+            canvas.drawRect(Rect(0.0, y, geometry.size.width, 1.0), separator)
         canvas.restore()
     }
 

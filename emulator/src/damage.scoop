@@ -10,7 +10,8 @@ public struct TerminalDamage(
     val scrollDelta: Long = 0L,
     val paletteChanged: Boolean = false,
     val metadataChanged: Boolean = false,
-    val anchorsChanged: Boolean = false
+    val anchorsChanged: Boolean = false,
+    val commandsChanged: Boolean = false
 )
 
 internal fun readingDamage(
@@ -59,6 +60,7 @@ internal fun readingDamage(
         scrollDelta,
         before.colors !== after.colors,
         before.metadata != after.metadata,
-        before.trackingVersion != after.trackingVersion
+        before.trackingVersion != after.trackingVersion,
+        before.commandVersion != after.commandVersion
     )
 }
