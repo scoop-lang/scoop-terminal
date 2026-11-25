@@ -8,7 +8,8 @@ public struct TerminalDamage(
     val resized: Boolean = false,
     val bufferChanged: Boolean = false,
     val scrollDelta: Long = 0L,
-    val paletteChanged: Boolean = false
+    val paletteChanged: Boolean = false,
+    val metadataChanged: Boolean = false
 )
 
 internal fun readingDamage(
@@ -55,6 +56,7 @@ internal fun readingDamage(
         resized,
         bufferChanged,
         scrollDelta,
-        before.colors !== after.colors
+        before.colors !== after.colors,
+        before.metadata != after.metadata
     )
 }

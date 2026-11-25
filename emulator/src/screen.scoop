@@ -127,13 +127,14 @@ internal class Screen(
         cursorShape: TerminalCursorShape,
         cursorBlink: Boolean,
         pixels: TerminalPixelSize?,
-        colors: TerminalColors
+        colors: TerminalColors,
+        metadata: TerminalMetadata
     ): TerminalReadingData = TerminalReadingData(
         columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
         presentationVersion,
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
-        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors
+        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata
     )
 
     fun reconcileLogicalLines() {

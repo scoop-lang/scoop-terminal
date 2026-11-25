@@ -22,6 +22,8 @@ internal class TerminalState(
     var modes = TerminalModes()
     var pixelSize: TerminalPixelSize? = None
     val colorState = TerminalColorState(colors)
+    var metadata = TerminalMetadata()
+    var progressPercent: Int? = None
     private var tabs = defaultTabs(columns)
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
@@ -49,7 +51,7 @@ internal class TerminalState(
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
-                .cursorBlink, pixelSize, colorState.current
+                .cursorBlink, pixelSize, colorState.current, metadata
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -63,6 +65,8 @@ internal class TerminalState(
         parser.finish()
         combining = None
         setSynchronizedOutput(false)
+        progressPercent = None
+        setProgress(TerminalProgress.Inactive)
         return update(before)
     }
 
@@ -288,6 +292,7 @@ internal class TerminalState(
 
     public override fun osc(selector: Int, bytes: Array<Byte>) {
         if (colorOsc(this, selector, bytes)) return
+        if (metadataOsc(this, selector, bytes)) return
         if (selector == 52) {
             clipboardOsc(this, bytes)
             return
@@ -307,6 +312,13 @@ internal class TerminalState(
 
     fun emit(effect: TerminalEffect) {
         effects.add(effect)
+    }
+
+    fun setProgress(progress: TerminalProgress) {
+        if (metadata.progress == progress) return
+        metadata = metadata.{progress: progress}
+        emit(TerminalEffect.ProgressChanged(progress))
+        changed = true
     }
 
     fun nextClipboardRequest(): Long {
@@ -405,6 +417,8 @@ internal class TerminalState(
     private fun reset() {
         setSynchronizedOutput(false)
         colorState.reset()
+        progressPercent = None
+        setProgress(TerminalProgress.Inactive)
         style = TerminalStyle()
         modes = TerminalModes()
         main.reset(style)

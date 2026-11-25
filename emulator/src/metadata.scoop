@@ -1,0 +1,142 @@
+package scoop.terminal.emulator
+
+import scoop.text.indexOf
+import scoop.text.lowercaseAscii
+import scoop.text.split
+import scoop.text.substring
+import scoop.text.toIntOrNone
+
+/** A reported file URI, never a request to access or change a host directory. */
+public struct TerminalWorkingDirectory(
+    val uri: String,
+    val host: String,
+    val encodedPath: String,
+    val path: String
+)
+
+public enum TerminalProgress {
+    Inactive, Running(Int), Error(Int?), Indeterminate, Paused(Int?)
+}
+
+public struct TerminalMetadata(
+    val workingDirectory: TerminalWorkingDirectory? = None,
+    val progress: TerminalProgress = TerminalProgress.Inactive
+)
+
+internal fun metadataOsc(terminal: TerminalState, selector: Int, bytes: Array<Byte>): Boolean {
+    if (selector != 7 && selector != 9) return false
+    val text = String.fromUtf8OrNone(bytes) ?: return true
+    if (selector == 7) {
+        val directory = parseWorkingDirectory(text) ?: return true
+        if (terminal.metadata.workingDirectory != Some(directory)) {
+            terminal.metadata = terminal.metadata.{workingDirectory: Some(directory)}
+            terminal.emit(TerminalEffect.WorkingDirectoryChanged(Some(directory)))
+            terminal.presentationChanged()
+        }
+    } else
+        progressOsc(terminal, text)
+    return true
+}
+
+internal fun parseWorkingDirectory(text: String): TerminalWorkingDirectory? {
+    if (text.charLength < 8L || text.substring(0L, 7L).lowercaseAscii() != "file://") return None
+    for (character in text) {
+        if (character.code < 33 || character.code == 127 || character == '?' || character == '#')
+            return None
+    }
+    val slash = text.indexOf('/', 7L)
+    if (slash < 0L) return None
+    val host = text.substring(7L, slash)
+    val path = text.substring(slash)
+    if (!validFileHost(host)) return None
+    val decoded = decodeFilePath(path) ?: return None
+    return Some(TerminalWorkingDirectory(text, host, path, decoded))
+}
+
+private fun validFileHost(host: String): Boolean {
+    if (host == "") return true
+    if (host.getCharAt(0L) == '[') {
+        if (host.charLength < 4L || host.getCharAt(host.charLength - 1L) != ']') return false
+        var colons = 0
+        for (index in 1L..<host.charLength - 1L) {
+            val character = host.getCharAt(index)
+            if (character == ':')
+                colons += 1
+            else if (character != '.' && hexDigit(character) < 0) return false
+        }
+        return colons >= 2
+    }
+    for (character in host) {
+        val code = character.code
+        if (!(
+            (code >= 48 && code <= 57) ||
+                (code >= 65 && code <= 90) ||
+                (code >= 97 && code <= 122) ||
+                character ==
+                '.' ||
+                character ==
+                '-' ||
+                character ==
+                '_'
+        )
+        )
+            return false
+    }
+    return true
+}
+
+private fun decodeFilePath(text: String): String? {
+    val source = text.toByteArray()
+    val output = ArrayList<Byte>()
+    var index = 0L
+    while (index < source.size) {
+        var value = source[index].toInt() and 255
+        if (value == 37) {
+            if (index + 2L >= source.size) return None
+            val high = hexDigit((source[index + 1L].toInt() and 255).toChar())
+            val low = hexDigit((source[index + 2L].toInt() and 255).toChar())
+            if (high < 0 || low < 0) return None
+            value = high * 16 + low
+            index += 2L
+        }
+        if (value == 0) return None
+        output.add(value.toByte())
+        index += 1L
+    }
+    return String.fromUtf8OrNone(output)
+}
+
+private fun progressOsc(terminal: TerminalState, text: String) {
+    val fields = text.split(';')
+    if (fields.size == 0L || fields[0L] != "4") return
+    val state = if (fields.size < 2L || fields[1L] == "")
+        0
+    else
+        unsignedParameter(fields[1L]) ?: return
+    if (state < 0 || state > 4) return
+    var percent = terminal.progressPercent
+    if (state == 0)
+        percent = Some(0)
+    else if (state != 3) {
+        if (fields.size > 2L && fields[2L] != "") {
+            val value = unsignedParameter(fields[2L]) ?: return
+            percent = Some(if (value > 100) 100 else value)
+        } else if (state == 1) percent = Some(0)
+    }
+    terminal.progressPercent = percent
+    val next = when (state) {
+        case 0 -> TerminalProgress.Inactive
+        case 1 -> TerminalProgress.Running(percent ?: 0)
+        case 2 -> TerminalProgress.Error(percent)
+        case 3 -> TerminalProgress.Indeterminate
+        case _ -> TerminalProgress.Paused(percent)
+    }
+    terminal.setProgress(next)
+}
+
+private fun unsignedParameter(text: String): Int? {
+    for (character in text) {
+        if (character < '0' || character > '9') return None
+    }
+    return text.toIntOrNone()
+}

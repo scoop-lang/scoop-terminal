@@ -26,7 +26,9 @@ public class TerminalEmulatorSession private constructor(
     private val synchronizedOutputTimeout: Duration,
     private val configuredClipboard: TerminalClipboardAdapter?,
     private val clipboardReadTimeout: Duration,
-    private val onHostServiceError: (Throwable) -> Unit
+    private val onHostServiceError: (Throwable) -> Unit,
+    private val onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit,
+    private val onProgress: (TerminalProgress) -> Unit
 ) : AsyncCloseable {
     private val outgoing = TerminalWriteQueue()
     private val writeReady = Channel<Unit>(1L)
@@ -58,6 +60,7 @@ public class TerminalEmulatorSession private constructor(
     /** The current immutable presentation. The mutable emulator remains session-owned. */
     public val reading: TerminalReading get() = terminal.reading
     public val mouseReporting: Boolean get() = terminal.mouseReporting
+    public val metadata: TerminalMetadata get() = terminal.metadata
     public fun snapshot(): TerminalSnapshot = terminal.snapshot()
     public fun setColors(colors: TerminalColors) {
         apply(terminal.setColors(colors))
@@ -83,7 +86,9 @@ public class TerminalEmulatorSession private constructor(
             clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
             clipboard: TerminalClipboardAdapter? = None,
             clipboardReadTimeout: Duration = Duration.seconds(1L),
-            onHostServiceError: (Throwable) -> Unit = {}
+            onHostServiceError: (Throwable) -> Unit = {},
+            onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit = {},
+            onProgress: (TerminalProgress) -> Unit = {}
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
             val loop = currentEventLoop()
@@ -97,7 +102,8 @@ public class TerminalEmulatorSession private constructor(
                 pty,
                 onTitle,
                 onBell,
-                synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError
+                synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError,
+                onWorkingDirectory, onProgress
             )
             session.driver = Some(application.launch { session.run() })
             return session
@@ -241,6 +247,8 @@ public class TerminalEmulatorSession private constructor(
                 case Bell -> onBell()
                 case ClipboardReadRequested(val request) -> clipboardBridge.read(request)
                 case ClipboardWriteRequested(val request) -> clipboardBridge.write(request)
+                case WorkingDirectoryChanged(val directory) -> onWorkingDirectory(directory)
+                case ProgressChanged(val progress) -> onProgress(progress)
             }
         }
         updateSynchronizationDeadline()

@@ -34,6 +34,8 @@ public class Terminal public constructor(
     public val unicodeVersion: String = unicodeTerminalDataVersion()
     public val ambiguousWidth: TerminalAmbiguousWidth get() = state.ambiguousWidth
     public val pixelSize: TerminalPixelSize? get() = state.pixelSize
+    /** Latest parsed host metadata; the reading retains the committed metadata generation. */
+    public val metadata: TerminalMetadata get() = state.metadata
     public val synchronizedOutput: Boolean get() = state.synchronizedOutput
     public val synchronizationGeneration: Long get() = state.synchronizationGeneration
 

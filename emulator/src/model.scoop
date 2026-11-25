@@ -74,7 +74,8 @@ public struct TerminalCursor(
 /** Effects are delivered in the same order as the output that produced them. */
 public enum TerminalEffect {
     Reply(Array<Byte>), Title(String), Bell,
-    ClipboardReadRequested(TerminalClipboardRead), ClipboardWriteRequested(TerminalClipboardWrite)
+    ClipboardReadRequested(TerminalClipboardRead), ClipboardWriteRequested(TerminalClipboardWrite),
+    WorkingDirectoryChanged(TerminalWorkingDirectory?), ProgressChanged(TerminalProgress)
 }
 
 public struct TerminalUpdate(

@@ -15,6 +15,7 @@ public interface TerminalReading {
     public val mouseReporting: Boolean
     public val pixelSize: TerminalPixelSize?
     public val colors: TerminalColors
+    public val metadata: TerminalMetadata
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -38,11 +39,12 @@ internal class TerminalReadingData(
     private val history: HistoryReading,
     val screenLines: Array<TerminalLine>,
     public override val pixelSize: TerminalPixelSize?,
-    public override val colors: TerminalColors
+    public override val colors: TerminalColors,
+    public override val metadata: TerminalMetadata
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
-    val retainedBytes: Long = readingBytes(history, screenLines) + 8384L
+    val retainedBytes: Long = readingBytes(history, screenLines) + 8384L + metadataBytes(metadata)
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]
@@ -97,4 +99,13 @@ private fun readingBytes(history: HistoryReading, rows: Array<TerminalLine>): Lo
     for (line in rows)
         bytes += line.retainedBytes
     return bytes
+}
+
+private fun metadataBytes(metadata: TerminalMetadata): Long {
+    val directory = metadata.workingDirectory ?: return 128L
+    return 128L +
+        directory.uri.byteLength +
+        directory.host.byteLength +
+        directory.encodedPath.byteLength +
+        directory.path.byteLength
 }

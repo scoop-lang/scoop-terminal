@@ -1,0 +1,103 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class ShellMetadataTest {
+    @Test
+    fun workingDirectoryRetainsTheRemoteHostAndEncodedPathWithoutAccessingIt() {
+        val terminal = Terminal(8L, 2L)
+        val result = terminal
+            .feed("\u001b]7;file://remote.invalid/a%20b/%E4%B8%AD\u0007".toByteArray())
+        val directory = terminal.metadata.workingDirectory!!
+        assertEquals("remote.invalid", directory.host)
+        assertEquals("/a%20b/%E4%B8%AD", directory.encodedPath)
+        assertEquals("/a b/中", directory.path)
+        assertEquals("file://remote.invalid/a%20b/%E4%B8%AD", directory.uri)
+        assertTrue(result.damage.metadataChanged)
+        assertEquals(1L, result.effects.size)
+        assertEquals(0L, terminal.reading.textRevision)
+        assertEquals("/C:/repo", parseWorkingDirectory("file:///C:/repo")!!.path)
+        assertEquals("[2001:db8::1]", parseWorkingDirectory("file://[2001:db8::1]/repo")!!.host)
+    }
+
+    @Test
+    fun malformedDirectoriesLeaveThePreviousMetadataIntact() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("\u001b]7;file:///repo\u0007".toByteArray())
+        val before = terminal.metadata
+        for (
+            value in [
+                "https://example.com/repo",
+                "file://host",
+                "file:///bad%xy",
+                "file:///bad%ff",
+                "file:///bad%00",
+                "file://user@host/repo",
+                "file:///repo?query",
+                "file:///repo#part"
+            ]
+        ) {
+            val result = terminal.feed(("\u001b]7;" + value + "\u0007").toByteArray())
+            assertEquals(0L, result.effects.size)
+            assertEquals(before, terminal.metadata)
+        }
+    }
+
+    @Test
+    fun progressDefaultsRetentionAndClampingFollowTheSubcommand() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("\u001b]9;4;2\u0007".toByteArray())
+        assertEquals(TerminalProgress.Error(None), terminal.metadata.progress)
+        terminal.feed("\u001b]9;4;1;23\u0007\u001b]9;4;3\u0007\u001b]9;4;4\u0007".toByteArray())
+        assertEquals(TerminalProgress.Paused(Some(23)), terminal.metadata.progress)
+        terminal.feed("\u001b]9;4;2;150\u0007".toByteArray())
+        assertEquals(TerminalProgress.Error(Some(100)), terminal.metadata.progress)
+        terminal
+            .feed(
+                "\u001b]9;4;8;20\u0007\u001b]9;4;1;bad\u0007\u001b]9;not a notification\u0007"
+                    .toByteArray()
+            )
+        assertEquals(TerminalProgress.Error(Some(100)), terminal.metadata.progress)
+        terminal.feed("\u001b]9;4;1\u0007".toByteArray())
+        assertEquals(TerminalProgress.Running(0), terminal.metadata.progress)
+        terminal.feed("\u001b]9;4\u0007".toByteArray())
+        assertEquals(TerminalProgress.Inactive, terminal.metadata.progress)
+    }
+
+    @Test
+    fun hostEventsContinueDuringSynchronizedOutputButMetadataSnapshotsStayFrozen() {
+        val terminal = Terminal(8L, 2L)
+        val before = terminal.reading
+        val result = terminal
+            .feed(
+                "\u001b[?2026h\u001b]7;file://remote/repo\u0007\u001b]9;4;1;42\u0007\u001b[6n"
+                    .toByteArray()
+            )
+        assertEquals(3L, result.effects.size)
+        when (result.effects[0L]) {
+            case WorkingDirectoryChanged(val value) -> assertEquals("remote", value!!.host)
+            case _ -> fail(Some("expected directory event"))
+        }
+        when (result.effects[1L]) {
+            case ProgressChanged(val value) -> assertEquals(TerminalProgress.Running(42), value)
+            case _ -> fail(Some("expected progress event"))
+        }
+        assertTrue(terminal.reading === before)
+        assertEquals(TerminalProgress.Inactive, before.metadata.progress)
+        terminal.releaseSynchronizedOutput()
+        assertEquals(TerminalProgress.Running(42), terminal.reading.metadata.progress)
+    }
+
+    @Test
+    fun resetAndEofClearProgressWithoutInventingCommandSuccess() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("\u001b]9;4;1;50\u0007\u001bc".toByteArray())
+        assertEquals(TerminalProgress.Inactive, terminal.metadata.progress)
+        terminal.feed("\u001b]9;4;3\u0007".toByteArray())
+        val result = terminal.finishOutput()
+        assertEquals(TerminalProgress.Inactive, terminal.metadata.progress)
+        assertEquals(1L, result.effects.size)
+        assertEquals(TerminalProgress.Inactive, terminal.reading.metadata.progress)
+    }
+}
