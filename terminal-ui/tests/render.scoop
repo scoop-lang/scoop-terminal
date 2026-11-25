@@ -20,6 +20,9 @@ private class TerminalGlyphCacheTest {
                     assertEquals("中", cell.text)
                     assertTrue(layout === cache.layout(TerminalCell("�"), Color.White))
                     assertEquals("中", cache.layout(TerminalCell("中", 2L), Color.White).text)
+                    val mark = TerminalCell("\u0301", dottedCircle = true)
+                    assertEquals("◌\u0301", cache.layout(mark, Color.White).text)
+                    assertEquals("\u0301", mark.text)
                 } finally {
                     cache.release()
                 }

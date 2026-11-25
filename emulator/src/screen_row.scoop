@@ -41,7 +41,7 @@ internal class ScreenRow(
 
             case None -> {
                 val content = cells.toArray()
-                retainedBytes = 64L + cells.size * 48L
+                retainedBytes = 64L + cells.size * 160L
                 for (cell in content)
                     retainedBytes += cell.text.byteLength
                 publishedCells = Some(content)
@@ -91,9 +91,10 @@ internal class ScreenRow(
         text: String,
         width: Long,
         style: TerminalStyle,
-        intrinsicWidth: Long = 0L
+        intrinsicWidth: Long = 0L,
+        dottedCircle: Boolean = false
     ) {
-        putCell(column, TerminalCell(text, width, style, intrinsicWidth))
+        putCell(column, TerminalCell(text, width, style, intrinsicWidth, dottedCircle))
     }
 
     fun putCell(column: Long, cell: TerminalCell) {

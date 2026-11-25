@@ -1,13 +1,14 @@
 package scoop.terminal.emulator
 
 import scoop.charset.graphemeBoundaries
-import scoop.charset.unicodeScalarWidth
+import scoop.charset.unicodeTextWidth
 
 internal class TerminalState(
     columns: Long,
     rows: Long,
     historyLimit: Long,
-    parserLimits: TerminalParserLimits
+    parserLimits: TerminalParserLimits,
+    val ambiguousWidth: TerminalAmbiguousWidth
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges()
@@ -103,8 +104,8 @@ internal class TerminalState(
         val text = displayed.toString()
         if (extendCluster(displayed, text)) return
         combining = None
-        val width = if (displayed.code < 128) 1L else clusterWidth(text)
-        if (width > 0L) put(text, width)
+        val width = if (displayed.code < 128) 1L else clusterWidth(text, ambiguousWidth)
+        if (width >= 0L) put(text, if (width == 0L) 1L else width, width == 0L)
     }
 
     private fun extendCluster(character: Char, text: String): Boolean {
@@ -113,21 +114,23 @@ internal class TerminalState(
         if (character.code < 128 && cell.text.byteLength == cell.text.charLength) return false
         val combined = cell.text + text
         if (graphemeBoundaries(combined).size != 2L) return false
-        val width = clusterWidth(combined)
+        val measured = clusterWidth(combined, ambiguousWidth)
+        val width = if (measured <= 0L) 1L else measured
+        val dotted = cell.dottedCircle && measured == 0L
         if (startColumn + width > screen.writeRight + 1L) {
             row.erase(startColumn, startColumn + cell.width, style)
             screen.moveColumn(startColumn)
-            put(combined, width)
+            put(combined, width, dotted)
         } else {
-            row.put(startColumn, combined, width, cell.style)
+            row.put(startColumn, combined, width, cell.style, dottedCircle = dotted)
             moveAfter(startColumn, width)
-            lastPrinted = TerminalCell(combined, width, cell.style)
+            lastPrinted = TerminalCell(combined, width, cell.style, dottedCircle = dotted)
             changed = true
         }
         return true
     }
 
-    private fun put(text: String, width: Long) {
+    private fun put(text: String, width: Long, dottedCircle: Boolean = false) {
         val grid = screen
         val length = if (width <= grid.columns) width else 1L
         val right = grid.writeRight
@@ -143,10 +146,10 @@ internal class TerminalState(
         val row = grid.current
         val position = grid.column
         if (modes.insert) grid.shiftColumns(occupied, true, style)
-        row.put(position, displayed, occupied, style, intrinsic)
+        row.put(position, displayed, occupied, style, intrinsic, dottedCircle)
         combining = Some(row)
         startColumn = position
-        lastPrinted = TerminalCell(displayed, occupied, style, intrinsic)
+        lastPrinted = TerminalCell(displayed, occupied, style, intrinsic, dottedCircle)
         moveAfter(position, occupied)
         changed = true
     }
@@ -262,7 +265,7 @@ internal class TerminalState(
         val glyph = lastPrinted
         if (glyph.text != "") {
             for (index in 0L..<clamp(count, 0L, 65535L))
-                put(glyph.text, glyph.logicalWidth)
+                put(glyph.text, glyph.logicalWidth, glyph.dottedCircle)
         }
     }
 
@@ -343,15 +346,8 @@ private fun defaultTabs(columns: Long): MutableArray<Boolean> = MutableArray<Boo
     defaultTab(column)
 }
 
-private fun clusterWidth(text: String): Long {
-    var width = 0L
-    var emoji = false
-    var regional = 0
-    for (character in text) {
-        val scalar = unicodeScalarWidth(character).toLong()
-        if (scalar > width) width = scalar
-        if (character.code == 0xfe0f || character.code == 0x20e3) emoji = true
-        if (character.code >= 0x1f1e6 && character.code <= 0x1f1ff) regional += 1
-    }
-    return if (emoji || regional == 2) 2L else clamp(width, 0L, 2L)
-}
+private fun clusterWidth(text: String, ambiguous: TerminalAmbiguousWidth): Long = clamp(
+    unicodeTextWidth(text, ambiguousAsWide = ambiguous == TerminalAmbiguousWidth.Wide),
+    -1L,
+    2L
+)

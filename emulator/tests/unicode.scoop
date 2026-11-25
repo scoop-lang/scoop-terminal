@@ -1,0 +1,99 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class UnicodeWidthTest {
+    @Test
+    fun ambiguousWidthIsExplicitAndUsesTheDocumentedUnicodeData() {
+        val narrow = Terminal(12L, 2L)
+        val wide = Terminal(12L, 2L, ambiguousWidth = TerminalAmbiguousWidth.Wide)
+        narrow.feed("A·Ωe\u0301".toByteArray())
+        wide.feed("A·".toByteArray())
+        assertEquals(3L, wide.cursor.column)
+        wide.feed("Ω".toByteArray())
+        assertEquals(5L, wide.cursor.column)
+        wide.feed("e\u0301".toByteArray())
+        assertEquals("17.0.0", narrow.unicodeVersion)
+        assertEquals(4L, narrow.cursor.column)
+        assertEquals(6L, wide.cursor.column)
+        assertEquals(2L, wide.lines(0L, 1L)[0L].cells[1L].width)
+        assertEquals(0L, wide.lines(0L, 1L)[0L].cells[2L].width)
+        wide.resize(3L, 4L)
+        wide.resize(12L, 2L)
+        assertEquals("Ω", wide.lines(wide.historySize, 1L)[0L].cells[3L].text)
+    }
+
+    @Test
+    fun variationSelectorsCanShrinkAndExpandPreviouslyPrintedGraphemes() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("⌚".toByteArray())
+        assertEquals(2L, terminal.cursor.column)
+        terminal.feed("\uFE0E".toByteArray())
+        assertEquals(1L, terminal.cursor.column)
+        assertEquals("⌚\uFE0E", terminal.lines(0L, 1L)[0L].cells[0L].text)
+        assertEquals(1L, terminal.lines(0L, 1L)[0L].cells[1L].width)
+        terminal.feed("♥".toByteArray())
+        assertEquals(2L, terminal.cursor.column)
+        terminal.feed("\uFE0F".toByteArray())
+        assertEquals(3L, terminal.cursor.column)
+        assertEquals(2L, terminal.lines(0L, 1L)[0L].cells[1L].width)
+        assertEquals(0L, terminal.lines(0L, 1L)[0L].cells[2L].width)
+    }
+
+    @Test
+    fun clusterExpansionAtTheRightEdgeMovesTheWholeGrapheme() {
+        val terminal = Terminal(3L, 3L)
+        terminal.feed("ab♥".toByteArray())
+        terminal.feed("\uFE0F".toByteArray())
+        val lines = terminal.lines(0L, 2L)
+        assertTrue(lines[0L].softWrapped)
+        assertEquals(2L, lines[0L].usedColumns)
+        assertEquals("♥\uFE0F", lines[1L].cells[0L].text)
+        assertEquals(2L, lines[1L].cells[0L].width)
+        assertEquals(TerminalCursor(1L, 2L, true), terminal.cursor)
+        terminal.resize(6L, 3L)
+        assertEquals("♥\uFE0F", terminal.lines(0L, 1L)[0L].cells[2L].text)
+    }
+
+    @Test
+    fun oneColumnKeepsTheOriginalEmojiAndCanBecomeTextPresentation() {
+        val terminal = Terminal(1L, 2L)
+        terminal.feed("⌚".toByteArray())
+        assertEquals("�", terminal.lines(0L, 1L)[0L].cells[0L].displayText)
+        terminal.feed("\uFE0E".toByteArray())
+        assertEquals("⌚\uFE0E", terminal.lines(0L, 1L)[0L].cells[0L].displayText)
+        assertEquals(1L, terminal.lines(0L, 1L)[0L].cells[0L].logicalWidth)
+    }
+
+    @Test
+    fun zeroWidthLeadingMarksRetainTheirTextWithADisplayOnlyBase() {
+        val terminal = Terminal(6L, 2L)
+        terminal.feed("\u0301".toByteArray())
+        terminal.feed("\u0300".toByteArray())
+        val cell = terminal.lines(0L, 1L)[0L].cells[0L]
+        assertEquals("\u0301\u0300", cell.text)
+        assertEquals("◌\u0301\u0300", cell.displayText)
+        assertEquals(1L, cell.width)
+        terminal.feed("\u001b[b".toByteArray())
+        assertEquals(cell.displayText, terminal.lines(0L, 1L)[0L].cells[1L].displayText)
+        terminal.resize(1L, 4L)
+        assertEquals(cell.displayText, terminal.lines(0L, 1L)[0L].cells[0L].displayText)
+    }
+
+    @Test
+    fun fragmentedEmojiAndMalformedUtf8KeepValidCellPairs() {
+        val terminal = Terminal(20L, 2L)
+        for (byte in "👩🏽‍💻🇨🇳1\uFE0F\u20E3".toByteArray())
+            terminal.feed([byte])
+        assertEquals(6L, terminal.cursor.column)
+        val line = terminal.lines(0L, 1L)[0L]
+        assertEquals("👩🏽‍💻", line.cells[0L].text)
+        assertEquals("🇨🇳", line.cells[2L].text)
+        assertEquals("1\uFE0F\u20E3", line.cells[4L].text)
+        for (column in [1L, 3L, 5L])
+            assertEquals(0L, line.cells[column].width)
+        terminal.feed([0xf0.toByte(), 0x80.toByte(), 0x80.toByte(), 'x'.code.toByte()])
+        assertEquals("x", terminal.lines(0L, 1L)[0L].cells[9L].text)
+    }
+}

@@ -26,11 +26,13 @@ public struct TerminalCell(
     val text: String = "",
     val width: Long = 1L,
     val style: TerminalStyle = TerminalStyle(),
-    val intrinsicWidth: Long = 0L
+    val intrinsicWidth: Long = 0L,
+    val dottedCircle: Boolean = false
 ) {
     /** A narrow-window placeholder retains the original grapheme and its logical width. */
     public val logicalWidth: Long get() = if (intrinsicWidth > 0L) intrinsicWidth else width
-    public val displayText: String get() = if (logicalWidth > width) "�" else text
+    public val displayText: String
+        get() = if (logicalWidth > width) "�" else if (dottedCircle) "◌" + text else text
 }
 
 /** A physical row, with identity retained when the row moves through scrollback. */
