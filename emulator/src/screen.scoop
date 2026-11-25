@@ -2,7 +2,7 @@ package scoop.terminal.emulator
 
 import scoop.collections.HashMap
 
-internal class ScreenChanges {
+internal class ScreenChanges(val links: TerminalLinkStore = TerminalLinkStore()) {
     var pending = false
     var textPending = false
 }
@@ -134,7 +134,8 @@ internal class Screen(
         presentationVersion,
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
-        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata
+        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
+        changes.links.snapshot()
     )
 
     fun reconcileLogicalLines() {
@@ -312,7 +313,7 @@ internal class Screen(
         val toHistory = record && first == 0L && last == rows - 1L
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
             val removed = cells.removeAt(first)
-            if (toHistory) remember(removed)
+            if (toHistory) remember(removed) else removed.release()
             cells.add(last, blank(style))
             changes.pending = true
             changes.textPending = true
@@ -326,7 +327,7 @@ internal class Screen(
             return
         }
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
-            cells.removeAt(last)
+            cells.removeAt(last).release()
             cells.add(first, blank(style))
             changes.pending = true
             changes.textPending = true
@@ -344,7 +345,8 @@ internal class Screen(
         val amount = clamp(count, 0L, height)
         if (amount == 0L) return
         val source = Array<TerminalLine>(height) { index -> cells[first + index].snapshot() }
-        for (index in 0L..<height) {
+        for (step in 0L..<height) {
+            val index = if (up) step else height - 1L - step
             val from = index + if (up) amount else -amount
             cells[first + index]
                 .replaceRange(
@@ -359,11 +361,14 @@ internal class Screen(
     private fun remember(line: ScreenRow) {
         if (historyLimit != 0L) {
             if (history.size == historyLimit) {
-                history.removeFirst()
+                history.removeFirst().release()
                 changes.textPending = true
             }
             history.addLast(line)
-        } else if (line.usedColumns > 0L) changes.textPending = true
+        } else {
+            if (line.usedColumns > 0L) changes.textPending = true
+            line.release()
+        }
     }
 
     fun resize(width: Long, height: Long, restoreHistory: Boolean, style: TerminalStyle) {
@@ -386,7 +391,7 @@ internal class Screen(
                 cells[cells.size - 1L].usedColumns ==
                 0L
         )
-            cells.removeAt(cells.size - 1L)
+            cells.removeAt(cells.size - 1L).release()
         while (cells.size > height) {
             remember(cells.removeAt(0L))
             row -= 1L
@@ -461,8 +466,12 @@ internal class Screen(
         columns = width
         resetHorizontalMargins()
         history.clear()
+        for (line in cells)
+            line.release()
         cells.clear()
         val retained = if (start > historyLimit) start - historyLimit else 0L
+        for (index in 0L..<retained)
+            packed[index].release()
         changes.textPending = previousTextPending || retained > 0L
         for (index in retained..<start)
             history.addLast(packed[index])
@@ -505,8 +514,10 @@ internal class Screen(
     fun reset(style: TerminalStyle) {
         epoch = ids.take()
         changes.textPending = true
-        for (index in 0L..<rows)
+        for (index in 0L..<rows) {
+            cells[index].release()
             cells[index] = blank(style)
+        }
         history.clear()
         top = 0L
         bottom = rows - 1L

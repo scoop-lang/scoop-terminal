@@ -1,0 +1,144 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+import scoop.text.indexOf
+import scoop.text.split
+import scoop.text.substring
+
+public struct TerminalLinkParameter(val name: String, val value: String)
+
+/** Immutable OSC 8 metadata; activation is always a host decision. */
+public class TerminalLink internal constructor(
+    public val key: Long,
+    public val id: String?,
+    public val uri: String,
+    public val parameters: Array<TerminalLinkParameter>
+) {
+    public fun sameGroup(other: TerminalLink): Boolean = key ==
+        other.key ||
+        (id != None && id == other.id && uri == other.uri)
+}
+
+public struct TerminalLinkLimits(val maxRecords: Long = 65536L, val maxBytes: Long = 16777216L)
+
+internal class LinkReading(
+    private val root: SnapshotIndex<TerminalLink>?,
+    val count: Long,
+    val bytes: Long
+) {
+    fun get(key: Long): TerminalLink? = indexValue(root, key)
+}
+
+private class LinkEntry(val link: TerminalLink, val alias: String?, val bytes: Long) {
+    var references = 0L
+}
+
+/** Live cells and cursor state retain IDs; old reading roots independently retain old records. */
+internal class TerminalLinkStore(private val limits: TerminalLinkLimits = TerminalLinkLimits()) {
+    private val entries = HashMap<Long, LinkEntry>()
+    private val aliases = HashMap<String, Long>()
+    private var root: SnapshotIndex<TerminalLink>? = None
+    private var next = 1L
+    private var bytes = 0L
+    private var current = 0L
+    val active: Long get() = current
+    init {
+        if (limits.maxRecords < 0L || limits.maxBytes < 0L)
+            throw IllegalArgumentException(Some("negative terminal hyperlink limit"))
+    }
+    fun snapshot(): LinkReading = LinkReading(root, entries.size, bytes)
+
+    fun open(rawParameters: String, uri: String): Boolean {
+        val parameters = ArrayList<TerminalLinkParameter>()
+        var id: String? = None
+        for (part in rawParameters.split(':')) {
+            if (part == "") continue
+            val equals = part.indexOf('=')
+            val name = if (equals < 0L) part else part.substring(0L, equals)
+            val value = if (equals < 0L) "" else part.substring(equals + 1L)
+            parameters.add(TerminalLinkParameter(name, value))
+            if (name == "id" && value != "") id = Some(value)
+        }
+        val alias = when (id) {
+            case Some(val value) -> Some(value + "\u0000" + uri + "\u0000" + rawParameters)
+            case None -> None
+        }
+        when (alias) {
+            case Some(val value) ->
+                when (aliases[value]) {
+                    case Some(val key) -> {
+                        setActive(key);
+                        return true
+                    }
+
+                    case None -> {}
+                }
+            case None -> {}
+        }
+        setActive(0L)
+        val retained = 256L + uri.byteLength * 2L + rawParameters.byteLength * 4L
+        if (entries.size >= limits.maxRecords || retained > limits.maxBytes - bytes) return false
+        val key = next
+        next += 1L
+        val link = TerminalLink(key, id, uri, parameters.toArray())
+        entries[key] = LinkEntry(link, alias, retained)
+        when (alias) {
+            case Some(val value) -> aliases[value] = key
+            case None -> {}
+        }
+        root = Some(indexUpdated(root, key, link))
+        bytes += retained
+        setActive(key)
+        return true
+    }
+
+    fun setActive(key: Long) {
+        if (key == current) return
+        retain(key)
+        val previous = current
+        current = key
+        release(previous)
+    }
+
+    fun retain(key: Long) {
+        if (key == 0L) return
+        val entry = entries[key] ?:
+            throw IllegalStateException(Some("unretained terminal hyperlink"))
+        entry.references += 1L
+    }
+
+    fun release(key: Long) {
+        if (key == 0L) return
+        val entry = entries[key] ?:
+            throw IllegalStateException(Some("unbalanced terminal hyperlink release"))
+        entry.references -= 1L
+        if (entry.references != 0L) return
+        entries.remove(key)
+        root = indexRemoved(root, key)
+        bytes -= entry.bytes
+        when (entry.alias) {
+            case Some(val alias) -> aliases.remove(alias)
+            case None -> {}
+        }
+    }
+}
+
+internal fun linkOsc(terminal: TerminalState, bytes: Array<Byte>) {
+    val text = String.fromUtf8OrNone(bytes) ?: return
+    val separator = text.indexOf(';')
+    if (separator < 0L) return
+    val parameters = text.substring(0L, separator)
+    val uri = text.substring(separator + 1L)
+    terminal.stopCombining()
+    if (uri == "")
+        terminal.links.setActive(0L)
+    else if (!terminal.links.open(parameters, uri))
+        terminal.emit(TerminalEffect.Diagnostic("terminal hyperlink storage limit exceeded"))
+    terminal.presentationChanged()
+}
+
+/** Reads a link using coordinates from this immutable presentation, including wide-cell tails. */
+public fun TerminalReading.linkAt(row: Long, column: Long): TerminalLink? {
+    if (row < 0L || row >= historySize + rows || column < 0L || column >= columns) return None
+    return link(lines(row, 1L)[0L].cells[column].linkId)
+}

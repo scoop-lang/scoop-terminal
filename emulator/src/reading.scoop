@@ -16,6 +16,8 @@ public interface TerminalReading {
     public val pixelSize: TerminalPixelSize?
     public val colors: TerminalColors
     public val metadata: TerminalMetadata
+    public val linkCount: Long
+    public fun link(key: Long): TerminalLink?
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -40,11 +42,17 @@ internal class TerminalReadingData(
     val screenLines: Array<TerminalLine>,
     public override val pixelSize: TerminalPixelSize?,
     public override val colors: TerminalColors,
-    public override val metadata: TerminalMetadata
+    public override val metadata: TerminalMetadata,
+    private val links: LinkReading
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
-    val retainedBytes: Long = readingBytes(history, screenLines) + 8384L + metadataBytes(metadata)
+    public override val linkCount: Long get() = links.count
+    public override fun link(key: Long): TerminalLink? = links.get(key)
+    val retainedBytes: Long = readingBytes(history, screenLines) +
+        8384L +
+        metadataBytes(metadata) +
+        links.bytes
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]

@@ -15,6 +15,7 @@ internal class ScreenRow(
     private var identity = LogicalLine(id)
     private var offset = 0L
     private var used = if (style == TerminalStyle()) 0L else columns
+    private var released = false
     val logical: LogicalLine get() = identity
     val logicalOffset: Long get() = offset
     val usedColumns: Long get() = used
@@ -41,7 +42,7 @@ internal class ScreenRow(
 
             case None -> {
                 val content = cells.toArray()
-                retainedBytes = 64L + cells.size * 160L
+                retainedBytes = 64L + cells.size * 192L
                 for (cell in content)
                     retainedBytes += cell.text.byteLength
                 publishedCells = Some(content)
@@ -92,13 +93,14 @@ internal class ScreenRow(
         width: Long,
         style: TerminalStyle,
         intrinsicWidth: Long = 0L,
-        dottedCircle: Boolean = false
+        dottedCircle: Boolean = false,
+        linkId: Long = 0L
     ) {
-        putCell(column, TerminalCell(text, width, style, intrinsicWidth, dottedCircle))
+        putCell(column, TerminalCell(text, width, style, intrinsicWidth, dottedCircle, linkId))
     }
 
     fun putCell(column: Long, cell: TerminalCell) {
-        val continuation = TerminalCell(width = 0L, style = cell.style)
+        val continuation = TerminalCell(width = 0L, style = cell.style, linkId = cell.linkId)
         val extended = column + cell.width > used
         if (extended) used = column + cell.width
         if (cells[column] == cell && (cell.width != 2L || cells[column + 1L] == continuation)) {
@@ -113,12 +115,15 @@ internal class ScreenRow(
             cell.width ||
             previous.logicalWidth !=
             cell.logicalWidth
+        // Hold the incoming ID while clearing an overlapping previous glyph.
+        changes.links.retain(cell.linkId)
         clearGlyph(column, cell.style)
         if (cell.width == 2L) {
             clearGlyph(column + 1L, cell.style)
-            cells[column + 1L] = continuation
+            replaceCell(column + 1L, continuation)
         }
-        cells[column] = cell
+        replaceCell(column, cell)
+        changes.links.release(cell.linkId)
         trim()
         invalidate(textChanged)
     }
@@ -140,7 +145,7 @@ internal class ScreenRow(
         for (index in left..<right) {
             if (cells[index] != blank) {
                 val previous = cells[index]
-                cells[index] = blank
+                replaceCell(index, blank)
                 invalidate(previous.text != blank.text || previous.width != blank.width)
             }
         }
@@ -161,16 +166,16 @@ internal class ScreenRow(
         if (insert) {
             var index = end - 1L
             while (index >= start + count) {
-                cells[index] = cells[index - count]
+                replaceCell(index, cells[index - count])
                 index -= 1L
             }
             for (column in start..<start + count)
-                cells[column] = blank
+                replaceCell(column, blank)
         } else {
             for (column in start..<end - count)
-                cells[column] = cells[column + count]
+                replaceCell(column, cells[column + count])
             for (column in end - count..<end)
-                cells[column] = blank
+                replaceCell(column, blank)
         }
         repair(style)
         used = cells.size
@@ -199,6 +204,10 @@ internal class ScreenRow(
     fun resize(columns: Long, style: TerminalStyle) {
         if (columns == cells.size) return
         val previous = cells
+        if (columns < previous.size) {
+            for (index in columns..<previous.size)
+                changes.links.release(previous[index].linkId)
+        }
         val blank = TerminalCell(style = style)
         cells = MutableArray<TerminalCell>(columns) { index ->
             if (index < previous.size) previous[index] else blank
@@ -213,11 +222,11 @@ internal class ScreenRow(
     private fun clearGlyph(column: Long, style: TerminalStyle) {
         val blank = TerminalCell(style = style)
         when (cells[column].width) {
-            case 0L -> cells[column - 1L] = blank
-            case 2L -> cells[column + 1L] = blank
+            case 0L -> replaceCell(column - 1L, blank)
+            case 2L -> replaceCell(column + 1L, blank)
             case _ -> {}
         }
-        cells[column] = blank
+        replaceCell(column, blank)
     }
 
     private fun repair(style: TerminalStyle) {
@@ -229,13 +238,29 @@ internal class ScreenRow(
                     if (index + 1L < cells.size && cells[index + 1L].width == 0L)
                         index += 1L
                     else
-                        cells[index] = blank
+                        replaceCell(index, blank)
                 }
 
-                case 0L -> cells[index] = blank
+                case 0L -> replaceCell(index, blank)
                 case _ -> {}
             }
             index += 1L
         }
+    }
+
+    private fun replaceCell(index: Long, value: TerminalCell) {
+        val previous = cells[index].linkId
+        if (previous != value.linkId) {
+            changes.links.retain(value.linkId)
+            changes.links.release(previous)
+        }
+        cells[index] = value
+    }
+
+    fun release() {
+        if (released) return
+        released = true
+        for (cell in cells)
+            changes.links.release(cell.linkId)
     }
 }

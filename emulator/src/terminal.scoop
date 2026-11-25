@@ -15,7 +15,8 @@ public class Terminal public constructor(
     parserLimits: TerminalParserLimits = TerminalParserLimits(),
     ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
     colors: TerminalColors = TerminalColors(),
-    clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy()
+    clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
+    linkLimits: TerminalLinkLimits = TerminalLinkLimits()
 ) {
     private val state = createState(
         columns,
@@ -23,7 +24,7 @@ public class Terminal public constructor(
         historyLimit,
         parserLimits,
         ambiguousWidth,
-        colors, clipboardPolicy
+        colors, clipboardPolicy, linkLimits
     )
     private val snapshotBudget = SnapshotBudget(snapshotLimits)
 
@@ -114,7 +115,8 @@ private fun createState(
     parserLimits: TerminalParserLimits,
     ambiguousWidth: TerminalAmbiguousWidth,
     colors: TerminalColors,
-    clipboardPolicy: TerminalClipboardPolicy
+    clipboardPolicy: TerminalClipboardPolicy,
+    linkLimits: TerminalLinkLimits
 ): TerminalState {
     checkSize(columns, rows)
     checkClipboardPolicy(clipboardPolicy)
@@ -126,7 +128,7 @@ private fun createState(
         parserLimits,
         ambiguousWidth,
         colors,
-        clipboardPolicy
+        clipboardPolicy, linkLimits
     )
 }
 

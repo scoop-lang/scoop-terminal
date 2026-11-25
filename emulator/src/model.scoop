@@ -38,7 +38,8 @@ public struct TerminalCell(
     val width: Long = 1L,
     val style: TerminalStyle = TerminalStyle(),
     val intrinsicWidth: Long = 0L,
-    val dottedCircle: Boolean = false
+    val dottedCircle: Boolean = false,
+    val linkId: Long = 0L
 ) {
     /** A narrow-window placeholder retains the original grapheme and its logical width. */
     public val logicalWidth: Long get() = if (intrinsicWidth > 0L) intrinsicWidth else width
@@ -75,7 +76,9 @@ public struct TerminalCursor(
 public enum TerminalEffect {
     Reply(Array<Byte>), Title(String), Bell,
     ClipboardReadRequested(TerminalClipboardRead), ClipboardWriteRequested(TerminalClipboardWrite),
-    WorkingDirectoryChanged(TerminalWorkingDirectory?), ProgressChanged(TerminalProgress)
+    WorkingDirectoryChanged(TerminalWorkingDirectory?), ProgressChanged(
+        TerminalProgress
+    ), Diagnostic(String)
 }
 
 public struct TerminalUpdate(

@@ -1,0 +1,129 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class HyperlinkTest {
+    @Test
+    fun splitSequencesRetainParametersAndWideCellLinks() {
+        val bytes =
+            "\u001b]8;id=hello:future=value;https://example.org/中\u001b\\中a\u001b]8;;\u0007b"
+                .toByteArray()
+        for (split in 0L..bytes.size) {
+            val terminal = Terminal(8L, 2L)
+            terminal.feed(Array<Byte>(split) { index -> bytes[index] })
+            terminal.feed(Array<Byte>(bytes.size - split) { index -> bytes[split + index] })
+            val reading = terminal.reading
+            val first = reading.linkAt(0L, 0L)!!
+            assertEquals("https://example.org/中", first.uri)
+            assertEquals(Some("hello"), first.id)
+            assertEquals(2L, first.parameters.size)
+            assertEquals(TerminalLinkParameter("id", "hello"), first.parameters[0L])
+            assertEquals(TerminalLinkParameter("future", "value"), first.parameters[1L])
+            assertEquals(first.key, reading.linkAt(0L, 1L)!!.key)
+            assertEquals(first.key, reading.linkAt(0L, 2L)!!.key)
+            assertEquals(None, reading.linkAt(0L, 3L)?.uri)
+            assertEquals(1L, reading.linkCount)
+        }
+    }
+
+    @Test
+    fun explicitIdsGroupOnlyTheSameUriAndAnonymousLinksStaySeparate() {
+        val terminal = Terminal(10L, 2L)
+        terminal
+            .feed(
+                "\u001b]8;id=x;https://one\u0007a\u001b]8;;\u0007 \u001b]8;id=x;https://one\u0007b\u001b]8;id=x:other=yes;https://one\u0007c\u001b]8;id=x;https://two\u0007d\u001b]8;;https://one\u0007e\u001b]8;;https://one\u0007f\u001b]8;;\u0007"
+                    .toByteArray()
+            )
+        val reading = terminal.reading
+        val a = reading.linkAt(0L, 0L)!!
+        assertEquals(a.key, reading.linkAt(0L, 2L)!!.key)
+        assertTrue(a.sameGroup(reading.linkAt(0L, 3L)!!))
+        assertFalse(a.sameGroup(reading.linkAt(0L, 4L)!!))
+        assertFalse(reading.linkAt(0L, 5L)!!.sameGroup(reading.linkAt(0L, 6L)!!))
+        assertEquals(5L, reading.linkCount)
+    }
+
+    @Test
+    fun reflowEditingAndEvictionReleaseLiveRecordsButKeepOwnedSnapshots() {
+        val terminal = Terminal(5L, 2L, historyLimit = 2L)
+        terminal.feed("\u001b]8;;https://old\u0007ab中cd\u001b]8;;\u0007".toByteArray())
+        val snapshot = terminal.snapshot()
+        terminal.resize(3L, 3L)
+        val reading = terminal.reading
+        for (line in reading.lines(0L, reading.historySize + reading.rows)) {
+            for (cell in line.cells) {
+                if (cell.linkId != 0L)
+                    assertEquals(Some("https://old"), reading.link(cell.linkId)?.uri)
+            }
+        }
+        terminal.feed("\u001b[H\u001b[2J\u001b[3J".toByteArray())
+        assertEquals(0L, terminal.reading.linkCount)
+        assertEquals(Some("https://old"), snapshot.linkAt(0L, 0L)?.uri)
+        terminal
+            .feed(
+                "\u001b]8;;https://evicted\u0007x\u001b]8;;\u0007\r\n1\r\n2\r\n3\r\n4\r\n5"
+                    .toByteArray()
+            )
+        assertEquals(0L, terminal.reading.linkCount)
+        snapshot.close()
+    }
+
+    @Test
+    fun rectangularScrollAndWideGlyphEditsKeepLinkReferencesBalanced() {
+        val terminal = Terminal(6L, 3L)
+        terminal
+            .feed(
+                "\u001b[?69h\u001b[2;5s\u001b[1;2H\u001b]8;;https://a\u0007中\u001b]8;;\u0007\u001b[2;2H\u001b]8;;https://b\u0007B\u001b]8;;\u0007\u001b[H\u001b[T"
+                    .toByteArray()
+            )
+        assertEquals(Some("https://a"), terminal.reading.linkAt(1L, 1L)?.uri)
+        assertEquals(Some("https://a"), terminal.reading.linkAt(1L, 2L)?.uri)
+        assertEquals(Some("https://b"), terminal.reading.linkAt(2L, 1L)?.uri)
+        terminal.feed("\u001b[S".toByteArray())
+        assertEquals(Some("https://a"), terminal.reading.linkAt(0L, 1L)?.uri)
+        terminal.feed("\u001b[1;3H\u001b[P".toByteArray())
+        assertEquals(1L, terminal.reading.linkCount)
+        terminal.feed("\u001b[2J".toByteArray())
+        assertEquals(0L, terminal.reading.linkCount)
+    }
+
+    @Test
+    fun savedCursorAlternateResetAndSynchronizationRetainTheRightGeneration() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("\u001b]8;id=saved;https://saved\u0007\u001b7\u001b]8;;\u0007".toByteArray())
+        assertEquals(1L, terminal.reading.linkCount)
+        terminal
+            .feed(
+                "\u001b8x\u001b]8;;\u0007\u001b[?1049h\u001b]8;;https://alt\u0007z\u001b]8;;\u0007\u001b[?1049l"
+                    .toByteArray()
+            )
+        assertEquals(Some("https://saved"), terminal.reading.linkAt(0L, 0L)?.uri)
+        val frozen = terminal.reading
+        terminal.feed("\u001b[?2026h\u001bc".toByteArray())
+        assertEquals(0L, terminal.reading.linkCount)
+        assertEquals(Some("https://saved"), frozen.linkAt(0L, 0L)?.uri)
+    }
+
+    @Test
+    fun budgetsRejectTheNewLinkWithoutExtendingThePreviousLink() {
+        val terminal = Terminal(8L, 2L, linkLimits = TerminalLinkLimits(maxRecords = 1L))
+        val result = terminal
+            .feed(
+                "\u001b]8;;https://one\u0007a\u001b]8;;https://two\u0007b\u001b]8;;\u0007"
+                    .toByteArray()
+            )
+        assertEquals(Some("https://one"), terminal.reading.linkAt(0L, 0L)?.uri)
+        assertEquals(None, terminal.reading.linkAt(0L, 1L)?.uri)
+        assertEquals(1L, result.effects.size)
+        when (result.effects[0L]) {
+            case Diagnostic(_) -> {}
+            case _ -> fail(Some("expected a storage diagnostic"))
+        }
+        terminal.feed("\u001b[2J\u001b]8;;https://two\u0007c\u001b]8;;\u0007".toByteArray())
+        assertEquals(Some("https://two"), terminal.reading.linkAt(0L, 2L)?.uri)
+        val empty = Terminal(8L, 2L, linkLimits = TerminalLinkLimits(maxBytes = 1L))
+        empty.feed("\u001b]8;;https://one\u0007a".toByteArray())
+        assertEquals(0L, empty.reading.linkCount)
+    }
+}

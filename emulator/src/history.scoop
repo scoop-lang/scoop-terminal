@@ -142,6 +142,8 @@ internal class LineHistory {
     }
 
     fun clear() {
+        for (index in 0L..<size)
+            this[index].release()
         pages.clear()
         positions = None
         logicalPositions = None

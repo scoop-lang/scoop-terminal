@@ -10,10 +10,12 @@ internal class TerminalState(
     parserLimits: TerminalParserLimits,
     val ambiguousWidth: TerminalAmbiguousWidth,
     colors: TerminalColors,
-    val clipboardPolicy: TerminalClipboardPolicy
+    val clipboardPolicy: TerminalClipboardPolicy,
+    linkLimits: TerminalLinkLimits
 ) : VtActions {
     private val ids = RowIds()
-    private val screenChanges = ScreenChanges()
+    private val screenChanges = ScreenChanges(TerminalLinkStore(linkLimits))
+    val links: TerminalLinkStore get() = screenChanges.links
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     var alternateScreen = false
@@ -28,6 +30,7 @@ internal class TerminalState(
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
     private val savedWrap = MutableArray<Boolean>(2L) { true }
+    private val savedLinks = MutableArray<Long>(2L) { 0L }
     private var combining: ScreenRow? = None
     private var startColumn = 0L
     private var lastPrinted = TerminalCell()
@@ -189,7 +192,15 @@ internal class TerminalState(
             screen.moveColumn(startColumn)
             put(combined, width, dotted)
         } else {
-            row.put(startColumn, combined, width, cell.style, dottedCircle = dotted)
+            row
+                .put(
+                    startColumn,
+                    combined,
+                    width,
+                    cell.style,
+                    dottedCircle = dotted,
+                    linkId = cell.linkId
+                )
             moveAfter(startColumn, width)
             lastPrinted = TerminalCell(combined, width, cell.style, dottedCircle = dotted)
             changed = true
@@ -213,7 +224,7 @@ internal class TerminalState(
         val row = grid.current
         val position = grid.column
         if (modes.insert) grid.shiftColumns(occupied, true, style)
-        row.put(position, displayed, occupied, style, intrinsic, dottedCircle)
+        row.put(position, displayed, occupied, style, intrinsic, dottedCircle, links.active)
         combining = Some(row)
         startColumn = position
         lastPrinted = TerminalCell(displayed, occupied, style, intrinsic, dottedCircle)
@@ -293,6 +304,10 @@ internal class TerminalState(
     public override fun osc(selector: Int, bytes: Array<Byte>) {
         if (colorOsc(this, selector, bytes)) return
         if (metadataOsc(this, selector, bytes)) return
+        if (selector == 8) {
+            linkOsc(this, bytes)
+            return
+        }
         if (selector == 52) {
             clipboardOsc(this, bytes)
             return
@@ -312,6 +327,10 @@ internal class TerminalState(
 
     fun emit(effect: TerminalEffect) {
         effects.add(effect)
+    }
+
+    fun stopCombining() {
+        combining = None
     }
 
     fun setProgress(progress: TerminalProgress) {
@@ -366,6 +385,9 @@ internal class TerminalState(
         val index = if (alternateScreen) 1L else 0L
         savedCharset[index] = charset
         savedWrap[index] = modes.autoWrap
+        links.retain(links.active)
+        links.release(savedLinks[index])
+        savedLinks[index] = links.active
     }
 
     fun restoreCursor() {
@@ -373,6 +395,7 @@ internal class TerminalState(
         val index = if (alternateScreen) 1L else 0L
         charset = savedCharset[index]
         modes.autoWrap = savedWrap[index]
+        links.setActive(savedLinks[index])
         changed = true
     }
 
@@ -384,6 +407,8 @@ internal class TerminalState(
             alternate.reset(TerminalStyle())
             savedCharset[1L] = 0
             savedWrap[1L] = true
+            links.release(savedLinks[1L])
+            savedLinks[1L] = 0L
         }
         if (!enabled && save) restoreCursor()
         screenChanges.pending = true
@@ -410,6 +435,9 @@ internal class TerminalState(
         val index = if (alternateScreen) 1L else 0L
         savedCharset[index] = 0
         savedWrap[index] = true
+        links.setActive(0L)
+        links.release(savedLinks[index])
+        savedLinks[index] = 0L
         combining = None
         changed = true
     }
@@ -430,6 +458,11 @@ internal class TerminalState(
         savedCharset[1L] = 0
         savedWrap[0L] = true
         savedWrap[1L] = true
+        links.setActive(0L)
+        for (index in 0L..<2L) {
+            links.release(savedLinks[index])
+            savedLinks[index] = 0L
+        }
         lastPrinted = TerminalCell()
         changed = true
     }

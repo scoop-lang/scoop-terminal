@@ -28,7 +28,8 @@ public class TerminalEmulatorSession private constructor(
     private val clipboardReadTimeout: Duration,
     private val onHostServiceError: (Throwable) -> Unit,
     private val onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit,
-    private val onProgress: (TerminalProgress) -> Unit
+    private val onProgress: (TerminalProgress) -> Unit,
+    private val onDiagnostic: (String) -> Unit
 ) : AsyncCloseable {
     private val outgoing = TerminalWriteQueue()
     private val writeReady = Channel<Unit>(1L)
@@ -88,7 +89,8 @@ public class TerminalEmulatorSession private constructor(
             clipboardReadTimeout: Duration = Duration.seconds(1L),
             onHostServiceError: (Throwable) -> Unit = {},
             onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit = {},
-            onProgress: (TerminalProgress) -> Unit = {}
+            onProgress: (TerminalProgress) -> Unit = {},
+            onDiagnostic: (String) -> Unit = {}
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
             val loop = currentEventLoop()
@@ -103,7 +105,7 @@ public class TerminalEmulatorSession private constructor(
                 onTitle,
                 onBell,
                 synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError,
-                onWorkingDirectory, onProgress
+                onWorkingDirectory, onProgress, onDiagnostic
             )
             session.driver = Some(application.launch { session.run() })
             return session
@@ -249,6 +251,7 @@ public class TerminalEmulatorSession private constructor(
                 case ClipboardWriteRequested(val request) -> clipboardBridge.write(request)
                 case WorkingDirectoryChanged(val directory) -> onWorkingDirectory(directory)
                 case ProgressChanged(val progress) -> onProgress(progress)
+                case Diagnostic(val message) -> onDiagnostic(message)
             }
         }
         updateSynchronizationDeadline()
