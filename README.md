@@ -12,6 +12,12 @@ OSC 52 默认允许写入、拒绝读取，文本上限为 1 MiB。可在创建�
 
 ## 开发
 
+OSC 8 通过 `TerminalViewOptions(onLinkActivated = ..., onLinkHovered = ...)` 暴露宿主回调，默认使用 Ctrl+点击（macOS 为 Command+点击）激活。组件保留完整 URI，由宿主决定如何打开。
+
+OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, count)`、`commandAt(anchor)`、`commandsIn(range)` 读取；`reading.text(range)` 读取原文。`TerminalViewOptions(commandSeparators = true)` 开启提示符行顶部的分割线，默认关闭。组件不修改 shell 配置，标记由 shell 或程序发送。
+
+`snapshot.search(query, TerminalSearchOptions(...))` 返回可关闭的分页字面量搜索；调用 `nextPage(maxMatches, scanBudget)`，并检查每个结果的 `status(reading)` 后定位。大小写不敏感使用完整 Unicode casefold；搜索对象拥有独立快照，关闭原快照不会取消查询。组件不包含搜索框。
+
 使用包含伪终端接口的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
 
 ```sh

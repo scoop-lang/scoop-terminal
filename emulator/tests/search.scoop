@@ -1,0 +1,204 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class LiteralSearchTest {
+    @Test
+    fun softWrapsJoinHardBreaksStopAndOverlappingMatchesPageCorrectly() {
+        val terminal = Terminal(4L, 4L)
+        terminal.feed("abcdef\r\ndef".toByteArray())
+        terminal
+            .snapshot()
+            .use { snapshot ->
+                val matches = all(snapshot, "def", budget = 1L)
+                assertEquals(2L, matches.size)
+                assertEquals(3L, matches[0L].utf8Start)
+                assertEquals(6L, matches[0L].utf8End)
+                assertEquals(Some("def"), snapshot.text(matches[0L].range))
+                assertEquals(0L, all(snapshot, "efde").size)
+                assertEquals(0L, all(snapshot, "").size)
+            }
+        terminal.feed("\u001bcababa".toByteArray())
+        terminal
+            .snapshot()
+            .use { snapshot ->
+                val matches = all(snapshot, "aba")
+                assertEquals(2L, matches.size)
+                assertEquals(0L, matches[0L].utf8Start)
+                assertEquals(2L, matches[1L].utf8Start)
+            }
+    }
+
+    @Test
+    fun fullCasefoldMapsExpansionsBackToOriginalUtf8AndDeduplicatesTheSameSpan() {
+        val terminal = Terminal(30L, 2L)
+        terminal.feed("Straße Σςσ İ".toByteArray())
+        terminal
+            .snapshot()
+            .use { snapshot ->
+                val insensitive = TerminalSearchOptions(caseSensitive = false)
+                val word = all(snapshot, "STRASSE", insensitive)
+                assertEquals(1L, word.size)
+                assertEquals(0L, word[0L].utf8Start)
+                assertEquals(7L, word[0L].utf8End)
+                val sharp = all(snapshot, "ss", insensitive)
+                assertEquals(1L, sharp.size)
+                assertEquals(4L, sharp[0L].utf8Start)
+                assertEquals(6L, sharp[0L].utf8End)
+                assertEquals(Some("ß"), snapshot.text(sharp[0L].range))
+                assertEquals(2L, all(snapshot, "s", insensitive, 1L).size)
+                assertEquals(3L, all(snapshot, "σ", insensitive).size)
+                assertEquals(0L, all(snapshot, "STRASSE").size)
+                val dotted = all(snapshot, "i", insensitive)
+                assertEquals(1L, dotted.size)
+                assertEquals(Some("İ"), snapshot.text(dotted[0L].range))
+            }
+    }
+
+    @Test
+    fun exactScalarMatchesExpandOnlyTheirDisplayRangeToGraphemeEdges() {
+        val terminal = Terminal(12L, 2L)
+        terminal.feed("é 👨‍👩‍👧‍👦".toByteArray())
+        terminal
+            .snapshot()
+            .use { snapshot ->
+                val accent = all(snapshot, "́")[0L]
+                assertEquals(1L, accent.utf8Start)
+                assertEquals(3L, accent.utf8End)
+                assertEquals(Some("é"), snapshot.text(accent.range))
+                assertEquals(0L, all(snapshot, "é").size)
+                val woman = all(snapshot, "👩")[0L]
+                assertEquals(11L, woman.utf8Start)
+                assertEquals(15L, woman.utf8End)
+                assertEquals(Some("👨‍👩‍👧‍👦"), snapshot.text(woman.range))
+                assertEquals(2L, woman.range.start.cellOffset)
+                assertEquals(4L, woman.range.end.cellOffset)
+            }
+    }
+
+    @Test
+    fun scanBudgetsYieldInsideLongGraphemesAndCancellationReleasesTheLease() {
+        val terminal = Terminal(8L, 2L, snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L))
+        val text = StringBuilder().append('e')
+        for (index in 0L..<200L)
+            text.append('́')
+        terminal.feed(text.toString().toByteArray())
+        val snapshot = terminal.snapshot()
+        val search = snapshot.search("missing")
+        val page = search.nextPage(scanBudget = 10L)
+        assertEquals(10L, page.scanned)
+        assertEquals(TerminalSearchStatus.Searching, page.status)
+        assertTrue(page.nextCursor != None)
+        assertFailsWith<IllegalStateException> {
+            snapshot.search("e");
+            Unit
+        }
+        search.cancel()
+        assertEquals(TerminalSearchStatus.Cancelled, search.nextPage().status)
+        snapshot.search("e").use { next -> assertEquals(1L, next.nextPage().matches.size) }
+        snapshot.close()
+    }
+
+    @Test
+    fun matchesSurviveReflowAndColorChangesButBecomeStaleAfterTextEdits() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("target\r\nend".toByteArray())
+        val snapshot = terminal.snapshot()
+        val match = all(snapshot, "target")[0L]
+        terminal.resize(3L, 4L)
+        assertEquals(TerminalSearchMatchStatus.Current, match.status(terminal.reading))
+        val position = terminal.reading.resolve(match.range.start)!!
+        val screenRow = position.row - terminal.reading.historySize + 1L
+        terminal.feed(f"\u001b[${screenRow};1H\u001b[31mt".toByteArray())
+        assertEquals(TerminalSearchMatchStatus.Current, match.status(terminal.reading))
+        terminal.feed("!".toByteArray())
+        assertEquals(TerminalSearchMatchStatus.Stale, match.status(terminal.reading))
+        terminal.feed("\u001bc".toByteArray())
+        assertEquals(TerminalSearchMatchStatus.Unavailable, match.status(terminal.reading))
+        assertEquals(TerminalSearchMatchStatus.Current, match.status(snapshot))
+        snapshot.close()
+    }
+
+    @Test
+    fun aQueryIsFrozenAndRetainedPartialLinesHaveAnExplicitByteOffsetOrigin() {
+        val terminal = Terminal(2L, 2L, historyLimit = 1L)
+        terminal.feed("abcdefg".toByteArray())
+        val snapshot = terminal.snapshot()
+        val search = snapshot.search("fg")
+        snapshot.close()
+        terminal.feed("fg".toByteArray())
+        val matches = drain(search, 2L)
+        assertEquals(1L, matches.size)
+        assertEquals(2L, matches[0L].sourceStart.cellOffset)
+        assertEquals(3L, matches[0L].utf8Start)
+        assertEquals(5L, matches[0L].utf8End)
+        terminal
+            .snapshot()
+            .use { current ->
+                current
+                    .search("fg")
+                    .use { next -> assertTrue(next.generation != search.generation) }
+            }
+    }
+
+    @Test
+    fun queryMatchAndWorkingMemoryLimitsFailWithoutLeakingBudget() {
+        val terminal = Terminal(4L, 1L)
+        terminal.feed("aaaa".toByteArray())
+        terminal
+            .snapshot()
+            .use { snapshot ->
+                assertFailsWith<IllegalArgumentException> {
+                    snapshot.search("aa", TerminalSearchOptions(maxQueryBytes = 1L));
+                    Unit
+                }
+                snapshot
+                    .search("a", TerminalSearchOptions(maxMatches = 2L))
+                    .use { search ->
+                        val page = search.nextPage()
+                        assertEquals(2L, page.matches.size)
+                        assertEquals(TerminalSearchStatus.LimitReached, page.status)
+                        assertEquals(0L, search.nextPage().matches.size)
+                    }
+            }
+        val small = Terminal(
+            1L,
+            1L,
+            snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L, maxRetainedBytes = 10000L)
+        )
+        small
+            .snapshot()
+            .use { snapshot ->
+                for (index in 0L..<3L)
+                    assertFailsWith<IllegalStateException> {
+                        snapshot.search("a");
+                        Unit
+                    }
+            }
+        small.snapshot().close()
+    }
+}
+
+private fun all(
+    snapshot: TerminalSnapshot,
+    query: String,
+    options: TerminalSearchOptions = TerminalSearchOptions(),
+    budget: Long = 16L
+): Array<TerminalSearchMatch> {
+    return snapshot.search(query, options).use { search -> drain(search, budget) }
+}
+
+private fun drain(search: TerminalSearch, budget: Long): Array<TerminalSearchMatch> {
+    val matches = ArrayList<TerminalSearchMatch>()
+    var pages = 0L
+    while (search.status == TerminalSearchStatus.Searching) {
+        val page = search.nextPage(maxMatches = 1L, scanBudget = budget)
+        assertTrue(page.scanned <= budget)
+        for (match in page.matches)
+            matches.add(match)
+        pages += 1L
+        if (pages > 10000L) fail(Some("search made no bounded progress"))
+    }
+    return matches.toArray()
+}

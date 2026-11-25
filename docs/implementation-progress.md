@@ -26,7 +26,7 @@
 | M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；真实系统剪贴板在集中验收验证 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 已实现，5 项核心用例及 UI 编译检查通过 |
 | M3 | controller、高级选择、拖动滚动、复制规则 | 待实现 |
-| M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 待实现 |
+| M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 API 与 7 项测试通过；session 异步扫描随控制器接入 |
 | M3 | reveal、矩形、高亮与结果失效 | 待实现 |
 | M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
 | M4 | 连字、网格校验、字体 fallback、装饰及缓存 | 待实现 |
@@ -57,6 +57,7 @@
 - `AnchorTrackingTest` 6/6、原有 `ReflowTest` 11/11 通过。`Terminal.track` 返回可关闭的有界注册，按受影响物理行订阅编辑；插删迁移、覆盖选区内部失效、提示符边界与显式擦除、逻辑行拆分、reflow、历史裁剪及同步冻结分别验证。已变更旧帧上的新注册明确返回 Stale；不把旧坐标套到新内容。快照保存不可变跟踪结果并计入预算；关闭/失效释放行引用，没有追加永久编辑日志。
 - OSC 133：`ShellCommandTest` 7/7、`TerminalCommandSeparatorTest` 1/1 通过，并重跑锚点 6/6。覆盖 A/B/C/D、可缺省退出状态、130 状态、孤立/丢失标记、次级提示符、擦除后跨 feed 重绘去重、pending-wrap、一行无历史、重排、冻结、主备屏及 EOF/RIS。`commandAt` / `commandsIn` / 分页 `commands` 返回已提交的命令块；`reading.text(range)` 读取原文。每个 buffer 最多保留一个没有可见锚点的提示符重绘上下文；它也受命令数量与字节预算约束。默认共保留 2048 个命令记录、8 MiB 元数据，旧快照和当前状态分别计费。
 - `TerminalViewOptions.commandSeparators` 默认 false；开启后只在后续主提示符所在物理行顶部画中性线，不增加行高、文字或光标移动。像素回归确认首条/次级提示符不新增线，关闭时没有线，绘制前后文字和光标相同。没有新增搜索框、命令工具栏或 shell hook 注入。
+- `LiteralSearchTest` 7/7 通过。`snapshot.search` 使用流式字面量匹配，分页同时限制命中数与扫描工作量；单个长字素和空行也分步推进。覆盖跨 soft wrap、硬行边界、重叠命中、`ß`/sigma/`İ` 完整 casefold、字素内部的精确原文 UTF-8 范围、无 normalization、部分历史前缀、冻结快照语义、取消、句柄/查询/工作内存/命中上限，以及 reflow 有效、改色有效、文字覆盖 Stale 和 reset Unavailable。关闭或完成会释放查询独立快照与工作数组，工作内存纳入快照总预算；每页返回源版本、查询代次与下一扫描位置。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。

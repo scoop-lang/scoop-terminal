@@ -19,6 +19,34 @@ public class TerminalSnapshot internal constructor(
         }
     private fun available(): TerminalReadingData = retained ?:
         throw IllegalStateException(Some("terminal snapshot is closed"))
+
+    /** Search owns a separate bounded lease; closing this snapshot does not cancel that search. */
+    public fun search(
+        query: String,
+        options: TerminalSearchOptions = TerminalSearchOptions()
+    ): TerminalSearch {
+        val pattern = searchPattern(query, options)
+        val lease = budget.acquire(available())
+        val working = pattern.size * 256L + 4096L
+        var reserved = false
+        try {
+            budget.reserveWorking(working)
+            reserved = true
+            return TerminalSearch(
+                lease,
+                query,
+                options,
+                pattern,
+                budget.nextSearch(),
+                budget,
+                working
+            )
+        } catch (error: Throwable) {
+            lease.close()
+            if (reserved) budget.releaseWorking(working)
+            throw error
+        }
+    }
     public override val columns: Long get() = available().columns
     public override val rows: Long get() = available().rows
     public override val historySize: Long get() = available().historySize
@@ -68,6 +96,8 @@ internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
     private val leases = ArrayList<SnapshotLease>()
     private var handles = 0L
     private var bytes = 0L
+    private var working = 0L
+    private var searchGeneration = 0L
     init {
         if (limits.maxHandles < 0L || limits.maxRetainedBytes < 0L)
             throw IllegalArgumentException(Some("negative terminal snapshot limit"))
@@ -83,7 +113,7 @@ internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
                 return TerminalSnapshot(reading, this)
             }
         }
-        if (reading.retainedBytes > limits.maxRetainedBytes - bytes)
+        if (reading.retainedBytes > limits.maxRetainedBytes - bytes - working)
             throw IllegalStateException(Some("terminal snapshot retained-content limit exceeded"))
         leases.add(SnapshotLease(reading))
         handles += 1L
@@ -104,5 +134,18 @@ internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
                 return
             }
         }
+    }
+
+    fun nextSearch(): Long {
+        searchGeneration += 1L;
+        return searchGeneration
+    }
+    fun reserveWorking(amount: Long) {
+        if (amount > limits.maxRetainedBytes - bytes - working)
+            throw IllegalStateException(Some("terminal search working-memory limit exceeded"))
+        working += amount
+    }
+    fun releaseWorking(amount: Long) {
+        working -= amount
     }
 }
