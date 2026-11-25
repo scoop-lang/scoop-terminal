@@ -11,10 +11,56 @@ import scoop.test.*
 @Test
 private class TerminalGlyphCacheTest {
     @Test
+    fun paletteUpdatesRepaintIndexedBackgroundsAndRetainedFramesKeepOldColors() {
+        val terminal = Terminal(2L, 1L)
+        terminal.feed("\u001b]4;1;rgb:f/0/0\u0007\u001b[41m \u001b[48;2;0;0;255m ".toByteArray())
+        val old = terminal.reading
+        terminal.feed("\u001b]4;1;rgb:0/f/0\u0007".toByteArray())
+        FontCollection()
+            .use { fonts ->
+                val appearance = TerminalAppearance()
+                val cache = TerminalGlyphCache(fonts, appearance)
+                try {
+                    for (reading in [old, terminal.reading]) {
+                        val geometry = GridGeometry(
+                            Size(20.0, 16.0), CellMetrics(10.0, 16.0, 12.0),
+                            0L, reading.lines(0L, 1L), 2L, 1L, reading.screenRevision, true, reading
+                        )
+                        TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                            .use { frame ->
+                                frame.shape(None, "")
+                                RasterSurface(20, 16)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val pixels = surface.readPixels()
+                                        val first = (8L * 20L + 5L) * 4L
+                                        assertEquals(
+                                            if (reading === old) 255 else 0,
+                                            pixels[first].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            if (reading === old) 0 else 255,
+                                            pixels[first + 1L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            255,
+                                            pixels[(8L * 20L + 15L) * 4L + 2L].toInt() and 255
+                                        )
+                                    }
+                            }
+                    }
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
+    @Test
     fun coloredUnderlineAndCursorBlinkAreIndependentRasterLayers() {
         val terminal = Terminal(2L, 1L)
         terminal.feed("\u001b[4:2;58;2;255;0;0;5m \u001b[0m\r".toByteArray())
         val appearance = TerminalAppearance(background = Color.Black, cursor = Color.White)
+        terminal.setColors(appearance.colorTheme())
         FontCollection()
             .use { fonts ->
                 val glyphs = TerminalGlyphCache(fonts, appearance)

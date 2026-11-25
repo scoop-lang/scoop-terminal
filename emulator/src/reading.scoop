@@ -14,6 +14,7 @@ public interface TerminalReading {
     public val cursor: TerminalCursor
     public val mouseReporting: Boolean
     public val pixelSize: TerminalPixelSize?
+    public val colors: TerminalColors
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -36,11 +37,12 @@ internal class TerminalReadingData(
     public override val mouseReporting: Boolean,
     private val history: HistoryReading,
     val screenLines: Array<TerminalLine>,
-    public override val pixelSize: TerminalPixelSize?
+    public override val pixelSize: TerminalPixelSize?,
+    public override val colors: TerminalColors
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
-    val retainedBytes: Long = readingBytes(history, screenLines)
+    val retainedBytes: Long = readingBytes(history, screenLines) + 8384L
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]

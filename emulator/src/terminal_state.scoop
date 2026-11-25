@@ -8,7 +8,8 @@ internal class TerminalState(
     rows: Long,
     historyLimit: Long,
     parserLimits: TerminalParserLimits,
-    val ambiguousWidth: TerminalAmbiguousWidth
+    val ambiguousWidth: TerminalAmbiguousWidth,
+    colors: TerminalColors
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges()
@@ -19,6 +20,7 @@ internal class TerminalState(
     var style = TerminalStyle()
     var modes = TerminalModes()
     var pixelSize: TerminalPixelSize? = None
+    val colorState = TerminalColorState(colors)
     private var tabs = defaultTabs(columns)
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
@@ -45,7 +47,7 @@ internal class TerminalState(
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
-                .cursorBlink, pixelSize
+                .cursorBlink, pixelSize, colorState.current
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -110,6 +112,16 @@ internal class TerminalState(
     fun releaseSynchronizedOutput(): TerminalUpdate {
         val before = committed
         setSynchronizedOutput(false)
+        return update(before)
+    }
+
+    fun presentationChanged() {
+        changed = true
+    }
+
+    fun setColors(colors: TerminalColors): TerminalUpdate {
+        val before = committed
+        if (colorState.setDefaults(colors)) changed = true
         return update(before)
     }
 
@@ -273,6 +285,7 @@ internal class TerminalState(
     }
 
     public override fun osc(selector: Int, bytes: Array<Byte>) {
+        if (colorOsc(this, selector, bytes)) return
         if (selector == 0 || selector == 2)
             effects.add(TerminalEffect.Title(String.fromUtf8Lossy(bytes)))
     }
@@ -376,6 +389,7 @@ internal class TerminalState(
 
     private fun reset() {
         setSynchronizedOutput(false)
+        colorState.reset()
         style = TerminalStyle()
         modes = TerminalModes()
         main.reset(style)

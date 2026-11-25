@@ -44,6 +44,8 @@ private class TerminalViewElement(
     private var glyphCache: TerminalGlyphCache? = None
     private var observedScreen = session.reading.screenRevision
     private var observedCursor = session.reading.cursor
+    private var observedColors = session.reading.colors
+    private var themeAppearance = props.value.appearance
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
     private var selecting = false
@@ -78,13 +80,29 @@ private class TerminalViewElement(
     }
 
     private fun attach() {
+        themeAppearance = props.value.appearance
+        session.setColors(themeAppearance.colorTheme())
         observedScreen = session.reading.screenRevision
         observedCursor = session.reading.cursor
+        observedColors = session.reading.colors
         attachment = Some(session.attach { if (scope.isMounted) modelChanged() })
         refresh()
     }
 
     public override fun update(): UiInvalidation {
+        val appearance = props.value.appearance
+        if (appearance.foreground !=
+            themeAppearance.foreground ||
+            appearance.background !=
+            themeAppearance.background ||
+            appearance.cursor !=
+            themeAppearance.cursor ||
+            appearance.palette !==
+            themeAppearance.palette
+        ) {
+            themeAppearance = appearance
+            session.setColors(appearance.colorTheme())
+        }
         val next = props.value.session
         if (next !== session) {
             attachment?.dispose()
@@ -111,13 +129,17 @@ private class TerminalViewElement(
 
     private fun modelChanged() {
         val terminal = session.reading
+        val colorsChanged = observedColors !== terminal.colors
+        observedColors = terminal.colors
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
         if (moved) resetCursorBlink()
         observedCursor = cursor
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
-            if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
+            if (colorsChanged)
+                refresh()
+            else if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
             return
         }
         observedScreen = screen

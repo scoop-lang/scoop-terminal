@@ -13,9 +13,17 @@ public class Terminal public constructor(
     historyLimit: Long = 10000L,
     snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits(),
     parserLimits: TerminalParserLimits = TerminalParserLimits(),
-    ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow
+    ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
+    colors: TerminalColors = TerminalColors()
 ) {
-    private val state = createState(columns, rows, historyLimit, parserLimits, ambiguousWidth)
+    private val state = createState(
+        columns,
+        rows,
+        historyLimit,
+        parserLimits,
+        ambiguousWidth,
+        colors
+    )
     private val snapshotBudget = SnapshotBudget(snapshotLimits)
 
     /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
@@ -55,6 +63,7 @@ public class Terminal public constructor(
 
     /** Host-clock expiry and lifecycle events may release an unfinished synchronized frame. */
     public fun releaseSynchronizedOutput(): TerminalUpdate = state.releaseSynchronizedOutput()
+    public fun setColors(colors: TerminalColors): TerminalUpdate = state.setColors(colors)
 
     /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
     public fun resize(
@@ -100,11 +109,12 @@ private fun createState(
     rows: Long,
     historyLimit: Long,
     parserLimits: TerminalParserLimits,
-    ambiguousWidth: TerminalAmbiguousWidth
+    ambiguousWidth: TerminalAmbiguousWidth,
+    colors: TerminalColors
 ): TerminalState {
     checkSize(columns, rows)
     if (historyLimit < 0L) throw IllegalArgumentException(Some("negative terminal history limit"))
-    return TerminalState(columns, rows, historyLimit, parserLimits, ambiguousWidth)
+    return TerminalState(columns, rows, historyLimit, parserLimits, ambiguousWidth, colors)
 }
 
 private fun checkSize(columns: Long, rows: Long) {

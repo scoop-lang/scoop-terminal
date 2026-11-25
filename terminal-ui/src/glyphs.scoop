@@ -50,11 +50,11 @@ internal class TerminalGlyphCache(
         return value
     }
 
-    fun shapePreedit(text: String): TextLayout = shapeText(
+    fun shapePreedit(text: String, foreground: Color): TextLayout = shapeText(
         fonts,
         text,
         appearance,
-        appearance.foreground
+        foreground
     )
 
     fun retain() {

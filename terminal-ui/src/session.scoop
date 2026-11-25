@@ -44,6 +44,9 @@ public class TerminalEmulatorSession private constructor(
     public val reading: TerminalReading get() = terminal.reading
     public val mouseReporting: Boolean get() = terminal.mouseReporting
     public fun snapshot(): TerminalSnapshot = terminal.snapshot()
+    public fun setColors(colors: TerminalColors) {
+        apply(terminal.setColors(colors))
+    }
 
     private val running: Boolean
         get() = when (current) {

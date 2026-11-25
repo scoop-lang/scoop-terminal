@@ -36,7 +36,7 @@ private class SnapshotTest {
 
     @Test
     fun snapshotLimitsChargeSharedGenerationsOnceAndReleaseOnClose() {
-        val terminal = Terminal(1L, 1L, snapshotLimits = TerminalSnapshotLimits(2L, 300L))
+        val terminal = Terminal(1L, 1L, snapshotLimits = TerminalSnapshotLimits(2L, 10000L))
         val first = terminal.snapshot()
         val second = terminal.snapshot()
         assertFailsWith<IllegalStateException> {

@@ -68,6 +68,10 @@ internal class TerminalFrame(
     private val appearance: TerminalAppearance,
     private val glyphs: TerminalGlyphCache
 ) : Closeable {
+    private val colors = geometry.reading.colors
+    private val foreground = colors.foreground.color()
+    private val background = colors.background.color()
+    private val cursorColor = colors.cursor.color()
     private val cells = ArrayList<PaintCell>()
     private val selection = ArrayList<Rect>()
     private var preedit: TextLayout? = None
@@ -103,14 +107,14 @@ internal class TerminalFrame(
             }
             index += 1L
         }
-        if (composition != "") preedit = Some(glyphs.shapePreedit(composition))
+        if (composition != "") preedit = Some(glyphs.shapePreedit(composition, foreground))
     }
 
     private fun addCell(row: Long, column: Long, cell: TerminalCell) {
-        val foreground = resolveColor(cell.style.foreground, appearance.foreground)
-        val background = resolveColor(cell.style.background, appearance.background)
-        val fullInk = if (cell.style.inverse) background else foreground
-        val paper = if (cell.style.inverse) foreground else background
+        val foregroundInk = resolveColor(cell.style.foreground, foreground, colors)
+        val backgroundInk = resolveColor(cell.style.background, background, colors)
+        val fullInk = if (cell.style.inverse) backgroundInk else foregroundInk
+        val paper = if (cell.style.inverse) foregroundInk else backgroundInk
         val ink = if (cell.style.faint)
             Color(
                 (fullInk.red + paper.red) / 2.0, (fullInk.green + paper.green) / 2.0,
@@ -121,7 +125,7 @@ internal class TerminalFrame(
         val visible = cell.text != "" && !cell.style.concealed
         if (cell.style.blink && !cell.style.concealed) blinkingText = true
         val glyph = if (visible) Some(glyphs.layout(cell, ink)) else None
-        if (visible || paper != appearance.background || cell.style.underlined || cell.style.struck)
+        if (visible || paper != background || cell.style.underlined || cell.style.struck)
             cells
                 .add(
                     PaintCell(
@@ -130,7 +134,7 @@ internal class TerminalFrame(
                             TerminalUnderline.None
                         else
                             cell.style.underlineStyle,
-                        resolveColor(cell.style.underlineColor, ink), cell.style.struck &&
+                        resolveColor(cell.style.underlineColor, ink, colors), cell.style.struck &&
                             !cell.style.concealed,
                         cell.style.blink
                     )
@@ -142,10 +146,9 @@ internal class TerminalFrame(
     fun drawScreen(canvas: Canvas, blinkVisible: Boolean = true) {
         canvas.save()
         canvas.clipRect(clip)
-        canvas.drawRect(clip, Paint(appearance.background))
+        canvas.drawRect(clip, Paint(background))
         for (cell in cells) {
-            if (cell.background != appearance.background)
-                canvas.drawRect(cell.bounds, Paint(cell.background))
+            if (cell.background != background) canvas.drawRect(cell.bounds, Paint(cell.background))
         }
         for (highlight in selection)
             canvas.drawRect(highlight, Paint(appearance.selection))
@@ -170,7 +173,7 @@ internal class TerminalFrame(
                 canvas
                     .drawRect(
                         rect,
-                        Paint(appearance.cursor, style = PaintingStyle.Stroke, strokeWidth = 1.0)
+                        Paint(cursorColor, style = PaintingStyle.Stroke, strokeWidth = 1.0)
                     )
             } else
                 when (cursor.shape) {
@@ -178,17 +181,17 @@ internal class TerminalFrame(
                         canvas
                             .drawRect(
                                 Rect(rect.x, rect.y, 2.0, rect.height),
-                                Paint(appearance.cursor)
+                                Paint(cursorColor)
                             )
                     case Underline ->
                         canvas
                             .drawRect(
                                 Rect(rect.x, rect.y + rect.height - 2.0, rect.width, 2.0),
-                                Paint(appearance.cursor)
+                                Paint(cursorColor)
                             )
 
                     case Block -> {
-                        canvas.drawRect(rect, Paint(appearance.cursor))
+                        canvas.drawRect(rect, Paint(cursorColor))
                         when (glyph) {
                             case Some(val text) -> {
                                 canvas.save()
@@ -216,7 +219,7 @@ internal class TerminalFrame(
                 canvas
                     .drawRect(
                         Rect(rect.x, rect.y, layout.maxIntrinsicWidth, rect.height),
-                        Paint(appearance.background)
+                        Paint(background)
                     )
                 canvas
                     .drawText(
@@ -229,7 +232,7 @@ internal class TerminalFrame(
                 canvas
                     .drawRect(
                         Rect(rect.x, rect.y + rect.height - 1.0, layout.maxIntrinsicWidth, 1.0),
-                        Paint(appearance.cursor)
+                        Paint(cursorColor)
                     )
             }
 
@@ -252,9 +255,9 @@ internal class TerminalFrame(
         val cell = geometry.rows[cursor.row].cells[cursor.column]
         if (cell.width == 0L || cell.text == "" || cell.style.concealed) return None
         val paper = if (cell.style.inverse)
-            resolveColor(cell.style.foreground, appearance.foreground)
+            resolveColor(cell.style.foreground, foreground, colors)
         else
-            resolveColor(cell.style.background, appearance.background)
+            resolveColor(cell.style.background, background, colors)
         return Some(glyphs.layout(cell, paper))
     }
 

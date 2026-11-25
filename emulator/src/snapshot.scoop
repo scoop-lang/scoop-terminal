@@ -31,6 +31,7 @@ public class TerminalSnapshot internal constructor(
     public override val cursor: TerminalCursor get() = available().cursor
     public override val mouseReporting: Boolean get() = available().mouseReporting
     public override val pixelSize: TerminalPixelSize? get() = available().pixelSize
+    public override val colors: TerminalColors get() = available().colors
     public override fun lines(start: Long, count: Long): Array<TerminalLine> = available()
         .lines(start, count)
     public override fun findLine(id: Long): Long? = available().findLine(id)
