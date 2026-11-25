@@ -80,6 +80,8 @@ flowchart LR
 
 已落地的可选参数写法为 `terminalView(session, controller = Some(controller))`；显式控制器在视图卸载后调用 `close()`，释放主备屏的跟踪范围和会话订阅。控制器的 `copySelection(options)` 返回文本，宿主或现有视图复制动作再写入剪贴板。`reading.logicalLineRange(id)` 通过逻辑行索引返回仍保留的整行范围，按词/逻辑行选择无需扫描全部历史。
 
+自定义异步 adapter 可用 `TerminalSnapshotPool(limits).acquire(reading)` 为已交付的核心 reading 取得有界租约，无需访问可变 `Terminal`。配额以不可变计数状态做原子更新，允许不同 worker 保留／释放同一代次及查询工作内存；同一代次仍只计一次内容字节。单个快照的重复／并发关闭只释放一次。`Terminal` 本身和每个同步 `TerminalSearch` 的可变执行状态仍要求单一 owner，不因快照池支持并发而成为任意多线程接口。
+
 ### 2.3 单位与身份
 
 明确区分 Unicode 标量、UTF-8 字节、字素簇、终端列、UI 逻辑坐标和设备像素。所有跨层数据标明单位。VT 协议使用的像素尺寸来自已接受布局及其缩放因子；不得用未接受的 measure 结果提前回复或命中。

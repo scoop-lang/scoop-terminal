@@ -28,11 +28,11 @@ public class Terminal public constructor(
         ambiguousWidth,
         colors, clipboardPolicy, linkLimits, trackingLimits, commandLimits
     )
-    private val snapshotBudget = SnapshotBudget(snapshotLimits)
+    private val snapshots = TerminalSnapshotPool(snapshotLimits)
 
     /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
     public val reading: TerminalReading get() = state.reading
-    public fun snapshot(): TerminalSnapshot = snapshotBudget.acquire(state.reading)
+    public fun snapshot(): TerminalSnapshot = snapshots.acquire(state.reading)
 
     /** Registers component-owned positions; edits migrate them without retaining an edit journal. */
     public fun track(
