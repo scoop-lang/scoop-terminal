@@ -8,8 +8,7 @@ internal struct CellLocation(val id: Long, val column: Long, val anchor: Termina
 
 internal struct CellSpan(val start: Long, val end: Long)
 
-private struct SelectedCells(val anchor: TerminalAnchor, val end: TerminalAnchor)
-
+/** Physical, half-open coordinates for one accepted reading. */
 internal struct SelectionRange(
     val startRow: Long,
     val startColumn: Long,
@@ -21,7 +20,8 @@ internal struct SelectionRange(
         if (row < startRow || row > endRow) return None
         val columns = line.cells.size
         val left = if (row == startRow) clamp(startColumn, 0L, columns) else 0L
-        val right = if (row == endRow) clamp(endColumn + 1L, left, columns) else columns
+        val right = if (row == endRow) clamp(endColumn, left, columns) else columns
+        if (right <= left) return None
         return Some(
             CellSpan(
                 if (left < columns && line.cells[left].width == 0L) left - 1L else left,
@@ -33,98 +33,422 @@ internal struct SelectionRange(
 
 internal struct VisibleText(val text: String, val selection: Utf8Selection?)
 
-internal class TerminalViewport(private val current: () -> TerminalReading) {
+internal struct ViewportUpdate(
+    val invalidated: TerminalInvalidation?,
+    val resetInteraction: Boolean
+)
+
+private class BufferViewport {
+    var epoch = -1L
+    var top: TerminalTrackedRange? = None
+    var ranges: Array<TerminalTrackedRange> = []
+    var origin: TerminalTrackedRange? = None
+    var mode = TerminalSelectionMode.Linear
+    var unit = TerminalSelectionUnit.Grapheme
+    var reversed = false
+    var rectangleColumn = 0L
+    fun clearSelection() {
+        for (range in ranges)
+            range.close()
+        ranges = [];
+        origin?.close();
+        origin = None
+    }
+    fun close() {
+        top?.close();
+        top = None;
+        clearSelection()
+    }
+}
+
+internal class TerminalViewport(
+    private val current: () -> TerminalReading,
+    private val track: (
+        TerminalRange,
+        TerminalTrackingKind,
+        TerminalReading
+    ) -> TerminalTrackedRange
+) : Closeable {
     val terminal: TerminalReading get() = current()
-    private var anchor: TerminalAnchor? = None
-    private var selection: SelectedCells? = None
-    private var alternate = terminal.alternateScreen
+    private val main = BufferViewport()
+    private val alternate = BufferViewport()
+    private val words = TerminalWordSelection()
+    private var epoch = terminal.bufferEpoch
+    private var columns = terminal.columns
+    private var rows = terminal.rows
+    private var activeDrag = false
+    val dragging: Boolean get() = activeDrag
+
+    private fun buffer(): BufferViewport {
+        val reading = terminal
+        val state = if (reading.alternateScreen) alternate else main
+        if (state.epoch != reading.bufferEpoch) {
+            state.close();
+            state.epoch = reading.bufferEpoch
+        }
+        return state
+    }
 
     val first: Long
-        get() = when (anchor) {
-            case Some(val value) ->
-                clamp(terminal.resolve(value)?.row ?: 0L, 0L, terminal.historySize)
-            case None -> terminal.historySize
+        get() {
+            val reading = terminal
+            val top = buffer().top ?: return reading.historySize
+            return when (top.state(reading)) {
+                case Available(val range) ->
+                    clamp(reading.resolve(range.start)?.row ?: 0L, 0L, reading.historySize)
+                case Invalidated(_) -> 0L
+            }
         }
     val atBottom: Boolean get() = first == terminal.historySize
 
-    fun update() {
-        if (alternate != terminal.alternateScreen) {
-            anchor = None
-            selection = None
-            alternate = terminal.alternateScreen
-        }
-        when (anchor) {
-            case Some(val value) ->
-                if (terminal.resolve(value) == None)
-                    anchor = if (terminal.historySize == 0L) None else terminal.anchorAt(0L, 0L)
+    fun update(): ViewportUpdate {
+        val reading = terminal
+        val reset = epoch !=
+            reading.bufferEpoch ||
+            columns !=
+            reading.columns ||
+            rows !=
+            reading.rows
+        epoch = reading.bufferEpoch;
+        columns = reading.columns;
+        rows = reading.rows
+        if (reset) endDrag()
+        val previous = if (reading.alternateScreen) alternate else main
+        val retired = previous.epoch != reading.bufferEpoch && previous.ranges.size > 0L
+        val state = buffer()
+        when (val top = state.top) {
+            case Some(val handle) ->
+                when (handle.state(reading)) {
+                    case Invalidated(_) -> {
+                        handle.close();
+                        state.top = None
+                        if (reading.historySize > 0L) setTop(0L)
+                    }
+
+                    case Available(_) -> {}
+                }
             case None -> {}
         }
-        if (range() == None) selection = None
+        var reason: TerminalInvalidation? = if (retired) Some(TerminalInvalidation.Stale) else None
+        var changed = false
+        val retained = ArrayList<TerminalTrackedRange>()
+        for (handle in state.ranges) {
+            when (handle.state(reading)) {
+                case Available(_) -> retained.add(handle)
+
+                case Invalidated(val cause) -> {
+                    if (cause != TerminalInvalidation.Evicted || reason == None)
+                        reason = Some(cause)
+                    handle.close();
+                    changed = true
+                }
+            }
+        }
+        if (changed) {
+            state.ranges = retained.toArray()
+            if (reason != Some(TerminalInvalidation.Evicted) || state.ranges.size == 0L)
+                state.clearSelection()
+            endDrag()
+        }
+        when (val origin = state.origin) {
+            case Some(val handle) ->
+                when (handle.state(reading)) {
+                    case Invalidated(_) -> {
+                        handle.close();
+                        state.origin = None
+                        when (val remaining = selection) {
+                            case Some(val selected) -> {
+                                val point = if (state.reversed)
+                                    selected.ranges[selected.ranges.size - 1L].end
+                                else
+                                    selected.ranges[0L].start
+                                state.origin = Some(
+                                    track(
+                                        TerminalRange(point, point),
+                                        TerminalTrackingKind.Position,
+                                        reading
+                                    )
+                                )
+                                state.rectangleColumn = reading.resolve(point)?.column ?: 0L
+                            }
+
+                            case None -> {}
+                        }
+                    }
+
+                    case Available(_) -> {}
+                }
+            case None -> {}
+        }
+        return ViewportUpdate(reason, reset || changed)
     }
 
     fun scroll(lines: Long): Boolean {
+        update()
         val old = first
-        val destination = clamp(old + lines, 0L, terminal.historySize)
+        val destination = if (lines > terminal.historySize - old)
+            terminal.historySize
+        else if (lines < -old) 0L else old + lines
         if (old == destination) return false
-        anchor = if (destination == terminal.historySize)
-            None
-        else
-            terminal.anchorAt(destination, 0L)
+        setTop(destination)
         return true
     }
 
-    fun select(location: CellLocation) {
-        val value = locationAnchor(location) ?: return
-        selection = Some(SelectedCells(value, value))
+    fun setTop(row: Long) {
+        val state = buffer()
+        val reading = terminal
+        val destination = clamp(row, 0L, reading.historySize)
+        val next = if (destination == reading.historySize)
+            None
+        else {
+            val anchor = reading.anchorAt(destination, 0L)!!
+            Some(track(TerminalRange(anchor, anchor), TerminalTrackingKind.Position, reading))
+        }
+        state.top?.close();
+        state.top = next
     }
 
-    fun extend(location: CellLocation) {
-        val previous = selection ?: return
-        val value = locationAnchor(location) ?: return
-        selection = Some(SelectedCells(previous.anchor, value))
+    val selection: TerminalSelection?
+        get() {
+            val state = buffer()
+            if (state.ranges.size == 0L) return None
+            val ranges = ArrayList<TerminalRange>()
+            for (handle in state.ranges)
+                when (handle.state(terminal)) {
+                    case Available(val range) -> ranges.add(range)
+                    case Invalidated(_) -> return None
+                }
+            return Some(TerminalSelection(ranges.toArray(), state.mode, state.unit, state.reversed))
+        }
+
+    fun select(
+        location: CellLocation,
+        unit: TerminalSelectionUnit = TerminalSelectionUnit.Grapheme,
+        mode: TerminalSelectionMode = TerminalSelectionMode.Linear,
+        additionalWordCharacters: String = "",
+        source: TerminalReading? = None
+    ): Boolean {
+        update()
+        val reading = source ?: terminal
+        val point = locationAnchor(location, reading) ?: return false
+        val range = unitRange(reading, point, unit, additionalWordCharacters) ?: return false
+        if (!replace([range], mode, unit, false, reading)) return false
+        val state = buffer()
+        state.origin?.close()
+        state.origin = Some(track(range, TerminalTrackingKind.Position, reading))
+        state.rectangleColumn = location.column
+        activeDrag = true
+        return true
     }
 
-    private fun locationAnchor(location: CellLocation): TerminalAnchor? {
+    fun extend(
+        location: CellLocation,
+        additionalWordCharacters: String = "",
+        source: TerminalReading? = None
+    ): Boolean {
+        update()
+        val state = buffer()
+        val origin = state.origin ?: return false
+        val original = when (origin.state(terminal)) {
+            case Available(val range) -> range
+            case Invalidated(_) -> return false
+        }
+        val reading = source ?: terminal
+        val point = locationAnchor(location, reading) ?: return false
+        val destination = unitRange(reading, point, state.unit, additionalWordCharacters) ?:
+            return false
+        val start = terminal.resolve(original.start) ?: return false
+        val end = terminal.resolve(original.end) ?: return false
+        val targetStart = terminal.resolve(destination.start) ?: return false
+        val targetEnd = terminal.resolve(destination.end) ?: return false
+        val reverse = before(targetStart, start)
+        val ranges = if (state.mode == TerminalSelectionMode.Rectangular) {
+            val top = if (targetStart.row < start.row) targetStart.row else start.row
+            val bottom = if (targetStart.row > start.row) targetStart.row else start.row
+            val left = if (location.column < state.rectangleColumn)
+                location.column
+            else
+                state.rectangleColumn
+            val right = if (location.column > state.rectangleColumn)
+                location.column + 1L
+            else
+                state.rectangleColumn + 1L
+            Array<TerminalRange>(bottom - top + 1L) { offset ->
+                selectionRange(
+                    terminal,
+                    TerminalPosition(top + offset, clamp(left, 0L, terminal.columns)),
+                    TerminalPosition(top + offset, clamp(right, 0L, terminal.columns))
+                )!!
+            }
+        } else
+            [
+                TerminalRange(
+                    if (reverse) destination.start else original.start,
+                    if (before(end, targetEnd)) destination.end else original.end
+                )
+            ]
+        if (!replace(ranges, state.mode, state.unit, reverse, reading)) return false
+        activeDrag = true
+        return true
+    }
+
+    fun selectRange(range: TerminalRange): Boolean {
+        update()
+        val reading = terminal
+        val start = reading.resolve(range.start) ?: return false
+        val end = reading.resolve(range.end) ?: return false
+        if (before(end, start)) return false
+        val expanded = selectionRange(reading, start, end) ?: return false
+        if (!replace(
+            [expanded],
+            TerminalSelectionMode.Linear,
+            TerminalSelectionUnit.Grapheme,
+            false,
+            reading
+        )
+        )
+            return false
+        val state = buffer()
+        state.origin?.close()
+        state.origin = Some(
+            track(
+                TerminalRange(expanded.start, expanded.start),
+                TerminalTrackingKind.Position,
+                reading
+            )
+        )
+        endDrag()
+        return true
+    }
+
+    fun selectAll(): Boolean {
+        val reading = terminal
+        return selectRange(
+            TerminalRange(
+                reading.anchorAt(0L, 0L)!!,
+                reading
+                    .anchorAt(
+                        reading.historySize + reading.rows - 1L,
+                        reading.columns,
+                        TerminalAffinity.Before
+                    )!!
+            )
+        )
+    }
+
+    fun clearSelection() {
+        buffer().clearSelection();
+        endDrag()
+    }
+    fun endDrag() {
+        activeDrag = false;
+        words.clear()
+    }
+
+    private fun replace(
+        ranges: Array<TerminalRange>,
+        mode: TerminalSelectionMode,
+        unit: TerminalSelectionUnit,
+        reversed: Boolean,
+        source: TerminalReading
+    ): Boolean {
+        val next = ArrayList<TerminalTrackedRange>()
+        var accepted = false
+        try {
+            for (range in ranges) {
+                val handle = track(range, TerminalTrackingKind.Content, source)
+                next.add(handle)
+                when (handle.state(terminal)) {
+                    case Invalidated(_) -> return false
+                    case Available(_) -> {}
+                }
+            }
+            val state = buffer()
+            for (handle in state.ranges)
+                handle.close()
+            state.ranges = next.toArray();
+            state.mode = mode;
+            state.unit = unit;
+            state.reversed = reversed
+            accepted = true
+            return true
+        } finally {
+            if (!accepted)
+                for (handle in next)
+                    handle.close()
+        }
+    }
+
+    private fun unitRange(
+        reading: TerminalReading,
+        point: TerminalAnchor,
+        unit: TerminalSelectionUnit,
+        extra: String
+    ): TerminalRange? {
+        return when (unit) {
+            case Grapheme -> {
+                val position = reading.resolve(point) ?: return None
+                graphemeRange(reading, position)
+            }
+
+            case Word -> words.range(reading, point, extra)
+            case LogicalLine -> reading.logicalLineRange(point.logicalLineId)
+        }
+    }
+
+    private fun locationAnchor(location: CellLocation, reading: TerminalReading): TerminalAnchor? {
         when (location.anchor) {
-            case Some(val value) ->
-                return if (terminal.resolve(value) != None) Some(value) else None
+            case Some(val value) -> return if (reading.resolve(value) != None) Some(value) else None
             case None -> {}
         }
-        val index = terminal.findLine(location.id) ?: return None
-        val line = terminal.lines(index, 1L)[0L]
+        val index = reading.findLine(location.id) ?: return None
+        val line = reading.lines(index, 1L)[0L]
         val column = clamp(location.column, 0L, line.cells.size - 1L)
         val start = if (line.cells[column].width == 0L) column - 1L else column
-        return terminal.anchorAt(index, start)
+        return reading.anchorAt(index, start)
     }
 
-    fun range(): SelectionRange? {
-        val value = selection ?: return None
-        val start = terminal.resolve(value.anchor) ?: return None
-        val end = terminal.resolve(value.end) ?: return None
-        val reversed = end.row < start.row || (end.row == start.row && end.column < start.column)
-        return if (reversed)
-            Some(SelectionRange(end.row, end.column, start.row, start.column, true))
-        else
-            Some(SelectionRange(start.row, start.column, end.row, end.column, false))
-    }
-
-    fun copy(): String? {
-        val range = range() ?: return None
-        val lines = terminal.lines(range.startRow, range.endRow - range.startRow + 1L)
-        val text = StringBuilder()
-        for ((index, line) in lines.withIndex()) {
-            val span = range.onRow(range.startRow + index, line)!!
-            appendCells(text, line, span.start, span.end)
-            if (index + 1L < lines.size && !line.softWrapped) text.append('\n')
+    fun ranges(): Array<SelectionRange> {
+        val reading = terminal
+        val selected = selection ?: return []
+        val ranges = ArrayList<SelectionRange>()
+        for (range in selected.ranges) {
+            val start = reading.resolve(range.start) ?: continue
+            val end = reading.resolve(range.end) ?: continue
+            ranges
+                .add(
+                    SelectionRange(start.row, start.column, end.row, end.column, selected.reversed)
+                )
         }
-        return Some(text.toString())
+        return ranges.toArray()
+    }
+
+    fun copy(options: TerminalCopyOptions = TerminalCopyOptions()): String? {
+        val selected = selection ?: return None
+        val result = StringBuilder()
+        for ((index, range) in selected.ranges.withIndex()) {
+            if (index > 0L && selected.mode == TerminalSelectionMode.Rectangular)
+                result.append('\n')
+            result.append(terminal.text(range, options.trimPadding) ?: return None)
+        }
+        return Some(result.toString())
     }
 
     fun visibleText(): VisibleText {
         val start = first
         val lines = terminal.lines(start, terminal.rows)
-        val selection = range()
+        val selected = selection
+        val ranges = ranges()
+        val selection = if (selected?.mode ==
+            Some(TerminalSelectionMode.Linear) &&
+            ranges.size ==
+            1L
+        )
+            Some(ranges[0L])
+        else
+            None
         val text = StringBuilder()
+        var bytes = 0L
         var left: Long? = None
         var right: Long? = None
         for ((index, line) in lines.withIndex()) {
@@ -134,16 +458,19 @@ internal class TerminalViewport(private val current: () -> TerminalReading) {
             }
             when (span) {
                 case Some(val span) -> {
-                    appendCells(text, line, 0L, span.start)
-                    if (left == None) left = Some(text.toString().byteLength)
-                    appendCells(text, line, span.start, span.end)
-                    right = Some(text.toString().byteLength)
-                    appendCells(text, line, span.end, line.cells.size)
+                    bytes += appendCells(text, line, 0L, span.start)
+                    if (left == None) left = Some(bytes)
+                    bytes += appendCells(text, line, span.start, span.end)
+                    right = Some(bytes)
+                    bytes += appendCells(text, line, span.end, line.cells.size)
                 }
 
-                case None -> appendCells(text, line, 0L, line.cells.size)
+                case None -> bytes += appendCells(text, line, 0L, line.cells.size)
             }
-            if (index + 1L < lines.size && !line.softWrapped) text.append('\n')
+            if (index + 1L < lines.size && !line.softWrapped) {
+                text.append('\n');
+                bytes += 1L
+            }
         }
         val offsets: Utf8Selection? = if (left == None || right == None)
             None
@@ -153,13 +480,51 @@ internal class TerminalViewport(private val current: () -> TerminalReading) {
             Some(Utf8Selection(left!!, right!!))
         return VisibleText(text.toString(), offsets)
     }
+
+    public override fun close() {
+        main.close();
+        alternate.close();
+        endDrag()
+    }
 }
 
-private fun appendCells(text: StringBuilder, line: TerminalLine, start: Long, end: Long) {
+private fun appendCells(text: StringBuilder, line: TerminalLine, start: Long, end: Long): Long {
     val limit = if (line.softWrapped && end > line.usedColumns) line.usedColumns else end
+    var bytes = 0L
     for (column in start..<limit) {
         val cell = line.cells[column]
-        if (cell.width != 0L) text.append(if (cell.text == "") " " else cell.text)
+        if (cell.width != 0L) {
+            val value = if (cell.text == "") " " else cell.text
+            text.append(value);
+            bytes += value.byteLength
+        }
+    }
+    return bytes
+}
+
+internal fun sameSelection(left: TerminalSelection?, right: TerminalSelection?): Boolean {
+    return when (left) {
+        case None -> right?.mode == None
+        case Some(val a) ->
+            when (right) {
+                case None -> false
+
+                case Some(val b) -> {
+                    if (a.mode !=
+                        b.mode ||
+                        a.unit !=
+                        b.unit ||
+                        a.reversed !=
+                        b.reversed ||
+                        a.ranges.size !=
+                        b.ranges.size
+                    )
+                        return false
+                    for (index in 0L..<a.ranges.size)
+                        if (a.ranges[index] != b.ranges[index]) return false
+                    true
+                }
+            }
     }
 }
 

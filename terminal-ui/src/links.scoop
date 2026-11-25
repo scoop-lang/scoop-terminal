@@ -6,7 +6,8 @@ import scoop.terminal.emulator.*
 public struct TerminalViewOptions(
     val onLinkActivated: (TerminalLink) -> Unit = {},
     val onLinkHovered: (TerminalLink?) -> Unit = {},
-    val commandSeparators: Boolean = false
+    val commandSeparators: Boolean = false,
+    val additionalWordCharacters: String = ""
 )
 
 private struct LinkPress(

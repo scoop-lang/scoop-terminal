@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | M1 | 分页历史、行 ID 索引、复用不可变行内容 | 已实现，核心测试通过 |
 | M1 | 逻辑行、正文 reflow、宽字素、anchor 定位与淘汰/重置失效 | 已实现，核心及选择回归通过 |
-| M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 有界跟踪核心与 6 项回放已完成；控制器/命令/图形消费者随对应阶段接入 |
+| M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 有界跟踪核心与 6 项回放已完成，控制器/选择/命令已接入；图形消费者随 M5 接入 |
 | M1 | 已提交快照、变化集、session reading 与消费者迁移 | 已实现，快照与视图回归通过 |
 | M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
 | M1 | 上下/左右边距、矩形滚动、宽字符编辑、DECSC/DECSTR/RIS | 已实现，核心 40 项测试通过 |
@@ -25,7 +25,7 @@
 | M2 | OSC 8 超链接与交互 | 核心 6 项及交互/光栅 3 项通过；公开 controller 的 point 查询随 M3 接入 |
 | M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；真实系统剪贴板在集中验收验证 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 已实现，5 项核心用例及 UI 编译检查通过 |
-| M3 | controller、高级选择、拖动滚动、复制规则 | 待实现 |
+| M3 | controller、高级选择、拖动滚动、复制规则 | 已实现，9 项选择、2 项期限、1 项光栅及原视口 5 项通过；真实窗口事件在集中验收验证 |
 | M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 API 与 7 项测试通过；session 异步扫描随控制器接入 |
 | M3 | reveal、矩形、高亮与结果失效 | 待实现 |
 | M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
@@ -58,6 +58,7 @@
 - OSC 133：`ShellCommandTest` 7/7、`TerminalCommandSeparatorTest` 1/1 通过，并重跑锚点 6/6。覆盖 A/B/C/D、可缺省退出状态、130 状态、孤立/丢失标记、次级提示符、擦除后跨 feed 重绘去重、pending-wrap、一行无历史、重排、冻结、主备屏及 EOF/RIS。`commandAt` / `commandsIn` / 分页 `commands` 返回已提交的命令块；`reading.text(range)` 读取原文。每个 buffer 最多保留一个没有可见锚点的提示符重绘上下文；它也受命令数量与字节预算约束。默认共保留 2048 个命令记录、8 MiB 元数据，旧快照和当前状态分别计费。
 - `TerminalViewOptions.commandSeparators` 默认 false；开启后只在后续主提示符所在物理行顶部画中性线，不增加行高、文字或光标移动。像素回归确认首条/次级提示符不新增线，关闭时没有线，绘制前后文字和光标相同。没有新增搜索框、命令工具栏或 shell hook 注入。
 - `LiteralSearchTest` 7/7 通过。`snapshot.search` 使用流式字面量匹配，分页同时限制命中数与扫描工作量；单个长字素和空行也分步推进。覆盖跨 soft wrap、硬行边界、重叠命中、`ß`/sigma/`İ` 完整 casefold、字素内部的精确原文 UTF-8 范围、无 normalization、部分历史前缀、冻结快照语义、取消、句柄/查询/工作内存/命中上限，以及 reflow 有效、改色有效、文字覆盖 Stale 和 reset Unavailable。关闭或完成会释放查询独立快照与工作数组，工作内存纳入快照总预算；每页返回源版本、查询代次与下一扫描位置。
+- 高级选择：`TerminalSelectionTest` 9/9、`TerminalSelectionScrollTest` 2/2、`TerminalSelectionPaintTest` 1/1，原视口 5/5、锚点 6/6 通过。覆盖 Unicode 词与额外路径字符、软换行逻辑行、宽字素矩形与重排后逐原行复制、显式空格/补齐策略、编辑迁移与覆盖通知、主备屏独立状态、历史裁剪后 Shift 扩展、冻结及过期帧拒绝。绝对单调期限随越界距离调速，不被连续指针移动推迟；光栅验证逐行选区而非整个包围框。`TerminalViewController` 支持显式选择、全选、滚动、复制及变更通知，关闭释放跟踪与订阅。修复旧 Accepted 帧在纯 reflow 后新注册的初始版本，以及跨宽字符软换行的跟踪范围错误保留补齐格的问题。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。
@@ -66,6 +67,7 @@
 - 快照验证覆盖旧代次隔离、共享历史页及索引、同代次配额共享、关闭释放、文本/样式/光标版本分离；快照字节配额采用保守内容估算，不等同于进程实测 RSS。
 - 存储与 reflow 测试覆盖旧快照隔离、跨页淘汰/恢复、宽字素的一列占位、保存光标/样式、主备屏、逻辑边界 affinity、硬换行、实际空格及多次宽度变化。
 - Scoop 底层已补齐完整字素宽度、显式 ambiguous 策略及统一的 Unicode 17 字素分段，独立提交并合并 [PR #220](https://github.com/scoop-lang/scoop/pull/220) 和 [PR #221](https://github.com/scoop-lang/scoop/pull/221)。release clippy、charset 用例、原生 ABI 均通过。开发 sysroot 已使用安装编译器完整重建，后续命令显式传 `--sysroot ../scoop/sysroot`；没有修改编译器。
+- 无排版分词入口 `scoop.charset.wordBoundaries` 已在 Scoop 独立提交、推送并合并 [PR #223](https://github.com/scoop-lang/scoop/pull/223)，main 已回合并到该修复分支并推送。复用现有 ICU4X dictionary 数据，未下载新依赖；release Clippy、2 项适配、3 项原生 ABI、实际示例与 API 文档检索通过，开发 sysroot 已更新。本轮 PR 文本与局部文档临时目录已清理。
 
 ## 后续执行约束
 

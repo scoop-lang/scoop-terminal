@@ -1,0 +1,159 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+
+public struct TerminalViewportState(
+    val bufferEpoch: Long,
+    val firstRow: Long,
+    val visibleRows: Long,
+    val columns: Long,
+    val atBottom: Boolean
+)
+
+public enum TerminalViewChange {
+    Viewport, Selection, SelectionInvalidated(TerminalInvalidation)
+}
+
+/** Application-owned view state. Close an explicit controller after its view has unmounted. */
+public class TerminalViewController internal constructor(
+    internal val viewport: TerminalViewport,
+    internal val session: TerminalEmulatorSession? = None
+) : Closeable {
+    private var subscription: Disposable? = None
+    private var viewChanged: ((Boolean) -> Unit)? = None
+    private var closed = false
+    private var observedViewport = currentViewport()
+    private var observedSelection = viewport.selection
+    public var onChanged: (TerminalViewChange) -> Unit = {}
+
+    public constructor(session: TerminalEmulatorSession) : this(
+        TerminalViewport(
+            { session.reading },
+            { range, kind, reading -> session.track(range, kind, reading) }
+        ),
+        Some(session)
+    ) {
+        subscription = Some(
+            session
+                .observe {
+                    synchronize();
+                    Unit
+                }
+        )
+    }
+
+    public val state: TerminalViewportState
+        get() {
+            synchronize();
+            return currentViewport()
+        }
+    public val selection: TerminalSelection?
+        get() {
+            synchronize();
+            return viewport.selection
+        }
+
+    public fun scroll(lines: Long): Boolean {
+        synchronize()
+        val changed = viewport.scroll(lines)
+        synchronize()
+        return changed
+    }
+
+    /** Selects an explicit half-open range, expanding partial wide cells to complete graphemes. */
+    public fun select(range: TerminalRange): Boolean {
+        synchronize()
+        val selected = viewport.selectRange(range)
+        synchronize()
+        return selected
+    }
+
+    public fun selectAll(): Boolean {
+        synchronize()
+        val selected = viewport.selectAll()
+        synchronize()
+        return selected
+    }
+
+    public fun clearSelection() {
+        synchronize();
+        viewport.clearSelection();
+        synchronize()
+    }
+
+    /** Returns text for the host clipboard or another caller; this method performs no clipboard I/O. */
+    public fun copySelection(options: TerminalCopyOptions = TerminalCopyOptions()): String? {
+        synchronize();
+        return viewport.copy(options)
+    }
+
+    internal fun synchronize(): ViewportUpdate {
+        ensureOpen()
+        val update = viewport.update()
+        val state = currentViewport()
+        val selection = viewport.selection
+        val moved = state != observedViewport
+        val selected = !sameSelection(selection, observedSelection)
+        observedViewport = state;
+        observedSelection = selection
+        if (moved || selected || update.resetInteraction)
+            viewChanged?.invoke(update.resetInteraction)
+        if (moved) onChanged(TerminalViewChange.Viewport)
+        if (selected) onChanged(TerminalViewChange.Selection)
+        when (update.invalidated) {
+            case Some(val reason) -> onChanged(TerminalViewChange.SelectionInvalidated(reason))
+            case None -> {}
+        }
+        return update
+    }
+
+    internal fun bind(owner: TerminalEmulatorSession, changed: (Boolean) -> Unit) {
+        ensureOpen()
+        when (session) {
+            case Some(val value) ->
+                if (value !== owner)
+                    throw IllegalArgumentException(
+                        Some("controller belongs to another terminal session")
+                    )
+            case None -> throw IllegalArgumentException(Some("controller has no terminal session"))
+        }
+        when (viewChanged) {
+            case Some(_) ->
+                throw IllegalStateException(Some("terminal controller already has a view"))
+            case None -> {}
+        }
+        viewChanged = Some(changed)
+        synchronize()
+    }
+
+    internal fun unbind() {
+        viewChanged = None;
+        viewport.endDrag()
+    }
+
+    private fun currentViewport(): TerminalViewportState = TerminalViewportState(
+        viewport.terminal.bufferEpoch, viewport.first, viewport.terminal.rows, viewport
+            .terminal
+            .columns, viewport.atBottom
+    )
+
+    private fun ensureOpen() {
+        if (closed) throw IllegalStateException(Some("terminal controller is closed"))
+    }
+
+    public override fun close() {
+        if (closed) return
+        when (viewChanged) {
+            case Some(_) ->
+                throw IllegalStateException(
+                    Some("unmount the terminal view before closing its controller")
+                )
+            case None -> {}
+        }
+        closed = true;
+        subscription?.dispose();
+        subscription = None
+        viewport.close();
+        observedSelection = None
+    }
+}

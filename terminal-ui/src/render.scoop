@@ -100,7 +100,7 @@ internal class TerminalFrame(
         glyphs.retain()
     }
 
-    fun shape(range: SelectionRange?, composition: String) {
+    fun shape(ranges: Array<SelectionRange>, composition: String) {
         var index = 0L
         for (line in geometry.rows) {
             val last = clamp(line.cells.size, 0L, geometry.columns)
@@ -110,18 +110,16 @@ internal class TerminalFrame(
                 if (cell.width != 0L && column + cell.width <= last) addCell(index, column, cell)
                 column += 1L
             }
-            val selected = when (range) {
-                case Some(val value) -> value.onRow(geometry.first + index, line)
-                case None -> None
-            }
-            when (selected) {
-                case Some(val span) -> {
-                    val end = clamp(span.end, 0L, geometry.columns)
-                    if (end > span.start)
-                        selection.add(geometry.rect(index, span.start, end - span.start))
-                }
+            for (range in ranges) {
+                when (val selected = range.onRow(geometry.first + index, line)) {
+                    case Some(val span) -> {
+                        val end = clamp(span.end, 0L, geometry.columns)
+                        if (end > span.start)
+                            selection.add(geometry.rect(index, span.start, end - span.start))
+                    }
 
-                case None -> {}
+                    case None -> {}
+                }
             }
             index += 1L
         }

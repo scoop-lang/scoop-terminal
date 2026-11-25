@@ -31,7 +31,7 @@ private class TerminalCommandSeparatorTest {
                         )
                         TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache, enabled)
                             .use { frame ->
-                                frame.shape(None, "")
+                                frame.shape([], "")
                                 RasterSurface(40, 48)
                                     .use { surface ->
                                         surface.draw { canvas -> frame.drawScreen(canvas) }

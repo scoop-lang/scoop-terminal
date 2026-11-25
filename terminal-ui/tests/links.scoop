@@ -73,7 +73,7 @@ private class TerminalLinkInteractionTest {
                 try {
                     TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, glyphs)
                         .use { frame ->
-                            frame.shape(None, "")
+                            frame.shape([], "")
                             RasterSurface(30, 16)
                                 .use { surface ->
                                     surface

@@ -43,7 +43,7 @@ public class Terminal public constructor(
         .tracking
         .register(
             state.screen,
-            source ?: reading, range, kind
+            source ?: reading, range, kind, reading.presentationVersion
         )
 
     public val unicodeVersion: String = unicodeTerminalDataVersion()

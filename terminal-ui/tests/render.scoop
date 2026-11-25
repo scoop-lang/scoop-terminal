@@ -28,7 +28,7 @@ private class TerminalGlyphCacheTest {
                         )
                         TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
                             .use { frame ->
-                                frame.shape(None, "")
+                                frame.shape([], "")
                                 RasterSurface(20, 16)
                                     .use { surface ->
                                         surface.draw { canvas -> frame.drawScreen(canvas) }
@@ -71,7 +71,7 @@ private class TerminalGlyphCacheTest {
                 )
                 val frame = TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, glyphs)
                 try {
-                    frame.shape(None, "")
+                    frame.shape([], "")
                     assertTrue(frame.hasBlink)
                     RasterSurface(20, 16)
                         .use { surface ->

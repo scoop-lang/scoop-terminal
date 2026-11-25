@@ -81,6 +81,8 @@ public class TerminalSnapshot internal constructor(
     ): TerminalAnchor? = available().anchorAt(row, column, affinity)
     public override fun resolve(anchor: TerminalAnchor): TerminalPosition? = available()
         .resolve(anchor)
+    public override fun logicalLineRange(id: Long): TerminalRange? = available()
+        .logicalLineRange(id)
     public override fun close() {
         val value = retained ?: return
         retained = None

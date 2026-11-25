@@ -32,6 +32,8 @@ public interface TerminalReading {
         affinity: TerminalAffinity = TerminalAffinity.After
     ): TerminalAnchor?
     public fun resolve(anchor: TerminalAnchor): TerminalPosition?
+    /** The retained part of a logical line, including its final grid padding. */
+    public fun logicalLineRange(id: Long): TerminalRange?
 }
 
 internal class TerminalReadingData(
@@ -109,17 +111,32 @@ internal class TerminalReadingData(
 
     public override fun resolve(anchor: TerminalAnchor): TerminalPosition? {
         if (anchor.bufferEpoch != bufferEpoch || anchor.cellOffset < 0L) return None
-        val stored = history.findLogical(anchor.logicalLineId)
+        val span = logicalSpan(anchor.logicalLineId) ?: return None
+        return resolveInLines(anchor, span, { index -> line(index) })
+    }
+
+    public override fun logicalLineRange(id: Long): TerminalRange? {
+        val span = logicalSpan(id) ?: return None
+        return Some(
+            TerminalRange(
+                anchorAt(span.first, 0L)!!,
+                anchorAt(span.last, line(span.last).cells.size, TerminalAffinity.Before)!!
+            )
+        )
+    }
+
+    private fun logicalSpan(id: Long): LogicalSpan? {
+        val stored = history.findLogical(id)
         var first = stored?.first ?: -1L
         var last = stored?.last ?: -1L
         for (index in 0L..<rows) {
-            if (screenLines[index].logicalLineId == anchor.logicalLineId) {
+            if (screenLines[index].logicalLineId == id) {
                 if (first < 0L) first = historySize + index
                 last = historySize + index
             }
         }
         if (first < 0L) return None
-        return resolveInLines(anchor, LogicalSpan(first, last), { index -> line(index) })
+        return Some(LogicalSpan(first, last))
     }
 }
 

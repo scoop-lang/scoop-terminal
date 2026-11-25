@@ -12,6 +12,7 @@ path = "src"
 [dependencies]
 "scoop:scoop.core" = "0.1.0"
 "scoop:scoop.std" = "0.1.0"
+"scoop:scoop.charset" = "0.1.0"
 "scoop:scoop.platform" = "0.1.0"
 "scoop:scoop.concurrent" = "0.1.0"
 "scoop:scoop.asyncio" = "0.1.0"

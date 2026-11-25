@@ -133,7 +133,8 @@ internal class TerminalTracking(
         screen: Screen,
         reading: TerminalReading,
         range: TerminalRange,
-        kind: TerminalTrackingKind
+        kind: TerminalTrackingKind,
+        presentation: Long
     ): TerminalTrackedRange {
         if (entries.size >= limits.maxHandles)
             throw IllegalStateException(Some("terminal tracking handle limit exceeded"))
@@ -170,7 +171,7 @@ internal class TerminalTracking(
                 }
             }
         }
-        return create(screen, range, kind, first, last, valid, reading.presentationVersion)
+        return create(screen, range, kind, first, last, valid, presentation)
     }
 
     fun registerLive(
@@ -409,7 +410,8 @@ internal class TerminalTracking(
             if (entry.start.row === row && entry.start.column > columns)
                 columns = entry.start.column
         }
-        return columns
+        // Right-edge padding before a wrapped wide cell is never part of logical text.
+        return if (row.softWrapped && columns > row.usedColumns) row.usedColumns else columns
     }
 
     fun reflow(source: Array<ScreenRow>, packed: Array<ScreenRow>) {

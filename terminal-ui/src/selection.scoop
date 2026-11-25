@@ -1,0 +1,189 @@
+package scoop.ui.terminal
+
+import scoop.charset.wordBoundaries
+import scoop.text.isBlank
+import scoop.terminal.emulator.*
+
+public enum TerminalSelectionMode {
+    Linear, Rectangular
+}
+
+public enum TerminalSelectionUnit {
+    Grapheme, Word, LogicalLine
+}
+
+/** Half-open, whole-grapheme ranges. Rectangles retain one text range per physical row. */
+public struct TerminalSelection(
+    val ranges: Array<TerminalRange>,
+    val mode: TerminalSelectionMode,
+    val unit: TerminalSelectionUnit,
+    val reversed: Boolean
+)
+
+/** Only empty grid padding is trimmed; explicitly printed spaces are always retained. */
+public struct TerminalCopyOptions(val trimPadding: Boolean = true)
+
+internal fun selectionRange(
+    reading: TerminalReading,
+    start: TerminalPosition,
+    end: TerminalPosition
+): TerminalRange? {
+    val first = reading.anchorAt(start.row, start.column, TerminalAffinity.Before) ?: return None
+    val last = reading.anchorAt(end.row, end.column, TerminalAffinity.After) ?: return None
+    return Some(
+        TerminalRange(
+            first.{affinity: TerminalAffinity.After},
+            last.{affinity: TerminalAffinity.Before}
+        )
+    )
+}
+
+internal fun before(left: TerminalPosition, right: TerminalPosition): Boolean = left.row <
+    right.row ||
+    (left.row == right.row && left.column < right.column)
+
+internal fun graphemeRange(reading: TerminalReading, position: TerminalPosition): TerminalRange? {
+    val line = reading.lines(position.row, 1L)[0L]
+    var column = clamp(position.column, 0L, line.cells.size - 1L)
+    if (line.cells[column].width == 0L) column -= 1L
+    return selectionRange(
+        reading, TerminalPosition(position.row, column),
+        TerminalPosition(position.row, column + line.cells[column].width)
+    )
+}
+
+private struct WordCell(val first: Long, val last: Long, val range: TerminalRange)
+
+/** One logical-line projection per word drag; shaping and font resources are never needed. */
+internal class TerminalWordSelection {
+    private var epoch = -1L
+    private var logical = -1L
+    private var version = -1L
+    private var screen = -1L
+    private var extra = ""
+    private var cells: Array<WordCell> = []
+    private var breaks: Array<Long> = []
+
+    fun clear() {
+        epoch = -1L;
+        logical = -1L;
+        cells = [];
+        breaks = []
+    }
+
+    fun range(reading: TerminalReading, point: TerminalAnchor, additional: String): TerminalRange? {
+        val position = reading.resolve(point) ?: return None
+        val line = reading.lines(position.row, 1L)[0L]
+        if (epoch !=
+            reading.bufferEpoch ||
+            logical !=
+            line.logicalLineId ||
+            version !=
+            line.textVersion ||
+            screen !=
+            reading.screenRevision ||
+            extra !=
+            additional
+        ) {
+            project(reading, line, additional)
+        }
+        if (cells.size == 0L) return graphemeRange(reading, position)
+        var cellIndex = 0L
+        var low = 0L
+        var high = cells.size
+        while (low < high) {
+            val middle = low + (high - low) / 2L
+            if (cells[middle].range.end.cellOffset <= point.cellOffset)
+                low = middle + 1L
+            else
+                high = middle
+        }
+        cellIndex = clamp(low, 0L, cells.size - 1L)
+        val scalar = cells[cellIndex].first
+        low = 0L;
+        high = breaks.size - 1L
+        while (low + 1L < high) {
+            val middle = low + (high - low) / 2L
+            if (breaks[middle] <= scalar) low = middle else high = middle
+        }
+        val first = breaks[low]
+        val last = breaks[low + 1L]
+        var start = cellIndex
+        var end = cellIndex
+        while (start > 0L && cells[start - 1L].last > first)
+            start -= 1L
+        while (end + 1L < cells.size && cells[end + 1L].first < last)
+            end += 1L
+        return Some(TerminalRange(cells[start].range.start, cells[end].range.end))
+    }
+
+    private fun project(reading: TerminalReading, line: TerminalLine, additional: String) {
+        val range = reading.logicalLineRange(line.logicalLineId)!!
+        val start = reading.resolve(range.start)!!
+        val end = reading.resolve(range.end)!!
+        val text = StringBuilder()
+        val characters = ArrayList<Char>()
+        val mapped = ArrayList<WordCell>()
+        for (row in start.row..end.row) {
+            val current = reading.lines(row, 1L)[0L]
+            val limit = if (current.softWrapped) current.usedColumns else current.cells.size
+            var column = 0L
+            while (column < limit) {
+                val cell = current.cells[column]
+                if (cell.width == 0L) {
+                    column += 1L;
+                    continue
+                }
+                val value = if (cell.text == "") " " else cell.text
+                val first = characters.size
+                for (character in value)
+                    characters.add(character)
+                text.append(value)
+                mapped
+                    .add(
+                        WordCell(
+                            first,
+                            characters.size,
+                            selectionRange(
+                                reading,
+                                TerminalPosition(row, column), TerminalPosition(
+                                    row,
+                                    column + cell.width
+                                )
+                            )!!
+                        )
+                    )
+                column += cell.width
+            }
+        }
+        val segmented = wordBoundaries(text.toString())
+        val merged = ArrayList<Long>()
+        for (boundary in segmented) {
+            if (boundary ==
+                0L ||
+                boundary ==
+                characters.size ||
+                characters[boundary - 1L].toString().isBlank() ||
+                characters[boundary].toString().isBlank() ||
+                (
+                    !containsCharacter(additional, characters[boundary - 1L]) &&
+                        !containsCharacter(additional, characters[boundary])
+                )
+            )
+                merged.add(boundary)
+        }
+        cells = mapped.toArray();
+        breaks = merged.toArray()
+        epoch = reading.bufferEpoch;
+        logical = line.logicalLineId;
+        version = line.textVersion
+        screen = reading.screenRevision;
+        extra = additional
+    }
+}
+
+private fun containsCharacter(value: String, character: Char): Boolean {
+    for (candidate in value)
+        if (candidate == character) return true
+    return false
+}

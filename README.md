@@ -10,15 +10,19 @@
 
 OSC 52 默认允许写入、拒绝读取，文本上限为 1 MiB。可在创建核心或会话时传入 `TerminalClipboardPolicy(read = true)`，也可禁用写入；这不影响用户主动复制/粘贴。挂载的视图提供本机剪贴板及实际可用的 PRIMARY selection，未挂载时可通过 `start(clipboard = Some(adapter))` 注入 `TerminalClipboardAdapter`。异步读取的完成回调必须回到会话 owner，返回的 `Disposable` 用于取消；默认一秒期限、拒绝或服务不可用都会完成空回复。PTY 写队列为每个读取预留位置，后续回复和用户输入保持顺序。宿主服务错误可通过 `onHostServiceError` 观察。
 
-## 开发
-
 OSC 8 通过 `TerminalViewOptions(onLinkActivated = ..., onLinkHovered = ...)` 暴露宿主回调，默认使用 Ctrl+点击（macOS 为 Command+点击）激活。组件保留完整 URI，由宿主决定如何打开。
 
 OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, count)`、`commandAt(anchor)`、`commandsIn(range)` 读取；`reading.text(range)` 读取原文。`TerminalViewOptions(commandSeparators = true)` 开启提示符行顶部的分割线，默认关闭。组件不修改 shell 配置，标记由 shell 或程序发送。
 
 `snapshot.search(query, TerminalSearchOptions(...))` 返回可关闭的分页字面量搜索；调用 `nextPage(maxMatches, scanBudget)`，并检查每个结果的 `status(reading)` 后定位。大小写不敏感使用完整 Unicode casefold；搜索对象拥有独立快照，关闭原快照不会取消查询。组件不包含搜索框。
 
-使用包含伪终端接口的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
+可创建 `TerminalViewController(session)`，用 `terminalView(session, controller = Some(controller))` 挂载。控制器提供 `select(range)`、`selectAll()`、`clearSelection()`、`scroll(lines)` 和 `copySelection(options)`；`onChanged` 通知滚动、选择变化及覆盖失效。显式控制器在视图卸载后由应用关闭，未传控制器时由视图管理。所有调用仍在会话 owner 上执行。
+
+视图支持双击按 Unicode 词选择、三击按逻辑行选择、Shift 扩展、Alt 矩形选择和越界拖动自动滚动。`TerminalViewOptions.additionalWordCharacters` 可增加路径／标识符字符。主备屏分别保留滚动与选择；矩形在重排后仍按原各行文字范围复制。`TerminalCopyOptions(trimPadding = false)` 可保留网格补齐空白，默认只去掉这些补齐格，始终保留显式输出的空格。
+
+## 开发
+
+使用包含伪终端接口及纯文本 `scoop.charset.wordBoundaries` 接口的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
 
 ```sh
 scoop --sysroot ../scoop/sysroot test --release emulator
