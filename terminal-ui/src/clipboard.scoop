@@ -1,0 +1,165 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+import scoop.window.*
+
+/** All calls and completions run on the session owner. Reads may complete asynchronously. */
+public interface TerminalClipboardAdapter {
+    /** Resolve the first available target. A returned handle cancels a pending operation. */
+    public fun read(
+        targets: Array<TerminalClipboardTarget>,
+        complete: (TerminalClipboardContent?) -> Unit
+    ): Disposable?
+    /** Complete writes in target order before returning; this is separate from explicit user copy/paste. */
+    public fun write(request: TerminalClipboardWrite)
+}
+
+private class PendingClipboardRead(
+    val request: TerminalClipboardRead,
+    val adapter: TerminalClipboardAdapter,
+    val ticket: TerminalWriteTicket
+) {
+    var active = true
+    var timer: Disposable? = None
+    var operation: Disposable? = None
+}
+
+internal class TerminalClipboardBridge(
+    private val outgoing: TerminalWriteQueue,
+    private val adapter: () -> TerminalClipboardAdapter?,
+    private val deadline: (() -> Unit) -> Disposable?,
+    private val wake: () -> Unit,
+    private val failed: (Throwable) -> Unit = {}
+) : Closeable {
+    private val pending = ArrayList<PendingClipboardRead>()
+    private var closed = false
+    val pendingCount: Long get() = pending.size
+
+    fun read(request: TerminalClipboardRead) {
+        if (closed) return
+        val ticket = outgoing.reserve()
+        val host = adapter()
+        if (pending.size >= 32L) {
+            ticket.complete(request.reply(None))
+            wake()
+            return
+        }
+        when (host) {
+            case None -> {
+                ticket.complete(request.reply(None))
+                wake()
+            }
+
+            case Some(val host) -> {
+                val item = PendingClipboardRead(request, host, ticket)
+                pending.add(item)
+                val bridge = this
+                item.timer = deadline { bridge.complete(item, None) }
+                when (item.timer) {
+                    case None -> {
+                        complete(item, None);
+                        return
+                    }
+
+                    case Some(_) -> {}
+                }
+                try {
+                    val operation = host
+                        .read(request.targets) { value -> bridge.complete(item, value) }
+                    if (item.active) item.operation = operation else operation?.dispose()
+                } catch (error: Throwable) {
+                    complete(item, None)
+                    failed(error)
+                }
+            }
+        }
+    }
+
+    fun write(request: TerminalClipboardWrite) {
+        if (closed) return
+        try {
+            adapter()?.write(request)
+        } catch (error: Throwable) {
+            failed(error)
+        }
+    }
+
+    private fun complete(item: PendingClipboardRead, value: TerminalClipboardContent?) {
+        if (!item.active) return
+        item.active = false
+        for (index in 0L..<pending.size) {
+            if (pending[index] === item) {
+                pending.removeAt(index);
+                break
+            }
+        }
+        item.ticket.complete(item.request.reply(value))
+        item.timer?.dispose()
+        item.timer = None
+        try {
+            item.operation?.dispose()
+        } catch (error: Throwable) {
+            failed(error)
+        }
+        item.operation = None
+        wake()
+    }
+
+    fun detach(adapter: TerminalClipboardAdapter) {
+        for (item in pending.toArray()) {
+            if (item.adapter === adapter) complete(item, None)
+        }
+    }
+
+    public override fun close() {
+        if (closed) return
+        closed = true
+        for (item in pending.toArray())
+            complete(item, None)
+    }
+}
+
+internal class WindowTerminalClipboardAdapter(private val window: Window) :
+    TerminalClipboardAdapter,
+    Closeable {
+    private var claim: PrimarySelectionClaim? = None
+    private var closed = false
+    public override fun read(
+        targets: Array<TerminalClipboardTarget>,
+        complete: (TerminalClipboardContent?) -> Unit
+    ): Disposable? {
+        if (!closed)
+            for (target in targets) {
+                if (target == TerminalClipboardTarget.Primary) {
+                    val primary = window.primarySelection
+                    if (primary.isAvailable) {
+                        complete(Some(TerminalClipboardContent(target, primary.readText() ?: "")))
+                        return None
+                    }
+                } else {
+                    complete(
+                        Some(TerminalClipboardContent(target, window.clipboard.readText() ?: ""))
+                    )
+                    return None
+                }
+            }
+        complete(None)
+        return None
+    }
+    public override fun write(request: TerminalClipboardWrite) {
+        if (closed) return
+        for (target in request.targets) {
+            if (target == TerminalClipboardTarget.Primary) {
+                val next = window.primarySelection.claimText(request.text)
+                claim?.close()
+                claim = next
+            } else
+                window.clipboard.writeText(request.text)
+        }
+    }
+    public override fun close() {
+        closed = true
+        claim?.close()
+        claim = None
+    }
+}

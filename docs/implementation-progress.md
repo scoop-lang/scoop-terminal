@@ -20,9 +20,10 @@
 | M1 | 下划线类型/颜色、光标形状、独立闪烁 | 已实现，4 项协议及 3 项绘制/缓存用例通过 |
 | M1 | DECRQM/DECRQSS/XTGETTCAP、尺寸查询及共享 terminfo 能力表 | 已实现，5 项协议用例及生成一致性/语法检查通过；图形能力在图形阶段加入 |
 | M2 | 同步输出 2026、序列边界提交、独立硬期限 | 已实现，完整核心 65 项通过；真实 PTY 期限在集中验收验证 |
-| M2 | 异步宿主效果的有序回复票据 | 待 OSC 52 阶段实现 |
+| M2 | 异步宿主效果的有序回复票据 | 已实现，虚拟期限/乱序完成/关闭回归通过 |
 | M2 | OSC 颜色查询/设置/重置 | 已实现，5 项协议、5 项快照及 4 项绘制/缓存用例通过 |
-| M2 | OSC 8、OSC 52 与宿主服务策略 | 待实现 |
+| M2 | OSC 8 超链接与交互 | 待实现 |
+| M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；真实系统剪贴板在集中验收验证 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 待实现 |
 | M3 | controller、高级选择、拖动滚动、复制规则 | 待实现 |
 | M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 待实现 |
@@ -49,6 +50,7 @@
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter CapabilityQueryTest`：5/5 通过，覆盖流顺序中的真实模式、SGR 回包回放、分块/取消/上限、未知查询失败及像素变化保留边距。UI 测试代码编译检查通过。
 - `python3 tools/generate_capabilities.py --check` 与 `tic -x -c terminfo/scoop.terminfo`：通过；查询和安装 profile 来自同一能力表，生成临时文件自动清理。
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter OscColorTest`：5/5 通过；`SnapshotTest` 5/5 通过；绘制/缓存 4/4 通过。覆盖 16-bit 查询、X11 `#` 高位与 `rgb:` 比例转换、批量参数、当前主题重置、独立的显式 RGB、冻结颜色及实际像素；快照配额已计入完整调色板的保守占用。
+- OSC 52：核心 `ClipboardProtocolTest` 4/4、UI `ClipboardBridgeTest` 4/4 通过。覆盖默认拒绝读取、禁写、严格 Base64/UTF-8、空内容清空、字节限额、目标顺序、有序 PTY 票据、异步乱序完成、虚拟一秒期限、卸载/关闭后迟到结果、无服务、异常及最多 32 个待处理读取。已消费或取消的票据释放其输出字节。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。

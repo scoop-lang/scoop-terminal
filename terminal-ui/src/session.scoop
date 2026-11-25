@@ -1,7 +1,6 @@
 package scoop.ui.terminal
 
 import scoop.asyncio.*
-import scoop.collections.ArrayDeque
 import scoop.concurrent.Channel
 import scoop.platform.memory.NativeByteBuffer
 import scoop.platform.process.Command
@@ -24,9 +23,12 @@ public class TerminalEmulatorSession private constructor(
     private val pty: AsyncPty,
     private val onTitle: (String) -> Unit,
     private val onBell: () -> Unit,
-    private val synchronizedOutputTimeout: Duration
+    private val synchronizedOutputTimeout: Duration,
+    private val configuredClipboard: TerminalClipboardAdapter?,
+    private val clipboardReadTimeout: Duration,
+    private val onHostServiceError: (Throwable) -> Unit
 ) : AsyncCloseable {
-    private val outgoing = ArrayDeque<Array<Byte>>()
+    private val outgoing = TerminalWriteQueue()
     private val writeReady = Channel<Unit>(1L)
     private val resizeReady = Channel<Unit>(1L)
     private var requestedSize: Dimensions? = None
@@ -38,8 +40,21 @@ public class TerminalEmulatorSession private constructor(
     private var deadlineScope: CoroutineScope? = None
     private var synchronizationDeadline: Job? = None
     private var deadlineGeneration = -1L
+    private var viewClipboard: TerminalClipboardAdapter? = None
+    private val clipboardBridge = TerminalClipboardBridge(
+        outgoing, { activeClipboard() },
+        { expire -> clipboardDeadline(expire) },
+        {
+            writeReady.trySend(Unit);
+            Unit
+        }, { error -> onHostServiceError(error) }
+    )
 
     public val state: TerminalSessionState get() = current
+    private fun activeClipboard(): TerminalClipboardAdapter? = when (configuredClipboard) {
+        case Some(_) -> configuredClipboard
+        case None -> viewClipboard
+    }
     /** The current immutable presentation. The mutable emulator remains session-owned. */
     public val reading: TerminalReading get() = terminal.reading
     public val mouseReporting: Boolean get() = terminal.mouseReporting
@@ -64,21 +79,25 @@ public class TerminalEmulatorSession private constructor(
             searchPath: Boolean = false,
             onTitle: (String) -> Unit = {},
             onBell: () -> Unit = {},
-            synchronizedOutputTimeout: Duration = Duration.seconds(1L)
+            synchronizedOutputTimeout: Duration = Duration.seconds(1L),
+            clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
+            clipboard: TerminalClipboardAdapter? = None,
+            clipboardReadTimeout: Duration = Duration.seconds(1L),
+            onHostServiceError: (Throwable) -> Unit = {}
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
             val loop = currentEventLoop()
             requirePtySize(columns, rows)
-            if (synchronizedOutputTimeout <= Duration.ZERO)
-                throw IllegalArgumentException(Some("synchronized output timeout must be positive"))
-            val terminal = Terminal(columns, rows, historyLimit)
+            if (synchronizedOutputTimeout <= Duration.ZERO || clipboardReadTimeout <= Duration.ZERO)
+                throw IllegalArgumentException(Some("terminal service timeouts must be positive"))
+            val terminal = Terminal(columns, rows, historyLimit, clipboardPolicy = clipboardPolicy)
             val pty = loop.spawnPty(command, columns, rows, searchPath)
             val session = TerminalEmulatorSession(
                 terminal,
                 pty,
                 onTitle,
                 onBell,
-                synchronizedOutputTimeout
+                synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError
             )
             session.driver = Some(application.launch { session.run() })
             return session
@@ -104,16 +123,32 @@ public class TerminalEmulatorSession private constructor(
         resizeReady.trySend(Unit)
     }
 
-    internal fun attach(changed: () -> Unit): Disposable {
+    internal fun attach(
+        clipboard: TerminalClipboardAdapter? = None,
+        changed: () -> Unit
+    ): Disposable {
         when (observer) {
             case Some(_) -> throw IllegalStateException(Some("terminal session already has a view"))
             case None -> {}
         }
         observer = Some(changed)
-        return ViewAttachment { observer = None }
+        viewClipboard = clipboard
+        return ViewAttachment {
+            observer = None
+            when (clipboard) {
+                case Some(val adapter) ->
+                    when (configuredClipboard) {
+                        case None -> clipboardBridge.detach(adapter)
+                        case Some(_) -> {}
+                    }
+                case None -> {}
+            }
+            viewClipboard = None
+        }
     }
 
     public override suspend fun close() {
+        clipboardBridge.close()
         driver?.cancel()
         pty.close()
         driver?.join()
@@ -122,7 +157,7 @@ public class TerminalEmulatorSession private constructor(
 
     private fun enqueue(bytes: Array<Byte>) {
         if (!inputEnded && bytes.size != 0L) {
-            outgoing.addLast(bytes)
+            outgoing.append(bytes)
             writeReady.trySend(Unit)
         }
     }
@@ -151,6 +186,7 @@ public class TerminalEmulatorSession private constructor(
                     resize.cancel()
                     session.synchronizationDeadline?.cancel()
                     session.synchronizationDeadline = None
+                    session.clipboardBridge.close()
                     session.deadlineScope = None
                 }
                 ended
@@ -203,10 +239,26 @@ public class TerminalEmulatorSession private constructor(
                 case Reply(val bytes) -> enqueue(bytes)
                 case Title(val title) -> onTitle(title)
                 case Bell -> onBell()
+                case ClipboardReadRequested(val request) -> clipboardBridge.read(request)
+                case ClipboardWriteRequested(val request) -> clipboardBridge.write(request)
             }
         }
         updateSynchronizationDeadline()
         if (update.changed) observer?.invoke()
+    }
+
+    private fun clipboardDeadline(expire: () -> Unit): Disposable? {
+        val scope = deadlineScope ?: return None
+        val duration = clipboardReadTimeout
+        return Some(
+            JobDisposable(
+                scope
+                    .launch {
+                        currentEventLoop().sleep(duration)
+                        expire()
+                    }
+            )
+        )
     }
 
     private fun updateSynchronizationDeadline() {
@@ -242,7 +294,7 @@ public class TerminalEmulatorSession private constructor(
             while (true) {
                 writeReady.receive()
                 while (outgoing.size != 0L) {
-                    val bytes = outgoing.removeFirst()
+                    val bytes = outgoing.take() ?: break
                     var offset = 0L
                     while (offset < bytes.size) {
                         buffer.clear()
@@ -258,6 +310,7 @@ public class TerminalEmulatorSession private constructor(
         } catch (error: PlatformException) {
             if (error.kind != PlatformErrorKind.BrokenPipe) throw error
             inputEnded = true
+            clipboardBridge.close()
             outgoing.clear()
         } finally {
             buffer.close()
@@ -293,6 +346,12 @@ public class TerminalEmulatorSession private constructor(
                 )
         )
         return cellsChanged
+    }
+}
+
+private class JobDisposable(private val job: Job) : Disposable {
+    public override fun dispose() {
+        job.cancel()
     }
 }
 

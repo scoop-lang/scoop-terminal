@@ -14,7 +14,8 @@ public class Terminal public constructor(
     snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits(),
     parserLimits: TerminalParserLimits = TerminalParserLimits(),
     ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
-    colors: TerminalColors = TerminalColors()
+    colors: TerminalColors = TerminalColors(),
+    clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy()
 ) {
     private val state = createState(
         columns,
@@ -22,7 +23,7 @@ public class Terminal public constructor(
         historyLimit,
         parserLimits,
         ambiguousWidth,
-        colors
+        colors, clipboardPolicy
     )
     private val snapshotBudget = SnapshotBudget(snapshotLimits)
 
@@ -110,11 +111,21 @@ private fun createState(
     historyLimit: Long,
     parserLimits: TerminalParserLimits,
     ambiguousWidth: TerminalAmbiguousWidth,
-    colors: TerminalColors
+    colors: TerminalColors,
+    clipboardPolicy: TerminalClipboardPolicy
 ): TerminalState {
     checkSize(columns, rows)
+    checkClipboardPolicy(clipboardPolicy)
     if (historyLimit < 0L) throw IllegalArgumentException(Some("negative terminal history limit"))
-    return TerminalState(columns, rows, historyLimit, parserLimits, ambiguousWidth, colors)
+    return TerminalState(
+        columns,
+        rows,
+        historyLimit,
+        parserLimits,
+        ambiguousWidth,
+        colors,
+        clipboardPolicy
+    )
 }
 
 private fun checkSize(columns: Long, rows: Long) {

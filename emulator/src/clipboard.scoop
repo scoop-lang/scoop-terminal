@@ -1,0 +1,130 @@
+package scoop.terminal.emulator
+
+import scoop.io.encoding.Base64
+import scoop.text.indexOf
+import scoop.text.substring
+
+public enum TerminalClipboardTarget {
+    Clipboard, Primary, Default
+}
+
+public struct TerminalClipboardPolicy(
+    val write: Boolean = true,
+    val read: Boolean = false,
+    val maxBytes: Long = 1048576L
+)
+
+public struct TerminalClipboardContent(val target: TerminalClipboardTarget, val text: String)
+
+/** The host must resolve this reserved reply position, including on denial or timeout. */
+public struct TerminalClipboardRead(
+    val id: Long,
+    val selector: String,
+    val targets: Array<TerminalClipboardTarget>,
+    val maxBytes: Long
+) {
+    /** Pure encoding; an unavailable, oversized, or mismatched response produces an empty reply. */
+    public fun reply(content: TerminalClipboardContent?): Array<Byte> {
+        when (content) {
+            case Some(val value) ->
+                if (value.text.byteLength <= maxBytes) {
+                    for (target in targets) {
+                        if (target == value.target)
+                            return clipboardReply(
+                                targetCode(target),
+                                Base64.Default.encode(value.text.toByteArray())
+                            )
+                    }
+                }
+            case None -> {}
+        }
+        return clipboardReply(selector, "")
+    }
+}
+
+public struct TerminalClipboardWrite(val targets: Array<TerminalClipboardTarget>, val text: String)
+
+private fun targetCode(target: TerminalClipboardTarget): String = when (target) {
+    case Clipboard -> "c"
+    case Primary -> "p"
+    case Default -> "s"
+}
+
+private fun clipboardReply(selector: String, payload: String): Array<Byte> = (
+    "\u001b]52;" + selector + ";" + payload + "\u001b\\"
+)
+    .toByteArray()
+
+internal fun checkClipboardPolicy(policy: TerminalClipboardPolicy) {
+    if (policy.maxBytes < 0L || policy.maxBytes > 2147483647L)
+        throw IllegalArgumentException(Some("terminal clipboard byte limit out of range"))
+}
+
+internal fun clipboardOsc(terminal: TerminalState, bytes: Array<Byte>) {
+    val text = String.fromUtf8OrNone(bytes) ?: return
+    val separator = text.indexOf(';')
+    if (separator < 0L) return
+    val selector = text.substring(0L, separator)
+    if (selector.charLength > 64L) return
+    for (character in selector) {
+        if (character !=
+            'c' &&
+            character !=
+            'p' &&
+            character !=
+            's' &&
+            character !=
+            'q' &&
+            (character < '0' || character > '7')
+        )
+            return
+    }
+    val payload = text.substring(separator + 1L)
+    val targets = clipboardTargets(selector)
+    val policy = terminal.clipboardPolicy
+    if (payload == "?") {
+        val request = TerminalClipboardRead(
+            terminal.nextClipboardRequest(),
+            selector,
+            targets,
+            policy.maxBytes
+        )
+        if (!policy.read || targets.size == 0L)
+            terminal.emit(TerminalEffect.Reply(request.reply(None)))
+        else
+            terminal.emit(TerminalEffect.ClipboardReadRequested(request))
+        return
+    }
+    if (!policy.write ||
+        targets.size ==
+        0L ||
+        payload.byteLength >
+        ((policy.maxBytes + 2L) / 3L) *
+        4L
+    )
+        return
+    val decoded = Base64.Default.withPadding(Base64.PaddingOption.Optional).decodeOrNone(payload) ?:
+        return
+    if (decoded.size > policy.maxBytes) return
+    val content = String.fromUtf8OrNone(decoded) ?: return
+    terminal.emit(TerminalEffect.ClipboardWriteRequested(TerminalClipboardWrite(targets, content)))
+}
+
+private fun clipboardTargets(selector: String): Array<TerminalClipboardTarget> {
+    val result = ArrayList<TerminalClipboardTarget>()
+    val actual = if (selector == "") "s" else selector
+    for (character in actual) {
+        val target = when (character) {
+            case 'c' -> TerminalClipboardTarget.Clipboard
+            case 'p' -> TerminalClipboardTarget.Primary
+            case 's' -> TerminalClipboardTarget.Default
+            case _ -> continue
+        }
+        var duplicate = false
+        for (existing in result) {
+            if (existing == target) duplicate = true
+        }
+        if (!duplicate) result.add(target)
+    }
+    return result.toArray()
+}

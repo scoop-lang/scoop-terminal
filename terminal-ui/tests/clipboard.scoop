@@ -1,0 +1,176 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class ClipboardBridgeTest {
+    @Test
+    fun delayedReadsReserveTheirOrderBeforeLaterRepliesAndUserInput() {
+        val queue = TerminalWriteQueue()
+        val host = ClipboardTestHost()
+        val clock = ClipboardTestClock()
+        val bridge = TerminalClipboardBridge(
+            queue,
+            { Some(host) },
+            { callback -> clock.schedule(callback) },
+            {}
+        )
+        bridge.read(testClipboardRead(1L))
+        queue.append("DSR".toByteArray())
+        bridge.read(testClipboardRead(2L))
+        queue.append("INPUT".toByteArray())
+        host.finish(1L, "B")
+        assertTrue(noWrite(queue))
+        host.finish(0L, "A")
+        assertEquals("\u001b]52;c;QQ==\u001b\\", nextWrite(queue))
+        assertEquals("DSR", nextWrite(queue))
+        assertEquals("\u001b]52;c;Qg==\u001b\\", nextWrite(queue))
+        assertEquals("INPUT", nextWrite(queue))
+        assertEquals(0L, bridge.pendingCount)
+        host.finish(0L, "late")
+        assertTrue(noWrite(queue))
+        assertEquals(2L, host.cancelled)
+        bridge.close()
+    }
+
+    @Test
+    fun virtualDeadlineDetachAndCloseResolveOnceAndRejectLateCallbacks() {
+        val queue = TerminalWriteQueue()
+        val host = ClipboardTestHost()
+        val clock = ClipboardTestClock()
+        val bridge = TerminalClipboardBridge(
+            queue,
+            { Some(host) },
+            { callback -> clock.schedule(callback) },
+            {}
+        )
+        bridge.read(testClipboardRead(1L))
+        clock.fire(0L)
+        assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        host.finish(0L, "late")
+        assertTrue(noWrite(queue))
+        bridge.read(testClipboardRead(2L))
+        bridge.detach(host)
+        assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        bridge.read(testClipboardRead(3L))
+        bridge.close()
+        assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        host.finish(1L, "late")
+        host.finish(2L, "late")
+        assertEquals(0L, bridge.pendingCount)
+        assertTrue(noWrite(queue))
+        assertEquals(3L, host.cancelled)
+    }
+
+    @Test
+    fun pendingReadsAreBoundedAndUnavailableAdaptersImmediatelyReturnEmpty() {
+        val queue = TerminalWriteQueue()
+        val host = ClipboardTestHost()
+        val clock = ClipboardTestClock()
+        val bridge = TerminalClipboardBridge(
+            queue,
+            { Some(host) },
+            { callback -> clock.schedule(callback) },
+            {}
+        )
+        for (index in 0L..<33L)
+            bridge.read(testClipboardRead(index))
+        assertEquals(32L, bridge.pendingCount)
+        assertEquals(32L, host.callbacks.size)
+        for (index in 0L..<32L)
+            clock.fire(index)
+        for (index in 0L..<33L)
+            assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        bridge.close()
+        val unavailable = TerminalClipboardBridge(queue, { None }, { _ -> None }, {})
+        unavailable.read(testClipboardRead(34L))
+        assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        unavailable.close()
+    }
+
+    @Test
+    fun throwingAdaptersAndClearedQueueTicketsCannotBlockFollowingInput() {
+        val queue = TerminalWriteQueue()
+        val host = ClipboardTestHost()
+        val clock = ClipboardTestClock()
+        host.throwOnRead = true
+        val bridge = TerminalClipboardBridge(
+            queue,
+            { Some(host) },
+            { callback -> clock.schedule(callback) },
+            {}
+        )
+        bridge.read(testClipboardRead(1L))
+        queue.append("input".toByteArray())
+        assertEquals("\u001b]52;c;\u001b\\", nextWrite(queue))
+        assertEquals("input", nextWrite(queue))
+        val ticket = queue.reserve()
+        queue.clear()
+        assertTrue(!ticket.complete("late".toByteArray()))
+        assertTrue(noWrite(queue))
+        bridge.close()
+    }
+}
+
+private fun testClipboardRead(id: Long): TerminalClipboardRead = TerminalClipboardRead(
+    id, "c", [TerminalClipboardTarget.Clipboard], 1024L
+)
+
+private fun nextWrite(queue: TerminalWriteQueue): String = String.fromUtf8(queue.take()!!)
+
+private fun noWrite(queue: TerminalWriteQueue): Boolean = when (queue.take()) {
+    case None -> true
+    case Some(_) -> false
+}
+
+private class ClipboardTestHost : TerminalClipboardAdapter {
+    val callbacks = ArrayList<(TerminalClipboardContent?) -> Unit>()
+    var cancelled = 0L
+    var throwOnRead = false
+    public override fun read(
+        targets: Array<TerminalClipboardTarget>,
+        complete: (TerminalClipboardContent?) -> Unit
+    ): Disposable? {
+        if (throwOnRead) throw IllegalStateException(Some("unavailable clipboard"))
+        callbacks.add(complete)
+        val host = this
+        return Some(ClipboardTestCancellation { host.cancelled += 1L })
+    }
+    public override fun write(request: TerminalClipboardWrite) {}
+    fun finish(index: Long, text: String) {
+        callbacks[index](Some(TerminalClipboardContent(TerminalClipboardTarget.Clipboard, text)))
+    }
+}
+
+private class ClipboardTestClock {
+    private val timers = ArrayList<ClipboardTestTimer>()
+    fun schedule(callback: () -> Unit): Disposable? {
+        val timer = ClipboardTestTimer(callback)
+        timers.add(timer)
+        return Some(timer)
+    }
+    fun fire(index: Long) {
+        timers[index].fire()
+    }
+}
+
+private class ClipboardTestTimer(private val callback: () -> Unit) : Disposable {
+    private var active = true
+    fun fire() {
+        if (active) callback()
+    }
+    public override fun dispose() {
+        active = false
+    }
+}
+
+private class ClipboardTestCancellation(private val callback: () -> Unit) : Disposable {
+    private var active = true
+    public override fun dispose() {
+        if (active) {
+            active = false;
+            callback()
+        }
+    }
+}

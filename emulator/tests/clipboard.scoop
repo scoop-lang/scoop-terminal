@@ -1,0 +1,121 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class ClipboardProtocolTest {
+    @Test
+    fun defaultPolicyWritesTextButNeverRequestsHostClipboardReads() {
+        val terminal = Terminal(8L, 2L)
+        val result = terminal.feed("\u001b]52;c;5Lit5paH\u0007\u001b]52;c;?\u001b\\".toByteArray())
+        when (result.effects[0L]) {
+            case ClipboardWriteRequested(val request) -> {
+                assertEquals("中文", request.text)
+                assertEquals(1L, request.targets.size)
+                assertEquals(TerminalClipboardTarget.Clipboard, request.targets[0L])
+            }
+
+            case _ -> fail(Some("expected clipboard write"))
+        }
+        assertEquals("\u001b]52;c;\u001b\\", clipboardEffectReply(result.effects[1L]))
+        assertTrue(!result.changed)
+    }
+
+    @Test
+    fun malformedBase64Utf8AndOversizedTextDoNotClearOrWriteTheClipboard() {
+        val terminal = Terminal(8L, 2L, clipboardPolicy = TerminalClipboardPolicy(maxBytes = 2L))
+        for (payload in ["%bad", "/w==", "YWJj", "YR"]) {
+            val result = terminal.feed(("\u001b]52;c;" + payload + "\u0007").toByteArray())
+            assertEquals(0L, result.effects.size)
+        }
+        val empty = terminal.feed("\u001b]52;c;\u0007".toByteArray())
+        when (empty.effects[0L]) {
+            case ClipboardWriteRequested(val request) -> assertEquals("", request.text)
+            case _ -> fail(Some("empty payload should clear"))
+        }
+        val optional = terminal.feed("\u001b]52;c;YQ\u0007".toByteArray())
+        when (optional.effects[0L]) {
+            case ClipboardWriteRequested(val request) -> assertEquals("a", request.text)
+            case _ -> fail(Some("valid unpadded Base64 should decode"))
+        }
+        assertEquals(0L, terminal.feed("\u001b]52;c!;?\u0007".toByteArray()).effects.size)
+        assertEquals(
+            "\u001b]52;c;\u001b\\",
+            clipboardEffectReply(
+                terminal.feed("\u001b]52;c\n;?\u0007".toByteArray()).effects[0L]
+            )
+        )
+    }
+
+    @Test
+    fun readTicketsRetainSelectionOrderAndLimitRepliesWithoutTruncatingUtf8() {
+        val terminal = Terminal(
+            8L,
+            2L,
+            clipboardPolicy = TerminalClipboardPolicy(read = true, maxBytes = 2L)
+        )
+        val result = terminal
+            .feed("\u001b]52;ppccqs0;?\u0007\u001b[6n\u001b]52;;?\u0007".toByteArray())
+        val first = clipboardRead(result.effects[0L])
+        assertEquals(3L, first.targets.size)
+        assertEquals(TerminalClipboardTarget.Primary, first.targets[0L])
+        assertEquals(TerminalClipboardTarget.Clipboard, first.targets[1L])
+        assertEquals(TerminalClipboardTarget.Default, first.targets[2L])
+        assertEquals("\u001b[1;1R", clipboardEffectReply(result.effects[1L]))
+        val second = clipboardRead(result.effects[2L])
+        assertTrue(second.id > first.id)
+        assertEquals(TerminalClipboardTarget.Default, second.targets[0L])
+        assertEquals(
+            "\u001b]52;c;YWI=\u001b\\",
+            String
+                .fromUtf8(
+                    first
+                        .reply(
+                            Some(TerminalClipboardContent(TerminalClipboardTarget.Clipboard, "ab"))
+                        )
+                )
+        )
+        assertEquals(
+            "\u001b]52;ppccqs0;\u001b\\",
+            String
+                .fromUtf8(
+                    first
+                        .reply(
+                            Some(TerminalClipboardContent(TerminalClipboardTarget.Clipboard, "中"))
+                        )
+                )
+        )
+        assertEquals(
+            "\u001b]52;;\u001b\\",
+            String
+                .fromUtf8(
+                    second
+                        .reply(
+                            Some(TerminalClipboardContent(TerminalClipboardTarget.Primary, "ab"))
+                        )
+                )
+        )
+    }
+
+    @Test
+    fun writePolicyAndUnsupportedTargetsAreEnforcedInTheHeadlessCore() {
+        val terminal = Terminal(
+            8L,
+            2L,
+            clipboardPolicy = TerminalClipboardPolicy(write = false, read = true)
+        )
+        assertEquals(0L, terminal.feed("\u001b]52;c;YQ==\u0007".toByteArray()).effects.size)
+        val result = terminal.feed("\u001b]52;q012;?\u0007".toByteArray())
+        assertEquals("\u001b]52;q012;\u001b\\", clipboardEffectReply(result.effects[0L]))
+    }
+}
+
+private fun clipboardRead(effect: TerminalEffect): TerminalClipboardRead = when (effect) {
+    case ClipboardReadRequested(val request) -> request
+    case _ -> throw IllegalStateException(Some("expected clipboard read"))
+}
+
+private fun clipboardEffectReply(effect: TerminalEffect): String = when (effect) {
+    case Reply(val bytes) -> String.fromUtf8(bytes)
+    case _ -> throw IllegalStateException(Some("expected clipboard reply"))
+}

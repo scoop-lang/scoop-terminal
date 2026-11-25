@@ -9,7 +9,8 @@ internal class TerminalState(
     historyLimit: Long,
     parserLimits: TerminalParserLimits,
     val ambiguousWidth: TerminalAmbiguousWidth,
-    colors: TerminalColors
+    colors: TerminalColors,
+    val clipboardPolicy: TerminalClipboardPolicy
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges()
@@ -29,6 +30,7 @@ internal class TerminalState(
     private var startColumn = 0L
     private var lastPrinted = TerminalCell()
     private val effects = ArrayList<TerminalEffect>()
+    private var clipboardRequestId = 0L
     private var changed = false
     private var modelRevision = 0L
     private var gridRevision = 0L
@@ -286,6 +288,10 @@ internal class TerminalState(
 
     public override fun osc(selector: Int, bytes: Array<Byte>) {
         if (colorOsc(this, selector, bytes)) return
+        if (selector == 52) {
+            clipboardOsc(this, bytes)
+            return
+        }
         if (selector == 0 || selector == 2)
             effects.add(TerminalEffect.Title(String.fromUtf8Lossy(bytes)))
     }
@@ -297,6 +303,15 @@ internal class TerminalState(
 
     fun reply(text: String) {
         effects.add(TerminalEffect.Reply(text.toByteArray()))
+    }
+
+    fun emit(effect: TerminalEffect) {
+        effects.add(effect)
+    }
+
+    fun nextClipboardRequest(): Long {
+        clipboardRequestId += 1L
+        return clipboardRequestId
     }
 
     private fun lineFeed(returns: Boolean) {
