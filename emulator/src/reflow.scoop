@@ -1,0 +1,74 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+
+/** Reflows complete soft-wrap groups without treating right-edge padding as text. */
+internal fun reflowLines(
+    source: List<ScreenRow>,
+    columns: Long,
+    required: HashMap<Long, Long>,
+    ids: RowIds,
+    changes: ScreenChanges
+): Array<ScreenRow> {
+    val output = ArrayList<ScreenRow>()
+    var builder: ReflowLine? = None
+    for (index in 0L..<source.size) {
+        val line = source[index]
+        val active = builder ?: ReflowLine(line, columns, output, ids, changes)
+        builder = Some(active)
+        val minimum = required[line.id] ?: 0L
+        val end = if (line.usedColumns > minimum) line.usedColumns else minimum
+        var column = 0L
+        while (column < end) {
+            val cell = line[column]
+            if (cell.width > 0L) active.append(cell)
+            column += if (cell.width > 0L) cell.width else 1L
+        }
+        if (!line.softWrapped || index + 1L == source.size) {
+            active.finish(false)
+            builder = None
+        }
+    }
+    return output.toArray()
+}
+
+private class ReflowLine(
+    first: ScreenRow,
+    private val columns: Long,
+    private val output: ArrayList<ScreenRow>,
+    private val ids: RowIds,
+    private val changes: ScreenChanges
+) {
+    private val identity = first.logical
+    private var logicalOffset = first.logicalOffset
+    private var current = ScreenRow(first.id, columns, TerminalStyle(), changes)
+    private var column = 0L
+    private var length = 0L
+
+    fun append(cell: TerminalCell) {
+        val width = if (cell.logicalWidth > columns) 1L else cell.logicalWidth
+        if (column + width > columns) {
+            finish(true)
+            current = ScreenRow(ids.take(), columns, TerminalStyle(), changes)
+            logicalOffset += length
+            length = 0L
+            column = 0L
+        }
+        current
+            .putCell(
+                column,
+                cell.{
+                    width: width,
+                    intrinsicWidth: if (width < cell.logicalWidth) cell.logicalWidth else 0L
+                }
+            )
+        column += width
+        length += cell.logicalWidth
+    }
+
+    fun finish(wrapped: Boolean) {
+        current.softWrapped = wrapped
+        current.rebase(identity, logicalOffset)
+        output.add(current)
+    }
+}

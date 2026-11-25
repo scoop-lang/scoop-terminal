@@ -38,14 +38,14 @@ internal class TerminalGlyphCache(
 
     fun layout(cell: TerminalCell, ink: Color): TextLayout {
         val key = GlyphKey(
-            cell.text, cell.style.bold, cell.style.italic, ink.red.toBits(),
+            cell.displayText, cell.style.bold, cell.style.italic, ink.red.toBits(),
             ink.green.toBits(), ink.blue.toBits(), ink.alpha.toBits()
         )
         when (layouts[key]) {
             case Some(val cached) -> return cached
             case None -> {}
         }
-        val value = shapeText(fonts, cell.text, appearance, ink, key.bold, key.italic)
+        val value = shapeText(fonts, key.text, appearance, ink, key.bold, key.italic)
         layouts[key] = value
         return value
     }

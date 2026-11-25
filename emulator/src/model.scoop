@@ -25,15 +25,24 @@ public struct TerminalStyle(
 public struct TerminalCell(
     val text: String = "",
     val width: Long = 1L,
-    val style: TerminalStyle = TerminalStyle()
-)
+    val style: TerminalStyle = TerminalStyle(),
+    val intrinsicWidth: Long = 0L
+) {
+    /** A narrow-window placeholder retains the original grapheme and its logical width. */
+    public val logicalWidth: Long get() = if (intrinsicWidth > 0L) intrinsicWidth else width
+    public val displayText: String get() = if (logicalWidth > width) "�" else text
+}
 
 /** A physical row, with identity retained when the row moves through scrollback. */
 public struct TerminalLine(
     val id: Long,
     val cells: Array<TerminalCell>,
     val softWrapped: Boolean,
-    val contentVersion: Long = 0L
+    val contentVersion: Long = 0L,
+    val logicalLineId: Long = 0L,
+    val logicalOffset: Long = 0L,
+    val usedColumns: Long = 0L,
+    val textVersion: Long = 0L
 )
 
 public struct TerminalCursor(val row: Long, val column: Long, val visible: Boolean)

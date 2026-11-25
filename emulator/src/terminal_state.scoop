@@ -6,7 +6,7 @@ import scoop.charset.unicodeScalarWidth
 internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges()
-    val main = Screen(columns, rows, historyLimit, ids, screenChanges)
+    val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     var alternateScreen = false
     val screen: Screen get() = if (alternateScreen) alternate else main
@@ -38,6 +38,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     }
 
     private fun update(): TerminalUpdate {
+        screen.reconcileLogicalLines()
         val screenChanged = updateScreenRevision()
         val modified = changed || screenChanged
         if (modified) modelRevision += 1L
@@ -100,20 +101,21 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         val grid = screen
         val length = if (width <= grid.columns) width else 1L
         if (modes.autoWrap && (grid.pendingWrap || grid.column + length > grid.columns)) {
-            grid.current.softWrapped = true
             grid.moveColumn(0L)
-            grid.lineFeed(style)
+            grid.lineFeed(style, wrapped = true)
         }
         val fits = length == width && grid.column + length <= grid.columns
-        val displayed = if (fits) text else "�"
+        val narrow = width == 2L && grid.columns == 1L && !alternateScreen
+        val displayed = if (fits || narrow) text else "�"
         val occupied = if (fits) length else 1L
+        val intrinsic = if (narrow) width else 0L
         val row = grid.current
         val position = grid.column
         if (modes.insert) row.shift(position, occupied, true, style)
-        row.put(position, displayed, occupied, style)
+        row.put(position, displayed, occupied, style, intrinsic)
         combining = Some(row)
         startColumn = position
-        lastPrinted = TerminalCell(displayed, occupied, style)
+        lastPrinted = TerminalCell(displayed, occupied, style, intrinsic)
         moveAfter(position, occupied)
         changed = true
     }
@@ -225,7 +227,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         val glyph = lastPrinted
         if (glyph.text != "") {
             for (index in 0L..<clamp(count, 0L, 65535L))
-                put(glyph.text, glyph.width)
+                put(glyph.text, glyph.logicalWidth)
         }
     }
 

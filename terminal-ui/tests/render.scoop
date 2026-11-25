@@ -9,6 +9,24 @@ import scoop.test.*
 @Test
 private class TerminalGlyphCacheTest {
     @Test
+    fun narrowWideCellsShapeThePlaceholderAndKeepOriginalText() {
+        FontCollection()
+            .use { fonts ->
+                val cache = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    val cell = TerminalCell("中", 1L, intrinsicWidth = 2L)
+                    val layout = cache.layout(cell, Color.White)
+                    assertEquals("�", layout.text)
+                    assertEquals("中", cell.text)
+                    assertTrue(layout === cache.layout(TerminalCell("�"), Color.White))
+                    assertEquals("中", cache.layout(TerminalCell("中", 2L), Color.White).text)
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
+    @Test
     fun sharesGlyphsWithTheSameInkAndKeepsRetainedFramesAlive() {
         FontCollection()
             .use { fonts ->

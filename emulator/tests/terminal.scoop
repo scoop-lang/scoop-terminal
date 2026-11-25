@@ -82,7 +82,7 @@ private class TerminalTest {
     @Test
     fun wideOverwritesAndResizeRepairBothColumns() {
         val terminal = Terminal(4L, 2L)
-        terminal.write("中a\u001b[1;2HX")
+        terminal.write("\u001b[?1049h中a\u001b[1;2HX")
         assertEquals(" Xa ", terminal.rowText(0L))
         terminal.write("\u001b[1;3H界")
         terminal.resize(3L, 2L)

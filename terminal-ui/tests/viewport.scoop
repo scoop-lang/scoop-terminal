@@ -20,6 +20,37 @@ private class TerminalViewportTest {
     }
 
     @Test
+    fun selectedContentAndViewportSurviveReflow() {
+        val terminal = Terminal(10L, 3L)
+        terminal.feed("abcdefghij".toByteArray())
+        val viewport = TerminalViewport(terminal)
+        val id = terminal.lines(0L, 1L)[0L].id
+        viewport.select(CellLocation(id, 3L))
+        viewport.extend(CellLocation(id, 8L))
+        assertEquals(Some("defghi"), viewport.copy())
+        terminal.resize(4L, 3L)
+        viewport.update()
+        assertEquals(Some("defghi"), viewport.copy())
+        terminal.resize(12L, 3L)
+        viewport.update()
+        assertEquals(Some("defghi"), viewport.copy())
+    }
+
+    @Test
+    fun wideWrapPaddingDoesNotBecomeCopiedText() {
+        val terminal = Terminal(5L, 3L)
+        terminal.feed("abcd中e".toByteArray())
+        val viewport = TerminalViewport(terminal)
+        val lines = terminal.lines(0L, 2L)
+        viewport.select(CellLocation(lines[0L].id, 0L))
+        viewport.extend(CellLocation(lines[1L].id, 2L))
+        assertEquals(Some("abcd中e"), viewport.copy())
+        terminal.resize(10L, 3L)
+        viewport.update()
+        assertEquals(Some("abcd中e"), viewport.copy())
+    }
+
+    @Test
     fun historyViewportUsesStableRowsAndRetiresEvictedSelection() {
         val terminal = Terminal(6L, 2L, 3L)
         val viewport = TerminalViewport(terminal)

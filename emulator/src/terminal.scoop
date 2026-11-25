@@ -1,6 +1,6 @@
 package scoop.terminal.emulator
 
-/** An incremental VT emulator with physical-row scrollback. All access is serialized by its owner. */
+/** An incremental VT emulator with reflowable main-screen scrollback. All access is serialized by its owner. */
 public class Terminal public constructor(columns: Long, rows: Long, historyLimit: Long = 10000L) {
     private val state = createState(columns, rows, historyLimit)
 
@@ -11,6 +11,7 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     /** Version of the cells, physical rows and scrollback, independent of cursor-only output. */
     public val screenRevision: Long get() = state.screenRevision
     public val alternateScreen: Boolean get() = state.alternateScreen
+    public val bufferEpoch: Long get() = state.screen.bufferEpoch
     public val mouseReporting: Boolean
         get() = state.modes.mouseTracking != 0 && state.modes.sgrMouse
     public val cursor: TerminalCursor
@@ -25,7 +26,7 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     /** Completes pending text when the output stream ends. */
     public fun finishOutput(): TerminalUpdate = state.finishOutput()
 
-    /** Resizes physical lines and optionally restores history when the main screen grows taller. */
+    /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
     public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true) {
         checkSize(columns, rows)
         if (columns != this.columns || rows != this.rows)
@@ -41,6 +42,16 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     }
 
     public fun findLine(id: Long): Long? = state.screen.findLine(id)
+
+    /** Creates an anchor; wide-cell endpoints expand according to affinity. Invalid coordinates return None. */
+    public fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity = TerminalAffinity.After
+    ): TerminalAnchor? = state.screen.anchorAt(row, column, affinity)
+
+    /** Resolves retained content in the active buffer. Reset or eviction makes the anchor unavailable. */
+    public fun resolve(anchor: TerminalAnchor): TerminalPosition? = state.screen.resolve(anchor)
 
     /** Encodes a host input using the modes active at the moment of the call. */
     public fun encodeInput(input: TerminalInput): Array<Byte> = encode(state, input)

@@ -5,6 +5,8 @@ import scoop.map
 
 private const val HISTORY_PAGE_ROWS = 64L
 
+internal struct LogicalSpan(val first: Long, val last: Long)
+
 private class HistoryPage {
     val rows = MutableArray<ScreenRow?>(HISTORY_PAGE_ROWS) { None }
 }
@@ -13,6 +15,7 @@ private class HistoryPage {
 internal class LineHistory {
     private val pages = HashMap<Long, HistoryPage>()
     private val positions = HashMap<Long, Long>()
+    private val logicalPositions = HashMap<Long, LogicalSpan>()
     private var first = 0L
     private var end = 0L
 
@@ -25,6 +28,9 @@ internal class LineHistory {
     }
 
     fun find(id: Long): Long? = positions[id].map { ordinal -> ordinal - first }
+
+    fun findLogical(id: Long): LogicalSpan? = logicalPositions[id]
+        .map { span -> LogicalSpan(span.first - first, span.last - first) }
 
     fun addLast(line: ScreenRow) {
         val pageIndex = end / HISTORY_PAGE_ROWS
@@ -39,6 +45,8 @@ internal class LineHistory {
         }
         page.rows[end % HISTORY_PAGE_ROWS] = Some(line)
         positions[line.id] = end
+        val previous = logicalPositions[line.logical.id]
+        logicalPositions[line.logical.id] = LogicalSpan(previous?.first ?: end, end)
         end += 1L
     }
 
@@ -47,6 +55,11 @@ internal class LineHistory {
         val pageIndex = first / HISTORY_PAGE_ROWS
         pages[pageIndex]!!.rows[first % HISTORY_PAGE_ROWS] = None
         positions.remove(line.id)
+        val span = logicalPositions[line.logical.id]!!
+        if (span.first == span.last)
+            logicalPositions.remove(line.logical.id)
+        else
+            logicalPositions[line.logical.id] = LogicalSpan(span.first + 1L, span.last)
         first += 1L
         if (first == end) clear() else if (first % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
         return line
@@ -58,6 +71,11 @@ internal class LineHistory {
         val pageIndex = end / HISTORY_PAGE_ROWS
         pages[pageIndex]!!.rows[end % HISTORY_PAGE_ROWS] = None
         positions.remove(line.id)
+        val span = logicalPositions[line.logical.id]!!
+        if (span.first == span.last)
+            logicalPositions.remove(line.logical.id)
+        else
+            logicalPositions[line.logical.id] = LogicalSpan(span.first, span.last - 1L)
         if (first == end) clear() else if (end % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
         return line
     }
@@ -65,6 +83,7 @@ internal class LineHistory {
     fun clear() {
         pages.clear()
         positions.clear()
+        logicalPositions.clear()
         first = 0L
         end = 0L
     }

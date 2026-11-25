@@ -8,7 +8,7 @@ internal struct CellLocation(val id: Long, val column: Long)
 
 internal struct CellSpan(val start: Long, val end: Long)
 
-private struct SelectedCells(val anchor: CellLocation, val end: CellLocation)
+private struct SelectedCells(val anchor: TerminalAnchor, val end: TerminalAnchor)
 
 internal struct SelectionRange(
     val startRow: Long,
@@ -34,13 +34,14 @@ internal struct SelectionRange(
 internal struct VisibleText(val text: String, val selection: Utf8Selection?)
 
 internal class TerminalViewport(val terminal: Terminal) {
-    private var anchor: Long? = None
+    private var anchor: TerminalAnchor? = None
     private var selection: SelectedCells? = None
     private var alternate = terminal.alternateScreen
 
     val first: Long
         get() = when (anchor) {
-            case Some(val id) -> clamp(terminal.findLine(id) ?: 0L, 0L, terminal.historySize)
+            case Some(val value) ->
+                clamp(terminal.resolve(value)?.row ?: 0L, 0L, terminal.historySize)
             case None -> terminal.historySize
         }
     val atBottom: Boolean get() = first == terminal.historySize
@@ -52,12 +53,9 @@ internal class TerminalViewport(val terminal: Terminal) {
             alternate = terminal.alternateScreen
         }
         when (anchor) {
-            case Some(val id) ->
-                if (terminal.findLine(id) == None)
-                    anchor = if (terminal.historySize == 0L)
-                        None
-                    else
-                        Some(terminal.lines(0L, 1L)[0L].id)
+            case Some(val value) ->
+                if (terminal.resolve(value) == None)
+                    anchor = if (terminal.historySize == 0L) None else terminal.anchorAt(0L, 0L)
             case None -> {}
         }
         if (range() == None) selection = None
@@ -70,28 +68,38 @@ internal class TerminalViewport(val terminal: Terminal) {
         anchor = if (destination == terminal.historySize)
             None
         else
-            Some(terminal.lines(destination, 1L)[0L].id)
+            terminal.anchorAt(destination, 0L)
         return true
     }
 
     fun select(location: CellLocation) {
-        selection = Some(SelectedCells(location, location))
+        val value = locationAnchor(location) ?: return
+        selection = Some(SelectedCells(value, value))
     }
 
     fun extend(location: CellLocation) {
         val previous = selection ?: return
-        selection = Some(SelectedCells(previous.anchor, location))
+        val value = locationAnchor(location) ?: return
+        selection = Some(SelectedCells(previous.anchor, value))
+    }
+
+    private fun locationAnchor(location: CellLocation): TerminalAnchor? {
+        val index = terminal.findLine(location.id) ?: return None
+        val line = terminal.lines(index, 1L)[0L]
+        val column = clamp(location.column, 0L, line.cells.size - 1L)
+        val start = if (line.cells[column].width == 0L) column - 1L else column
+        return terminal.anchorAt(index, start)
     }
 
     fun range(): SelectionRange? {
         val value = selection ?: return None
-        val start = terminal.findLine(value.anchor.id) ?: return None
-        val end = terminal.findLine(value.end.id) ?: return None
-        val reversed = end < start || (end == start && value.end.column < value.anchor.column)
+        val start = terminal.resolve(value.anchor) ?: return None
+        val end = terminal.resolve(value.end) ?: return None
+        val reversed = end.row < start.row || (end.row == start.row && end.column < start.column)
         return if (reversed)
-            Some(SelectionRange(end, value.end.column, start, value.anchor.column, true))
+            Some(SelectionRange(end.row, end.column, start.row, start.column, true))
         else
-            Some(SelectionRange(start, value.anchor.column, end, value.end.column, false))
+            Some(SelectionRange(start.row, start.column, end.row, end.column, false))
     }
 
     fun copy(): String? {
@@ -142,7 +150,8 @@ internal class TerminalViewport(val terminal: Terminal) {
 }
 
 private fun appendCells(text: StringBuilder, line: TerminalLine, start: Long, end: Long) {
-    for (column in start..<end) {
+    val limit = if (line.softWrapped && end > line.usedColumns) line.usedColumns else end
+    for (column in start..<limit) {
         val cell = line.cells[column]
         if (cell.width != 0L) text.append(if (cell.text == "") " " else cell.text)
     }

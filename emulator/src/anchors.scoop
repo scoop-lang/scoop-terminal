@@ -1,0 +1,23 @@
+package scoop.terminal.emulator
+
+/** Which side of a shared boundary owns the position. Ranges are half-open. */
+public enum TerminalAffinity {
+    Before, After
+}
+
+/** A logical terminal-column offset, independent of physical wrapping and viewport position. */
+public struct TerminalAnchor(
+    val bufferEpoch: Long,
+    val logicalLineId: Long,
+    val cellOffset: Long,
+    val affinity: TerminalAffinity = TerminalAffinity.After
+)
+
+public struct TerminalRange(val start: TerminalAnchor, val end: TerminalAnchor)
+
+/** Physical row includes retained history; column may equal the row width for a range endpoint. */
+public struct TerminalPosition(val row: Long, val column: Long)
+
+internal class LogicalLine(val id: Long) {
+    var version = 0L
+}
