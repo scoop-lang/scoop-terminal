@@ -22,7 +22,7 @@
 | M2 | 同步输出 2026、序列边界提交、独立硬期限 | 已实现，完整核心 65 项通过；真实 PTY 期限在集中验收验证 |
 | M2 | 异步宿主效果的有序回复票据 | 已实现，虚拟期限/乱序完成/关闭回归通过 |
 | M2 | OSC 颜色查询/设置/重置 | 已实现，5 项协议、5 项快照及 4 项绘制/缓存用例通过 |
-| M2 | OSC 8 超链接与交互 | 核心存储、快照、回收与限额已实现；视图交互进行中 |
+| M2 | OSC 8 超链接与交互 | 核心 6 项及交互/光栅 3 项通过；公开 controller 的 point 查询随 M3 接入 |
 | M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；真实系统剪贴板在集中验收验证 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 已实现，5 项核心用例及 UI 编译检查通过 |
 | M3 | controller、高级选择、拖动滚动、复制规则 | 待实现 |
@@ -53,6 +53,7 @@
 - OSC 52：核心 `ClipboardProtocolTest` 4/4、UI `ClipboardBridgeTest` 4/4 通过。覆盖默认拒绝读取、禁写、严格 Base64/UTF-8、空内容清空、字节限额、目标顺序、有序 PTY 票据、异步乱序完成、虚拟一秒期限、卸载/关闭后迟到结果、无服务、异常及最多 32 个待处理读取。已消费或取消的票据释放其输出字节。
 - `ShellMetadataTest` 5/5 通过，覆盖 OSC 7 的远端 host/百分号路径、无效 URI、OSC 9;4 缺省与保留百分比、0..100 限制、冻结期间事件顺序和 EOF/RIS 清理。元数据计入快照配额；组件没有目录访问、通知、任务栏或进度工具 UI。
 - OSC 8 核心 `HyperlinkTest` 6/6 通过；由于链接引用回收覆盖全部屏幕编辑路径，本次完整核心回归 85/85 通过。覆盖任意字节切分、参数保留、显式 ID 分组、宽格尾部、重排、矩形滚动、淘汰、保存光标与旧快照隔离；按记录数/字节限额拒绝新链接并产生诊断。链接记录保存在共享不可变索引中，单元格仅存 ID，已提交快照计入相应保守占用。
+- `TerminalLinkInteractionTest` 3/3 通过，覆盖已接受帧的链接命中、宽字符尾列、拖动阈值/取消/越界/不同链接不激活，以及显式 ID 多片段悬停的实际像素。`TerminalViewOptions` 提供 `onLinkActivated` / `onLinkHovered`，普通点击仍选择，Ctrl/Command 修饰点击只触发回调；应用鼠标模式优先，Shift 绕过。指针 claim、取消通知及不可取消的 release 清理已接入；真实窗口事件路径留集中验收验证。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。

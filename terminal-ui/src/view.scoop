@@ -21,16 +21,18 @@ private val outputRefreshInterval = Duration.milliseconds(96L)
 public fun terminalView(
     session: TerminalEmulatorSession,
     appearance: TerminalAppearance = TerminalAppearance(),
-    autoFocus: Boolean = false
+    autoFocus: Boolean = false,
+    options: TerminalViewOptions = TerminalViewOptions()
 ): View = element(
-    TerminalViewProps(session, appearance, autoFocus),
+    TerminalViewProps(session, appearance, autoFocus, options),
     { props, scope -> TerminalViewElement(props, scope) }
 )
 
 private struct TerminalViewProps(
     val session: TerminalEmulatorSession,
     val appearance: TerminalAppearance,
-    val autoFocus: Boolean
+    val autoFocus: Boolean,
+    val options: TerminalViewOptions
 )
 
 private class TerminalViewElement(
@@ -51,6 +53,11 @@ private class TerminalViewElement(
     private var paintRevision = 0L
     private var selecting = false
     private var reported = TerminalMouseButton.NonePressed
+    private var lastMouse: TerminalMouse? = None
+    private val linkGesture = TerminalLinkGesture()
+    private var hovered: TerminalLink? = None
+    private var pointerPoint: Point? = None
+    private var pointerModifiers: Modifiers? = None
     private var wheelRemainder = 0.0
     private var horizontalWheelRemainder = 0.0
     private val area = scope
@@ -73,6 +80,7 @@ private class TerminalViewElement(
 
     public override fun onMount() {
         area.scope.defaultAction = area.scope.handler
+        area.scope.onEventFinished = { event -> finishedEvent(event) }
         semantics.bindFocus(Some(focus))
         attach()
         resetCursorBlink()
@@ -109,6 +117,7 @@ private class TerminalViewElement(
         }
         val next = props.value.session
         if (next !== session) {
+            cancelInteraction()
             attachment?.dispose()
             accepted = None
             selecting = false
@@ -122,6 +131,9 @@ private class TerminalViewElement(
     }
 
     public override fun onUnmount() {
+        cancelInteraction()
+        refreshDeadline.cancel()
+        outputRefreshLimit = None
         cursorBlinkDeadline.cancel()
         textBlinkDeadline.cancel()
         attachment?.dispose()
@@ -276,6 +288,8 @@ private class TerminalViewElement(
                 bounds,
                 measured.paintRevision * 2L + if (textVisible) 1L else 0L
             ) { paint -> measured.drawScreen(paint.canvas, textVisible) }
+        val link = hovered
+        context.draw { paint -> measured.drawLinks(paint.canvas, link) }
         when (caret) {
             case Some(val rect) -> {
                 val focused = area.isFocusActive
@@ -299,6 +313,7 @@ private class TerminalViewElement(
                     FrameSubmission.Accepted
                 ) {
                     accepted = Some(geometry)
+                    updateHover(geometry)
                     if (geometry.columns > 0L && geometry.requestedRows > 0L)
                         owner
                             .requestSize(
@@ -353,6 +368,7 @@ private class TerminalViewElement(
                 case TextInput(val text) -> composition.input(text)
 
                 case FocusChanged(val active) -> {
+                    if (!active) cancelInteraction()
                     session.send(TerminalInput.Focus(active))
                     // The surface also delivers focus loss during retirement.
                     if (scope.isMounted) {
@@ -360,6 +376,18 @@ private class TerminalViewElement(
                         scope.requestFrame()
                     }
                 }
+
+                case Pointer(val pointer) ->
+                    when (pointer) {
+                        case Cancelled(_, _) -> cancelInteraction()
+
+                        case Left(_) -> {
+                            pointerPoint = None;
+                            setHovered(None)
+                        }
+
+                        case _ -> {}
+                    }
 
                 else -> {}
             }
@@ -413,21 +441,31 @@ private class TerminalViewElement(
     }
 
     private fun pointerEvent(context: RoutedEventContext, event: InputPointerEvent): Boolean {
-        when (event) {
-            case Cancelled(_, _) -> {
-                selecting = false
-                reported = TerminalMouseButton.NonePressed
-                return false
-            }
-
-            case _ -> {}
-        }
         val frame = accepted ?: return false
         val point = context.localPosition ?: return false
-        val(row, column) = frame.hit(point) ?: return false
+        pointerPoint = Some(point)
+        val modifiers = when (event) {
+            case Button(val pointer, _, _, _) -> pointer.state.modifiers
+            case Moved(val pointer) -> pointer.state.modifiers
+            case Wheel(val pointer, _, _, _) -> pointer.state.modifiers
+            case _ -> return false
+        }
+        pointerModifiers = Some(modifiers)
+        updateHover(frame)
         val pixels = TerminalPixelPosition(
             (point.x * frame.scaleFactor).toLong(), (point.y * frame.scaleFactor).toLong()
         )
+        val hit = frame.hit(point)
+        val(row, column) = when (hit) {
+            case Some(val value) -> value
+
+            case None -> {
+                if (!selecting && !linkGesture.active && reported == TerminalMouseButton.NonePressed
+                )
+                    return false
+                frame.clampedHit(point) ?: return false
+            }
+        }
         return when (event) {
             case Button(val pointer, val button, val state, _) ->
                 button(frame, row, column, pixels, pointer.state.modifiers, button, state)
@@ -456,12 +494,26 @@ private class TerminalViewElement(
         if (state == ElementState.Pressed) {
             area.requestFocus(FocusOrigin.Pointer)
             if (reportMouse(frame, modifiers)) {
+                if (!area.scope.claimPointer(mouse)) return false
                 reported = mapped
                 sendMouse(TerminalMouseAction.Press, mapped, row, column, pixels, modifiers)
                 return true
             }
             if (mapped == TerminalMouseButton.Left) {
+                if (!area.scope.claimPointer(mouse)) return false
                 val location = location(frame, row, column)
+                val activate = if (operatingSystem == OperatingSystem.Darwin)
+                    modifiers.superKey
+                else
+                    modifiers.control
+                when (val link = frame.reading.linkAt(frame.first + row, column)) {
+                    case Some(val value) ->
+                        if (activate) {
+                            linkGesture.begin(value, location, pixels, frame.scaleFactor)
+                            return true
+                        }
+                    case None -> {}
+                }
                 if (modifiers.shift && viewport.range() != None)
                     viewport.extend(location)
                 else
@@ -471,6 +523,21 @@ private class TerminalViewElement(
                 return true
             }
         } else {
+            if (mapped == TerminalMouseButton.Left && linkGesture.active) {
+                val link = linkGesture
+                    .release(
+                        when (val point = pointerPoint) {
+                            case Some(val value) -> frame.linkAt(value)
+                            case None -> None
+                        },
+                        pixels
+                    )
+                when (link) {
+                    case Some(val value) -> props.value.options.onLinkActivated(value)
+                    case None -> {}
+                }
+                return true
+            }
             if (reported == mapped) {
                 reported = TerminalMouseButton.NonePressed
                 sendMouse(TerminalMouseAction.Release, mapped, row, column, pixels, modifiers)
@@ -493,6 +560,15 @@ private class TerminalViewElement(
         pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ): Boolean {
+        when (val origin = linkGesture.drag(pixels)) {
+            case Some(val value) -> {
+                viewport.select(value);
+                selecting = true
+            }
+
+            case None -> {}
+        }
+        if (linkGesture.active) return true
         if (selecting) {
             viewport.extend(location(frame, row, column))
             refresh()
@@ -558,6 +634,7 @@ private class TerminalViewElement(
     private fun reportMouse(frame: GridGeometry, modifiers: Modifiers): Boolean {
         val terminal = session.reading
         return !modifiers.shift &&
+            frame.atBottom &&
             viewport.atBottom &&
             session.mouseReporting &&
             frame.columns ==
@@ -576,16 +653,97 @@ private class TerminalViewElement(
         pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ) {
-        session
-            .send(
-                TerminalInput
-                    .Mouse(
-                        TerminalMouse(
-                            action, button, row, column,
-                            modifiers.terminalModifiers(), Some(pixels)
+        val value = TerminalMouse(
+            action,
+            button,
+            row,
+            column,
+            modifiers.terminalModifiers(),
+            Some(pixels)
+        )
+        lastMouse = Some(value)
+        session.send(TerminalInput.Mouse(value))
+    }
+
+    private fun setHovered(value: TerminalLink?) {
+        if (hovered?.key == value?.key) return
+        hovered = value
+        props.value.options.onLinkHovered(value)
+        if (scope.isMounted) scope.requestFrame()
+    }
+
+    private fun updateHover(frame: GridGeometry) {
+        val point = pointerPoint
+        val captured = when (val modifiers = pointerModifiers) {
+            case Some(val value) -> reportMouse(frame, value)
+            case None -> false
+        }
+        setHovered(
+            if (captured)
+                None
+            else
+                when (point) {
+                    case Some(val value) -> frame.linkAt(value)
+                    case None -> None
+                }
+        )
+    }
+
+    private fun cancelInteraction() {
+        selecting = false
+        linkGesture.cancel()
+        val button = reported
+        reported = TerminalMouseButton.NonePressed
+        when (val last = lastMouse) {
+            case Some(val value) ->
+                if (button != TerminalMouseButton.NonePressed)
+                    session
+                        .send(
+                            TerminalInput
+                                .Mouse(value.{action: TerminalMouseAction.Release, button: button})
                         )
-                    )
-            )
+            case None -> {}
+        }
+        lastMouse = None
+        pointerPoint = None
+        setHovered(None)
+        area.scope.cancelPointerClaim()
+    }
+
+    private fun finishedEvent(event: InputEvent) {
+        when (event) {
+            case Pointer(val pointer) ->
+                when (pointer) {
+                    case Button(_, val button, val state, _) ->
+                        if (state ==
+                            ElementState.Released &&
+                            (
+                                (button == MouseButton.Left && (selecting || linkGesture.active)) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Left &&
+                                            button ==
+                                            MouseButton.Left
+                                    ) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Middle &&
+                                            button ==
+                                            MouseButton.Middle
+                                    ) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Right &&
+                                            button ==
+                                            MouseButton.Right
+                                    )
+                            )
+                        )
+                            cancelInteraction()
+                    case _ -> {}
+                }
+            case _ -> {}
+        }
     }
 }
 

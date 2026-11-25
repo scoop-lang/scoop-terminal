@@ -25,6 +25,19 @@ internal struct GridGeometry(
         return Some((row, column))
     }
 
+    fun linkAt(point: Point): TerminalLink? {
+        val(row, column) = hit(point) ?: return None
+        return reading.linkAt(first + row, column)
+    }
+
+    fun clampedHit(point: Point): (Long, Long)? {
+        if (rows.size == 0L || columns == 0L) return None
+        val row = clamp((point.y / metrics.height).toLong(), 0L, rows.size - 1L)
+        val last = clamp(columns, 0L, rows[row].cells.size) - 1L
+        if (last < 0L) return None
+        return Some((row, clamp((point.x / metrics.width).toLong(), 0L, last)))
+    }
+
     fun caret(cursor: TerminalCursor): Rect? = if (atBottom &&
         cursor.row <
         rows.size &&
@@ -60,6 +73,8 @@ private struct PaintCell(
     val blink: Boolean
 )
 
+private struct PaintLink(val bounds: Rect, val link: TerminalLink, val color: Color)
+
 internal class TerminalFrame(
     val geometry: GridGeometry,
     val paintRevision: Long,
@@ -74,6 +89,7 @@ internal class TerminalFrame(
     private val cursorColor = colors.cursor.color()
     private val cells = ArrayList<PaintCell>()
     private val selection = ArrayList<Rect>()
+    private val links = ArrayList<PaintLink>()
     private var preedit: TextLayout? = None
     private var blinkingText = false
     val hasBlink: Boolean get() = blinkingText
@@ -125,6 +141,13 @@ internal class TerminalFrame(
         val visible = cell.text != "" && !cell.style.concealed
         if (cell.style.blink && !cell.style.concealed) blinkingText = true
         val glyph = if (visible) Some(glyphs.layout(cell, ink)) else None
+        if (!cell.style.concealed) {
+            when (val link = geometry.reading.link(cell.linkId)) {
+                case Some(val value) ->
+                    links.add(PaintLink(geometry.rect(row, column, cell.width), value, ink))
+                case None -> {}
+            }
+        }
         if (visible || paper != background || cell.style.underlined || cell.style.struck)
             cells
                 .add(
@@ -237,6 +260,17 @@ internal class TerminalFrame(
             }
 
             case None -> {}
+        }
+        canvas.restore()
+    }
+
+    fun drawLinks(canvas: Canvas, hovered: TerminalLink?) {
+        val active = hovered ?: return
+        canvas.save()
+        canvas.clipRect(clip)
+        for (link in links) {
+            if (active.sameGroup(link.link))
+                drawUnderline(canvas, link.bounds, TerminalUnderline.Single, link.color)
         }
         canvas.restore()
     }
