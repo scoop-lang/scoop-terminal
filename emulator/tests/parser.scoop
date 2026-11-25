@@ -47,7 +47,129 @@ private class Scan : VtActions {
         output.append(f"[${command.argument(0L, 1)},${command.argument(1L, 1)}]")
     }
 
-    public override fun title(text: String) {
-        output.append(f"<title:${text}>")
+    public override fun osc(selector: Int, bytes: Array<Byte>) {
+        if (selector == 0 || selector == 2) output.append(f"<title:${String.fromUtf8Lossy(bytes)}>")
+    }
+
+    public override fun startString(kind: VtStringKind): VtStringSink? = None
+}
+
+@Test
+private class ControlStringParserTest {
+    @Test
+    fun controlStringsAndSubparametersSurviveEveryByteBoundary() {
+        val bytes =
+            "ț€\u001b[?2026$p\u001b[4:3;58:2::1:2:3m\u001b]110\u001b\\\u001b]8;id=x;https://a/界\u0007\u001bP$qm\u001b\\\u001b_Ga=q,i=7;AAAA\u001b\\!"
+                .toByteArray()
+        for (split in 0L..bytes.size) {
+            val scan = StringScan()
+            val parser = VtParser(scan)
+            parser.feed(Array<Byte>(split) { index -> bytes[index] })
+            parser.feed(Array<Byte>(bytes.size - split) { index -> bytes[split + index] })
+            assertEquals("ț€!", scan.output.toString())
+            assertEquals(2L, scan.commands.size)
+            assertEquals('?'.code, scan.commands[0L].prefix)
+            assertEquals('$'.code, scan.commands[0L].intermediate)
+            assertEquals(2026, scan.commands[0L].argument(0L, 0))
+            assertEquals(8L, scan.commands[1L].arguments.size)
+            assertEquals(-1, scan.commands[1L].arguments[4L])
+            assertEquals(':'.code, scan.commands[1L].separators[0L])
+            assertEquals(';'.code, scan.commands[1L].separators[1L])
+            assertEquals("110:", scan.oscs[0L])
+            assertEquals("8:id=x;https://a/界", scan.oscs[1L])
+            assertEquals(2L, scan.strings.size)
+            assertEquals("m", scan.strings[0L])
+            assertEquals("Ga=q,i=7;AAAA", scan.strings[1L])
+            assertEquals('$'.code, scan.dcs[0L].intermediate)
+            assertEquals('q'.code, scan.dcs[0L].final)
+        }
+    }
+
+    @Test
+    fun cancellationAndEofDiscardPartialStringsAndReleaseTheirHandlers() {
+        val scan = StringScan()
+        val parser = VtParser(scan)
+        parser
+            .feed(
+                "a\u001bPqpartial\u0018b\u001b_Gpartial\u001ac\u001b]2;discard\u0018d\u001b_Gbad\u001b!hidden\u001b\\e"
+                    .toByteArray()
+            )
+        parser.feed("\u001b_Gunfinished".toByteArray())
+        parser.finish()
+        parser.feed("f\u001bPqdone\u001b\\".toByteArray())
+        assertEquals("abcdef", scan.output.toString())
+        assertEquals(4L, scan.cancelled)
+        assertEquals(1L, scan.strings.size)
+        assertEquals("done", scan.strings[0L])
+        assertEquals(0L, scan.oscs.size)
+    }
+
+    @Test
+    fun oscLimitsRejectWholeMessagesAndRecoverAtBelOrSt() {
+        val scan = StringScan()
+        val parser = VtParser(scan, TerminalParserLimits(4L, 6L))
+        parser
+            .feed(
+                "\u001b]2;1234\u0007a\u001b]2;12345tail\u0007b\u001b]52;c;1234\u001b\\c\u001b]52;c;12345\u001b\\d\u001b]99999999999999999999;hidden\u0007e\u001b]2;bad\u001b!hidden\u0007f"
+                    .toByteArray()
+            )
+        assertEquals("abcdef", scan.output.toString())
+        assertEquals(2L, scan.oscs.size)
+        assertEquals("2:1234", scan.oscs[0L])
+        assertEquals("52:c;1234", scan.oscs[1L])
+    }
+
+    @Test
+    fun invalidDcsHeaderAndUnsupportedStringsNeverBecomeScreenText() {
+        val scan = StringScan()
+        val parser = VtParser(scan)
+        parser
+            .feed(
+                "a\u001bP1$2qhidden\u0007\u001b\\b\u001bXhidden\u001b\\c\u001b^hidden\u001b\\d"
+                    .toByteArray()
+            )
+        assertEquals("abcd", scan.output.toString())
+        assertEquals(0L, scan.dcs.size)
+        assertEquals(0L, scan.strings.size)
+    }
+}
+
+private class StringScan : VtActions {
+    val output = StringBuilder()
+    val commands = ArrayList<VtCsi>()
+    val dcs = ArrayList<VtCsi>()
+    val oscs = ArrayList<String>()
+    val strings = ArrayList<String>()
+    var cancelled = 0L
+    public override fun print(character: Char) {
+        output.append(character)
+    }
+    public override fun control(code: Int) {}
+    public override fun escape(intermediate: Int, final: Int) {}
+    public override fun csi(command: VtCsi) {
+        commands.add(command)
+    }
+    public override fun osc(selector: Int, bytes: Array<Byte>) {
+        oscs.add(f"${selector}:${String.fromUtf8Lossy(bytes)}")
+    }
+    public override fun startString(kind: VtStringKind): VtStringSink? {
+        when (kind) {
+            case Dcs(val header) -> dcs.add(header)
+            case Apc -> {}
+        }
+        return Some(ScannedString(this))
+    }
+}
+
+private class ScannedString(private val scan: StringScan) : VtStringSink {
+    private val bytes = ArrayList<Byte>()
+    public override fun push(byte: Int) {
+        bytes.add(byte.toByte())
+    }
+    public override fun finish() {
+        scan.strings.add(String.fromUtf8Lossy(bytes))
+    }
+    public override fun cancel() {
+        scan.cancelled += 1L
     }
 }

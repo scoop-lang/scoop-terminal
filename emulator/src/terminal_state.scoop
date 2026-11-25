@@ -3,7 +3,12 @@ package scoop.terminal.emulator
 import scoop.charset.graphemeBoundaries
 import scoop.charset.unicodeScalarWidth
 
-internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : VtActions {
+internal class TerminalState(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long,
+    parserLimits: TerminalParserLimits
+) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges()
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
@@ -26,7 +31,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     private var presentationVersion = 0L
     val revision: Long get() = modelRevision
     val screenRevision: Long get() = gridRevision
-    private val parser = VtParser(this)
+    private val parser = VtParser(this, parserLimits)
     private var committed = captureReading()
     val reading: TerminalReadingData get() = committed
 
@@ -212,9 +217,12 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         if (executeCsi(this, command)) changed = true
     }
 
-    public override fun title(text: String) {
-        effects.add(TerminalEffect.Title(text))
+    public override fun osc(selector: Int, bytes: Array<Byte>) {
+        if (selector == 0 || selector == 2)
+            effects.add(TerminalEffect.Title(String.fromUtf8Lossy(bytes)))
     }
+
+    public override fun startString(kind: VtStringKind): VtStringSink? = None
 
     fun reply(text: String) {
         effects.add(TerminalEffect.Reply(text.toByteArray()))

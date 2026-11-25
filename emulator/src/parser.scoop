@@ -1,11 +1,29 @@
 package scoop.terminal.emulator
 
+/** Limits apply to encoded OSC payload bytes; graphics handlers enforce their own budgets. */
+public struct TerminalParserLimits(
+    val oscBytes: Long = 65536L,
+    val clipboardBytes: Long = 1398108L
+)
+
 internal interface VtActions {
     fun print(character: Char)
     fun control(code: Int)
     fun escape(intermediate: Int, final: Int)
     fun csi(command: VtCsi)
-    fun title(text: String)
+    fun osc(selector: Int, bytes: Array<Byte>)
+    fun startString(kind: VtStringKind): VtStringSink?
+}
+
+internal enum VtStringKind {
+    Dcs(VtCsi), Apc
+}
+
+/** A handler consumes incrementally and must release partial state when cancelled. */
+internal interface VtStringSink {
+    fun push(byte: Int)
+    fun finish()
+    fun cancel()
 }
 
 internal struct VtCsi(
@@ -33,10 +51,14 @@ internal struct VtCsi(
 }
 
 private enum VtState {
-    Ground, Escape, EscapeIgnore, Csi, CsiIgnore, Osc, OscEscape, StringIgnore, StringEscape
+    Ground, Escape, EscapeIgnore, Csi, CsiIgnore, Dcs, DcsIgnore,
+    Osc, OscEscape, StringPayload, StringEscape, StringIgnore, IgnoreEscape
 }
 
-internal class VtParser(private val actions: VtActions) {
+internal class VtParser(
+    private val actions: VtActions,
+    private val limits: TerminalParserLimits = TerminalParserLimits()
+) {
     private var state = VtState.Ground
     private val text = VtUtf8 { character -> actions.print(character) }
     private var intermediate = 0
@@ -46,11 +68,13 @@ internal class VtParser(private val actions: VtActions) {
     private val separators = ArrayList<Int>()
     private var oscSelector = -1
     private var oscBody = false
-    private var oscBytes = 0
-    private val title = StringBuilder()
-    private val oscText = VtUtf8 { character ->
-        title.append(character);
-        Unit
+    private var oscValid = true
+    private val oscPayload = ArrayList<Byte>()
+    private var sink: VtStringSink? = None
+
+    init {
+        if (limits.oscBytes < 0L || limits.clipboardBytes < 0L)
+            throw IllegalArgumentException(Some("negative terminal parser limit"))
     }
 
     fun feed(bytes: List<Byte>) {
@@ -60,14 +84,20 @@ internal class VtParser(private val actions: VtActions) {
 
     fun finish() {
         text.finish()
+        cancelString()
         state = VtState.Ground
-        oscText.reset()
-        title.clear()
+    }
+
+    private fun cancelString() {
+        sink?.cancel()
+        sink = None
+        oscPayload.clear()
     }
 
     private fun advance(byte: Int) {
         if (state == VtState.Ground) {
             if (byte >= 0x20 && byte != 0x7f) {
+                // This is UTF-8 mode: continuation bytes must never be interpreted as C1.
                 text.push(byte)
             } else {
                 text.finish()
@@ -76,13 +106,14 @@ internal class VtParser(private val actions: VtActions) {
             return
         }
         if (byte == 0x18 || byte == 0x1a) {
+            cancelString()
             state = VtState.Ground
             return
         }
         when (state) {
             case Osc -> {
                 if (byte == 0x07)
-                    finishTitle()
+                    finishOsc()
                 else if (byte == 0x1b)
                     state = VtState.OscEscape
                 else if (byte >= 0x20 && byte != 0x7f) readOsc(byte)
@@ -90,16 +121,41 @@ internal class VtParser(private val actions: VtActions) {
             }
 
             case OscEscape -> {
-                if (byte == '\\'.code) finishTitle() else state = VtState.StringIgnore
+                if (byte == '\\'.code)
+                    finishOsc()
+                else {
+                    oscValid = false
+                    oscPayload.clear()
+                    state = if (byte == 0x1b) VtState.OscEscape else VtState.Osc
+                    if (byte == 7) finishOsc()
+                }
                 return
             }
 
-            case StringIgnore -> {
-                if (byte == 0x1b) state = VtState.StringEscape
+            case StringPayload -> {
+                if (byte == 0x1b) state = VtState.StringEscape else sink?.push(byte)
                 return
             }
 
             case StringEscape -> {
+                if (byte == '\\'.code) {
+                    val finished = sink
+                    sink = None
+                    state = VtState.Ground
+                    finished?.finish()
+                } else {
+                    cancelString()
+                    state = if (byte == 0x1b) VtState.IgnoreEscape else VtState.StringIgnore
+                }
+                return
+            }
+
+            case StringIgnore -> {
+                if (byte == 0x1b) state = VtState.IgnoreEscape
+                return
+            }
+
+            case IgnoreEscape -> {
                 if (byte == '\\'.code)
                     state = VtState.Ground
                 else if (byte != 0x1b) state = VtState.StringIgnore
@@ -111,13 +167,15 @@ internal class VtParser(private val actions: VtActions) {
         if (byte == 0x1b) {
             startEscape()
         } else if (byte < 0x20) {
-            actions.control(byte)
+            if (state != VtState.Dcs && state != VtState.DcsIgnore) actions.control(byte)
         } else if (byte < 0x7f) {
             when (state) {
                 case Escape -> readEscape(byte)
                 case EscapeIgnore -> if (byte >= 0x30) state = VtState.Ground
-                case Csi -> readCsi(byte)
+                case Csi -> readHeader(byte, false)
+                case Dcs -> readHeader(byte, true)
                 case CsiIgnore -> if (byte >= 0x40) state = VtState.Ground
+                case DcsIgnore -> if (byte >= 0x40) state = VtState.StringIgnore
                 case _ -> {}
             }
         }
@@ -128,6 +186,14 @@ internal class VtParser(private val actions: VtActions) {
         state = VtState.Escape
     }
 
+    private fun startHeader(dcs: Boolean) {
+        prefix = 0
+        field = -1
+        arguments.clear()
+        separators.clear()
+        state = if (dcs) VtState.Dcs else VtState.Csi
+    }
+
     private fun readEscape(byte: Int) {
         if (byte < 0x30) {
             if (intermediate == 0) intermediate = byte else state = VtState.EscapeIgnore
@@ -136,27 +202,24 @@ internal class VtParser(private val actions: VtActions) {
             state = VtState.Ground
         } else {
             when (byte) {
-                case 0x5b -> {
-                    prefix = 0
-                    field = -1
-                    arguments.clear()
-                    separators.clear()
-                    state = VtState.Csi
-                }
+                case 0x5b -> startHeader(false)
+                case 0x50 -> startHeader(true)
 
                 case 0x5d -> {
                     oscSelector = -1
                     oscBody = false
-                    oscBytes = 0
-                    oscText.reset()
-                    title.clear()
+                    oscValid = true
+                    oscPayload.clear()
                     state = VtState.Osc
                 }
 
-                case 0x50 -> state = VtState.StringIgnore
+                case 0x5f -> {
+                    sink = actions.startString(VtStringKind.Apc)
+                    state = VtState.StringPayload
+                }
+
                 case 0x58 -> state = VtState.StringIgnore
                 case 0x5e -> state = VtState.StringIgnore
-                case 0x5f -> state = VtState.StringIgnore
 
                 case _ -> {
                     actions.escape(0, byte)
@@ -166,12 +229,23 @@ internal class VtParser(private val actions: VtActions) {
         }
     }
 
-    private fun readCsi(byte: Int) {
+    private fun readHeader(byte: Int, dcs: Boolean) {
         if (byte >= 0x40) {
             arguments.add(field)
-            actions
-                .csi(VtCsi(prefix, intermediate, byte, arguments.toArray(), separators.toArray()))
-            state = VtState.Ground
+            val header = VtCsi(
+                prefix,
+                intermediate,
+                byte,
+                arguments.toArray(),
+                separators.toArray()
+            )
+            if (dcs) {
+                sink = actions.startString(VtStringKind.Dcs(header))
+                state = VtState.StringPayload
+            } else {
+                state = VtState.Ground
+                actions.csi(header)
+            }
         } else if (byte < 0x30 && intermediate == 0) {
             intermediate = byte
         } else if (intermediate == 0 && byte >= 0x30 && byte <= 0x39) {
@@ -187,6 +261,8 @@ internal class VtParser(private val actions: VtActions) {
             field = -1
         } else if (byte >=
             0x3c &&
+            byte <=
+            0x3f &&
             prefix ==
             0 &&
             intermediate ==
@@ -198,33 +274,37 @@ internal class VtParser(private val actions: VtActions) {
         ) {
             prefix = byte
         } else {
-            state = VtState.CsiIgnore
+            state = if (dcs) VtState.DcsIgnore else VtState.CsiIgnore
         }
     }
 
     private fun readOsc(byte: Int) {
+        if (!oscValid) return
         if (!oscBody) {
-            if (byte == 0x3b) {
+            if (byte == 0x3b && oscSelector >= 0)
                 oscBody = true
-            } else if (byte >= 0x30 && byte <= 0x39 && oscSelector < 1000) {
-                val previous = if (oscSelector < 0) 0 else oscSelector
-                oscSelector = previous * 10 + byte - 0x30
-            } else {
-                oscSelector = 10000
-            }
-        } else if (oscSelector == 0 || oscSelector == 2) {
-            if (oscBytes < 4096) {
-                oscBytes += 1
-                oscText.push(byte)
-            }
+            else if (byte >= 0x30 && byte <= 0x39) {
+                val value = if (oscSelector < 0) 0 else oscSelector
+                val digit = byte - 0x30
+                if (value > (Int.MAX_VALUE - digit) / 10)
+                    oscValid = false
+                else
+                    oscSelector = value * 10 + digit
+            } else
+                oscValid = false
+        } else {
+            val limit = if (oscSelector == 52) limits.clipboardBytes else limits.oscBytes
+            if (oscPayload.size == limit) {
+                oscValid = false
+                oscPayload.clear()
+            } else
+                oscPayload.add(byte.toByte())
         }
     }
 
-    private fun finishTitle() {
-        if (oscBody && (oscSelector == 0 || oscSelector == 2)) {
-            oscText.finish()
-            actions.title(title.toString())
-        }
+    private fun finishOsc() {
         state = VtState.Ground
+        if (oscValid && oscSelector >= 0) actions.osc(oscSelector, oscPayload.toArray())
+        oscPayload.clear()
     }
 }

@@ -5,9 +5,10 @@ public class Terminal public constructor(
     columns: Long,
     rows: Long,
     historyLimit: Long = 10000L,
-    snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits()
+    snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits(),
+    parserLimits: TerminalParserLimits = TerminalParserLimits()
 ) {
-    private val state = createState(columns, rows, historyLimit)
+    private val state = createState(columns, rows, historyLimit, parserLimits)
     private val snapshotBudget = SnapshotBudget(snapshotLimits)
 
     /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
@@ -69,10 +70,15 @@ public class Terminal public constructor(
     public fun encodeInput(input: TerminalInput): Array<Byte> = encode(state, input)
 }
 
-private fun createState(columns: Long, rows: Long, historyLimit: Long): TerminalState {
+private fun createState(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long,
+    parserLimits: TerminalParserLimits
+): TerminalState {
     checkSize(columns, rows)
     if (historyLimit < 0L) throw IllegalArgumentException(Some("negative terminal history limit"))
-    return TerminalState(columns, rows, historyLimit)
+    return TerminalState(columns, rows, historyLimit, parserLimits)
 }
 
 private fun checkSize(columns: Long, rows: Long) {

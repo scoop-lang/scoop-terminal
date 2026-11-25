@@ -12,6 +12,7 @@
 | M1 | 逻辑行、正文 reflow、宽字素、anchor 定位与淘汰/重置失效 | 已实现，核心及选择回归通过 |
 | M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 待实现 |
 | M1 | 已提交快照、变化集、session reading 与消费者迁移 | 已实现，快照与视图回归通过 |
+| M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
 | M1 | VT 编辑/边距/复位/Unicode、传统键鼠、样式与光标 | 待实现 |
 | M1 | 能力查询、准确的 capability 表、terminfo | 待实现 |
 | M2 | 同步输出 2026、期限、流顺序与有序效果 | 待实现 |
@@ -39,6 +40,7 @@
 - `scoop test --release emulator`：28/28 通过，包括 3 项存储、11 项 reflow 及 5 项快照测试。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。
+- `scoop test --release emulator --filter ParserTest`：6/6 通过，包括每个字节边界的切分、冒号子参数/中间字节、CAN/SUB/EOF、非法 DCS header、OSC 精确上限与超限整串丢弃。
 - `scoop check --release demo --tests`：通过；session 消费者已迁移到只读 `reading`。
 - 快照验证覆盖旧代次隔离、共享历史页及索引、同代次配额共享、关闭释放、文本/样式/光标版本分离；快照字节配额采用保守内容估算，不等同于进程实测 RSS。
 - 存储与 reflow 测试覆盖旧快照隔离、跨页淘汰/恢复、宽字素的一列占位、保存光标/样式、主备屏、逻辑边界 affinity、硬换行、实际空格及多次宽度变化。
