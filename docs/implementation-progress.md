@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | M1 | 分页历史、行 ID 索引、复用不可变行内容 | 已实现，核心测试通过 |
 | M1 | 逻辑行、正文 reflow、宽字素、anchor 定位与淘汰/重置失效 | 已实现，核心及选择回归通过 |
-| M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 待实现 |
+| M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 有界跟踪核心与 6 项回放已完成；控制器/命令/图形消费者随对应阶段接入 |
 | M1 | 已提交快照、变化集、session reading 与消费者迁移 | 已实现，快照与视图回归通过 |
 | M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
 | M1 | 上下/左右边距、矩形滚动、宽字符编辑、DECSC/DECSTR/RIS | 已实现，核心 40 项测试通过 |
@@ -54,6 +54,7 @@
 - `ShellMetadataTest` 5/5 通过，覆盖 OSC 7 的远端 host/百分号路径、无效 URI、OSC 9;4 缺省与保留百分比、0..100 限制、冻结期间事件顺序和 EOF/RIS 清理。元数据计入快照配额；组件没有目录访问、通知、任务栏或进度工具 UI。
 - OSC 8 核心 `HyperlinkTest` 6/6 通过；由于链接引用回收覆盖全部屏幕编辑路径，本次完整核心回归 85/85 通过。覆盖任意字节切分、参数保留、显式 ID 分组、宽格尾部、重排、矩形滚动、淘汰、保存光标与旧快照隔离；按记录数/字节限额拒绝新链接并产生诊断。链接记录保存在共享不可变索引中，单元格仅存 ID，已提交快照计入相应保守占用。
 - `TerminalLinkInteractionTest` 3/3 通过，覆盖已接受帧的链接命中、宽字符尾列、拖动阈值/取消/越界/不同链接不激活，以及显式 ID 多片段悬停的实际像素。`TerminalViewOptions` 提供 `onLinkActivated` / `onLinkHovered`，普通点击仍选择，Ctrl/Command 修饰点击只触发回调；应用鼠标模式优先，Shift 绕过。指针 claim、取消通知及不可取消的 release 清理已接入；真实窗口事件路径留集中验收验证。
+- `AnchorTrackingTest` 6/6、原有 `ReflowTest` 11/11 通过。`Terminal.track` 返回可关闭的有界注册，按受影响物理行订阅编辑；插删迁移、覆盖选区内部失效、提示符边界与显式擦除、逻辑行拆分、reflow、历史裁剪及同步冻结分别验证。已变更旧帧上的新注册明确返回 Stale；不把旧坐标套到新内容。快照保存不可变跟踪结果并计入预算；关闭/失效释放行引用，没有追加永久编辑日志。
 - `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
 - `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
 - `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。

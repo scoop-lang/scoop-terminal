@@ -34,6 +34,9 @@ public class TerminalSnapshot internal constructor(
     public override val colors: TerminalColors get() = available().colors
     public override val metadata: TerminalMetadata get() = available().metadata
     public override val linkCount: Long get() = available().linkCount
+    public override val trackingVersion: Long get() = available().trackingVersion
+    public override fun trackedRange(id: Long): TerminalTrackingState? = available()
+        .trackedRange(id)
     public override fun link(key: Long): TerminalLink? = available().link(key)
     public override fun lines(start: Long, count: Long): Array<TerminalLine> = available()
         .lines(start, count)

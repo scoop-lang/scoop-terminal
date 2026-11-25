@@ -1,0 +1,166 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class AnchorTrackingTest {
+    @Test
+    fun insertionDeletionAndRenditionPreserveTheSelectedContent() {
+        val terminal = Terminal(12L, 2L)
+        terminal.feed("abcdef".toByteArray())
+        val track = terminal.track(range(terminal, 0L, 2L, 0L, 4L))
+        terminal.feed("\r\u001b[2@".toByteArray())
+        assertEquals(
+            TerminalPosition(0L, 4L),
+            terminal.reading.resolve(available(track, terminal.reading).start)!!
+        )
+        assertEquals(
+            TerminalPosition(0L, 6L),
+            terminal.reading.resolve(available(track, terminal.reading).end)!!
+        )
+        terminal.feed("\u001b[P".toByteArray())
+        assertEquals(
+            TerminalPosition(0L, 3L),
+            terminal.reading.resolve(available(track, terminal.reading).start)!!
+        )
+        terminal.feed("\u001b[1;4H\u001b[31mc".toByteArray())
+        assertEquals(
+            TerminalPosition(0L, 3L),
+            terminal.reading.resolve(available(track, terminal.reading).start)!!
+        )
+        val update = terminal.feed("!".toByteArray())
+        assertTrue(update.damage.anchorsChanged)
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Overwritten),
+            track.state(terminal.reading)
+        )
+        track.close()
+    }
+
+    @Test
+    fun overwritingTheInteriorRetiresARangeEvenWhenBothEndpointsSurvive() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("abc\r\ndef\r\nghi".toByteArray())
+        val track = terminal.track(range(terminal, 0L, 1L, 2L, 2L))
+        terminal.feed("\u001b[2;2H!".toByteArray())
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Overwritten),
+            track.state(terminal.reading)
+        )
+        track.close()
+    }
+
+    @Test
+    fun boundariesRemainBeforeNewPromptTextAndRetireOnExplicitErasure() {
+        val terminal = Terminal(8L, 2L)
+        val point = terminal.anchorAt(0L, 0L, TerminalAffinity.Before)!!
+        val track = terminal.track(TerminalRange(point, point), TerminalTrackingKind.Boundary)
+        terminal.feed("prompt".toByteArray())
+        assertEquals(
+            TerminalPosition(0L, 0L),
+            terminal.reading.resolve(available(track, terminal.reading).start)!!
+        )
+        terminal.feed("\r\u001b[2K".toByteArray())
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Overwritten),
+            track.state(terminal.reading)
+        )
+        track.close()
+    }
+
+    @Test
+    fun softWrapSplitsAndReflowMigrateRegisteredAnchorsWithoutAJournal() {
+        val terminal = Terminal(4L, 4L)
+        terminal.feed("abcdefgh".toByteArray())
+        val track = terminal.track(range(terminal, 1L, 0L, 1L, 2L))
+        val initial = available(track, terminal.reading)
+        terminal.feed("\u001b[H\n".toByteArray())
+        val split = available(track, terminal.reading)
+        assertTrue(initial.start.logicalLineId != split.start.logicalLineId)
+        assertEquals(TerminalPosition(1L, 0L), terminal.reading.resolve(split.start)!!)
+        terminal.resize(2L, 5L)
+        val reflowed = available(track, terminal.reading)
+        assertEquals(split, reflowed)
+        val position = terminal.reading.resolve(reflowed.start)!!
+        assertEquals("e", terminal.reading.lines(position.row, 1L)[0L].cells[position.column].text)
+        terminal.feed("\u001bc".toByteArray())
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Deleted),
+            track.state(terminal.reading)
+        )
+        track.close()
+    }
+
+    @Test
+    fun synchronizationKeepsVisibleTrackingFrozenAndRejectsStaleRegistrations() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("abcd".toByteArray())
+        val original = range(terminal, 0L, 1L, 0L, 3L)
+        val track = terminal.track(original)
+        terminal.feed("\u001b[?2026h\r\u001b[@".toByteArray())
+        val frozen = terminal.reading
+        assertEquals(original, available(track, frozen))
+        val stale = terminal.track(original, source = Some(frozen))
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Stale),
+            stale.state(frozen)
+        )
+        terminal.releaseSynchronizedOutput()
+        assertEquals(
+            2L,
+            terminal.reading.resolve(available(track, terminal.reading).start)!!.column
+        )
+        assertEquals(original, available(track, frozen))
+        track.close()
+        stale.close()
+    }
+
+    @Test
+    fun evictionClipsTheLostEndAndLimitsAreReleasedByClose() {
+        val terminal = Terminal(
+            4L,
+            2L,
+            historyLimit = 1L,
+            trackingLimits = TerminalTrackingLimits(maxHandles = 1L)
+        )
+        terminal.feed("a\r\nb\r\nc".toByteArray())
+        val track = terminal.track(range(terminal, 0L, 0L, 2L, 1L))
+        terminal.feed("\r\nd".toByteArray())
+        val clipped = available(track, terminal.reading)
+        val start = terminal.reading.resolve(clipped.start)!!
+        assertEquals(TerminalPosition(0L, 0L), start)
+        assertEquals("b", terminal.reading.lines(start.row, 1L)[0L].cells[0L].text)
+        assertFailsWith<IllegalStateException> {
+            terminal.track(clipped);
+            Unit
+        }
+        track.close()
+        val replacement = terminal.track(clipped)
+        replacement.close()
+        assertEquals(
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Closed),
+            replacement.state(terminal.reading)
+        )
+    }
+}
+
+private fun range(
+    terminal: Terminal,
+    row: Long,
+    column: Long,
+    endRow: Long,
+    endColumn: Long
+): TerminalRange = TerminalRange(
+    terminal.anchorAt(row, column, TerminalAffinity.After)!!,
+    terminal.anchorAt(endRow, endColumn, TerminalAffinity.Before)!!
+)
+
+private fun available(track: TerminalTrackedRange, reading: TerminalReading): TerminalRange =
+    when (val value = track.state(reading)) {
+        case Available(val range) -> range
+
+        case Invalidated(val reason) -> {
+            fail(Some(f"unexpected tracking invalidation: {reason}"));
+            throw IllegalStateException()
+        }
+    }

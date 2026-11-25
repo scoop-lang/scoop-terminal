@@ -16,7 +16,8 @@ public class Terminal public constructor(
     ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
     colors: TerminalColors = TerminalColors(),
     clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
-    linkLimits: TerminalLinkLimits = TerminalLinkLimits()
+    linkLimits: TerminalLinkLimits = TerminalLinkLimits(),
+    trackingLimits: TerminalTrackingLimits = TerminalTrackingLimits()
 ) {
     private val state = createState(
         columns,
@@ -24,13 +25,25 @@ public class Terminal public constructor(
         historyLimit,
         parserLimits,
         ambiguousWidth,
-        colors, clipboardPolicy, linkLimits
+        colors, clipboardPolicy, linkLimits, trackingLimits
     )
     private val snapshotBudget = SnapshotBudget(snapshotLimits)
 
     /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
     public val reading: TerminalReading get() = state.reading
     public fun snapshot(): TerminalSnapshot = snapshotBudget.acquire(state.reading)
+
+    /** Registers component-owned positions; edits migrate them without retaining an edit journal. */
+    public fun track(
+        range: TerminalRange,
+        kind: TerminalTrackingKind = TerminalTrackingKind.Content,
+        source: TerminalReading? = None
+    ): TerminalTrackedRange = state
+        .tracking
+        .register(
+            state.screen,
+            source ?: reading, range, kind
+        )
 
     public val unicodeVersion: String = unicodeTerminalDataVersion()
     public val ambiguousWidth: TerminalAmbiguousWidth get() = state.ambiguousWidth
@@ -116,7 +129,8 @@ private fun createState(
     ambiguousWidth: TerminalAmbiguousWidth,
     colors: TerminalColors,
     clipboardPolicy: TerminalClipboardPolicy,
-    linkLimits: TerminalLinkLimits
+    linkLimits: TerminalLinkLimits,
+    trackingLimits: TerminalTrackingLimits
 ): TerminalState {
     checkSize(columns, rows)
     checkClipboardPolicy(clipboardPolicy)
@@ -128,7 +142,7 @@ private fun createState(
         parserLimits,
         ambiguousWidth,
         colors,
-        clipboardPolicy, linkLimits
+        clipboardPolicy, linkLimits, trackingLimits
     )
 }
 

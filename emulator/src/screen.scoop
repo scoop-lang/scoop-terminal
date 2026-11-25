@@ -2,7 +2,10 @@ package scoop.terminal.emulator
 
 import scoop.collections.HashMap
 
-internal class ScreenChanges(val links: TerminalLinkStore = TerminalLinkStore()) {
+internal class ScreenChanges(
+    val links: TerminalLinkStore = TerminalLinkStore(),
+    val tracking: TerminalTracking = TerminalTracking()
+) {
     var pending = false
     var textPending = false
 }
@@ -92,6 +95,8 @@ internal class Screen(
     else
         cells[index - history.size]
 
+    fun rowAt(index: Long): ScreenRow = lineAt(index)
+
     fun anchorAt(index: Long, column: Long, affinity: TerminalAffinity): TerminalAnchor? {
         if (index < 0L || index >= history.size + rows) return None
         return anchorInLine(bufferEpoch, lineAt(index).snapshot(), column, affinity)
@@ -135,7 +140,7 @@ internal class Screen(
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
         Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
-        changes.links.snapshot()
+        changes.links.snapshot(), changes.tracking.snapshot()
     )
 
     fun reconcileLogicalLines() {
@@ -361,13 +366,13 @@ internal class Screen(
     private fun remember(line: ScreenRow) {
         if (historyLimit != 0L) {
             if (history.size == historyLimit) {
-                history.removeFirst().release()
+                history.removeFirst().release(TerminalInvalidation.Evicted)
                 changes.textPending = true
             }
             history.addLast(line)
         } else {
             if (line.usedColumns > 0L) changes.textPending = true
-            line.release()
+            line.release(TerminalInvalidation.Evicted)
         }
     }
 
@@ -389,6 +394,8 @@ internal class Screen(
                 saved.row +
                 1L &&
                 cells[cells.size - 1L].usedColumns ==
+                0L &&
+                cells[cells.size - 1L].tracked.size ==
                 0L
         )
             cells.removeAt(cells.size - 1L).release()
@@ -451,11 +458,18 @@ internal class Screen(
                 saved.row +
                 1L &&
                 lineAt(end - 1L).usedColumns ==
+                0L &&
+                lineAt(end - 1L).tracked.size ==
                 0L
         )
             end -= 1L
         val source = Array<ScreenRow>(end) { index -> lineAt(index) }
+        for (line in source) {
+            val tracked = changes.tracking.required(line)
+            if (tracked > (required[line.id] ?: 0L)) required[line.id] = tracked
+        }
         val packed = reflowLines(source, width, required, ids, changes)
+        changes.tracking.reflow(source, packed)
         val cursorPosition = resolveReflow(packed, active)
         val savedPosition = resolveReflow(packed, stored)
         var start = if (packed.size > height) packed.size - height else 0L
@@ -471,7 +485,7 @@ internal class Screen(
         cells.clear()
         val retained = if (start > historyLimit) start - historyLimit else 0L
         for (index in 0L..<retained)
-            packed[index].release()
+            packed[index].release(TerminalInvalidation.Evicted)
         changes.textPending = previousTextPending || retained > 0L
         for (index in retained..<start)
             history.addLast(packed[index])

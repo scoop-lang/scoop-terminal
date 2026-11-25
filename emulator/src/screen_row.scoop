@@ -16,6 +16,7 @@ internal class ScreenRow(
     private var offset = 0L
     private var used = if (style == TerminalStyle()) 0L else columns
     private var released = false
+    val tracked = ArrayList<TrackedEntry>()
     val logical: LogicalLine get() = identity
     val logicalOffset: Long get() = offset
     val usedColumns: Long get() = used
@@ -79,6 +80,7 @@ internal class ScreenRow(
         if (identity === line && offset == start) return
         identity = line
         offset = start
+        changes.tracking.rebased(this)
         published = None
         changes.pending = true
     }
@@ -116,6 +118,12 @@ internal class ScreenRow(
             previous.logicalWidth !=
             cell.logicalWidth
         // Hold the incoming ID while clearing an overlapping previous glyph.
+        if (textChanged) {
+            val left = if (previous.width == 0L) column - 1L else column
+            var end = column + if (previous.width > cell.width) previous.width else cell.width
+            if (end < cells.size && cells[end].width == 0L) end += 1L
+            changes.tracking.replace(this, left, end, false)
+        }
         changes.links.retain(cell.linkId)
         clearGlyph(column, cell.style)
         if (cell.width == 2L) {
@@ -140,6 +148,7 @@ internal class ScreenRow(
         if (start >= end) return
         val left = if (cells[start].width == 0L) start - 1L else start
         val right = if (end < cells.size && cells[end].width == 0L) end + 1L else end
+        changes.tracking.replace(this, left, right, true)
         val blank = TerminalCell(style = style)
         if (style != TerminalStyle() && right > used) used = right
         for (index in left..<right) {
@@ -162,6 +171,7 @@ internal class ScreenRow(
     ) {
         val count = clamp(amount, 0L, end - start)
         if (count == 0L) return
+        changes.tracking.shift(this, start, end, count, insert)
         val blank = TerminalCell(style = style)
         if (insert) {
             var index = end - 1L
@@ -203,6 +213,7 @@ internal class ScreenRow(
 
     fun resize(columns: Long, style: TerminalStyle) {
         if (columns == cells.size) return
+        if (columns < cells.size) changes.tracking.crop(this, columns)
         val previous = cells
         if (columns < previous.size) {
             for (index in columns..<previous.size)
@@ -237,11 +248,17 @@ internal class ScreenRow(
                 case 2L -> {
                     if (index + 1L < cells.size && cells[index + 1L].width == 0L)
                         index += 1L
-                    else
+                    else {
+                        changes.tracking.replace(this, index, index + 1L, true)
                         replaceCell(index, blank)
+                    }
                 }
 
-                case 0L -> replaceCell(index, blank)
+                case 0L -> {
+                    changes.tracking.replace(this, index, index + 1L, true)
+                    replaceCell(index, blank)
+                }
+
                 case _ -> {}
             }
             index += 1L
@@ -257,9 +274,10 @@ internal class ScreenRow(
         cells[index] = value
     }
 
-    fun release() {
+    fun release(reason: TerminalInvalidation = TerminalInvalidation.Deleted) {
         if (released) return
         released = true
+        changes.tracking.release(this, reason)
         for (cell in cells)
             changes.links.release(cell.linkId)
     }

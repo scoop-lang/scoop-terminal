@@ -18,6 +18,8 @@ public interface TerminalReading {
     public val metadata: TerminalMetadata
     public val linkCount: Long
     public fun link(key: Long): TerminalLink?
+    public val trackingVersion: Long
+    public fun trackedRange(id: Long): TerminalTrackingState?
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -43,16 +45,21 @@ internal class TerminalReadingData(
     public override val pixelSize: TerminalPixelSize?,
     public override val colors: TerminalColors,
     public override val metadata: TerminalMetadata,
-    private val links: LinkReading
+    private val links: LinkReading,
+    private val tracking: TrackingReading
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
     public override val linkCount: Long get() = links.count
+    public override val trackingVersion: Long get() = tracking.version
+    public override fun trackedRange(id: Long): TerminalTrackingState? = tracking.get(id)
     public override fun link(key: Long): TerminalLink? = links.get(key)
     val retainedBytes: Long = readingBytes(history, screenLines) +
         8384L +
         metadataBytes(metadata) +
-        links.bytes
+        links.bytes +
+        tracking.count *
+        256L
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]

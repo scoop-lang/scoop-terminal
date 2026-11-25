@@ -11,11 +11,16 @@ internal class TerminalState(
     val ambiguousWidth: TerminalAmbiguousWidth,
     colors: TerminalColors,
     val clipboardPolicy: TerminalClipboardPolicy,
-    linkLimits: TerminalLinkLimits
+    linkLimits: TerminalLinkLimits,
+    trackingLimits: TerminalTrackingLimits
 ) : VtActions {
     private val ids = RowIds()
-    private val screenChanges = ScreenChanges(TerminalLinkStore(linkLimits))
+    private val screenChanges = ScreenChanges(
+        TerminalLinkStore(linkLimits),
+        TerminalTracking(trackingLimits)
+    )
     val links: TerminalLinkStore get() = screenChanges.links
+    val tracking: TerminalTracking get() = screenChanges.tracking
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     var alternateScreen = false
@@ -76,7 +81,8 @@ internal class TerminalState(
     private fun flush(publish: Boolean) {
         screen.reconcileLogicalLines()
         val screenChanged = updateScreenRevision()
-        val modified = changed || screenChanged
+        val trackedChanged = tracking.takeChanged()
+        val modified = changed || screenChanged || trackedChanged
         if (screenChanges.textPending) {
             textRevision += 1L
             screenChanges.textPending = false
