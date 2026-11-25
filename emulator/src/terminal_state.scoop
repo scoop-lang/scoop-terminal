@@ -40,7 +40,7 @@ internal class TerminalState(
     private fun captureReading(): TerminalReadingData = screen
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
-            alternateScreen, modes.cursorVisible, modes.mouseTracking != 0 && modes.sgrMouse
+            alternateScreen, modes.cursorVisible, modes.mouseTracking != 0
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {

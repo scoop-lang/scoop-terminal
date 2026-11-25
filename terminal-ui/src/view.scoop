@@ -49,6 +49,7 @@ private class TerminalViewElement(
     private var selecting = false
     private var reported = TerminalMouseButton.NonePressed
     private var wheelRemainder = 0.0
+    private var horizontalWheelRemainder = 0.0
     private val area = scope
         .createArea(focusable = true, textInput = true) { context, event -> route(context, event) }
     private val focus = scope.focusTarget(area)
@@ -181,7 +182,7 @@ private class TerminalViewElement(
         val visible = terminal.lines(first, clamp(rows, 0L, terminal.rows))
         val geometry = GridGeometry(
             size, metrics, first, visible, columns, rows, terminal.screenRevision,
-            first == terminal.historySize, terminal
+            first == terminal.historySize, terminal, scope.nativeWindow.metrics?.scaleFactor ?: 1.0
         )
         paintRevision += 1L
         val frame = TerminalFrame(
@@ -315,12 +316,15 @@ private class TerminalViewElement(
         val frame = accepted ?: return false
         val point = context.localPosition ?: return false
         val(row, column) = frame.hit(point) ?: return false
+        val pixels = TerminalPixelPosition(
+            (point.x * frame.scaleFactor).toLong(), (point.y * frame.scaleFactor).toLong()
+        )
         return when (event) {
             case Button(val pointer, val button, val state, _) ->
-                button(frame, row, column, pointer.state.modifiers, button, state)
-            case Moved(val pointer) -> motion(frame, row, column, pointer.state.modifiers)
+                button(frame, row, column, pixels, pointer.state.modifiers, button, state)
+            case Moved(val pointer) -> motion(frame, row, column, pixels, pointer.state.modifiers)
             case Wheel(val pointer, val delta, _, _) ->
-                wheel(frame, row, column, pointer.state.modifiers, delta)
+                wheel(frame, row, column, pixels, pointer.state.modifiers, delta)
             case _ -> false
         }
     }
@@ -329,6 +333,7 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers,
         mouse: MouseButton,
         state: ElementState
@@ -343,7 +348,7 @@ private class TerminalViewElement(
             area.requestFocus(FocusOrigin.Pointer)
             if (reportMouse(frame, modifiers)) {
                 reported = mapped
-                sendMouse(TerminalMouseAction.Press, mapped, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Press, mapped, row, column, pixels, modifiers)
                 return true
             }
             if (mapped == TerminalMouseButton.Left) {
@@ -359,7 +364,7 @@ private class TerminalViewElement(
         } else {
             if (reported == mapped) {
                 reported = TerminalMouseButton.NonePressed
-                sendMouse(TerminalMouseAction.Release, mapped, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Release, mapped, row, column, pixels, modifiers)
                 return true
             }
             if (mapped == TerminalMouseButton.Left && selecting) {
@@ -376,6 +381,7 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ): Boolean {
         if (selecting) {
@@ -384,7 +390,7 @@ private class TerminalViewElement(
             return true
         }
         if (reportMouse(frame, modifiers)) {
-            sendMouse(TerminalMouseAction.Move, reported, row, column, modifiers)
+            sendMouse(TerminalMouseAction.Move, reported, row, column, pixels, modifiers)
             return true
         }
         return false
@@ -394,17 +400,21 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers,
         delta: InputScrollDelta
     ): Boolean {
-        val lines = when (delta) {
-            case Lines(_, val y) -> y
-            case Pixels(_, val y) -> y / frame.metrics.height
+        val(horizontal, lines) = when (delta) {
+            case Lines(val x, val y) -> (x, y)
+            case Pixels(val x, val y) -> (x / frame.metrics.width, y / frame.metrics.height)
         }
         wheelRemainder += lines
-        val steps = wheelRemainder.toLong()
+        val steps = clamp(wheelRemainder.toLong(), -128L, 128L)
         wheelRemainder -= steps.toDouble()
-        if (steps == 0L) return lines != 0.0
+        horizontalWheelRemainder += horizontal
+        val horizontalSteps = clamp(horizontalWheelRemainder.toLong(), -128L, 128L)
+        horizontalWheelRemainder -= horizontalSteps.toDouble()
+        if (steps == 0L && horizontalSteps == 0L) return lines != 0.0 || horizontal != 0.0
         if (reportMouse(frame, modifiers)) {
             val mouse = if (steps > 0L)
                 TerminalMouseButton.WheelUp
@@ -412,7 +422,21 @@ private class TerminalViewElement(
                 TerminalMouseButton.WheelDown
             val count = if (steps > 0L) steps else -steps
             for (index in 0L..<count)
-                sendMouse(TerminalMouseAction.Press, mouse, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Press, mouse, row, column, pixels, modifiers)
+            val horizontalMouse = if (horizontalSteps > 0L)
+                TerminalMouseButton.WheelLeft
+            else
+                TerminalMouseButton.WheelRight
+            val horizontalCount = if (horizontalSteps > 0L) horizontalSteps else -horizontalSteps
+            for (index in 0L..<horizontalCount)
+                sendMouse(
+                    TerminalMouseAction.Press,
+                    horizontalMouse,
+                    row,
+                    column,
+                    pixels,
+                    modifiers
+                )
             return true
         }
         if (viewport.scroll(-steps)) {
@@ -430,7 +454,9 @@ private class TerminalViewElement(
             frame.columns ==
             terminal.columns &&
             frame.requestedRows ==
-            terminal.rows
+            terminal.rows &&
+            frame.scaleFactor ==
+            (scope.nativeWindow.metrics?.scaleFactor ?: 1.0)
     }
 
     private fun sendMouse(
@@ -438,6 +464,7 @@ private class TerminalViewElement(
         button: TerminalMouseButton,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ) {
         session
@@ -446,7 +473,7 @@ private class TerminalViewElement(
                     .Mouse(
                         TerminalMouse(
                             action, button, row, column,
-                            modifiers.terminalModifiers()
+                            modifiers.terminalModifiers(), Some(pixels)
                         )
                     )
             )

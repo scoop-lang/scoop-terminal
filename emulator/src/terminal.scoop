@@ -34,7 +34,7 @@ public class Terminal public constructor(
     public val alternateScreen: Boolean get() = state.alternateScreen
     public val bufferEpoch: Long get() = state.screen.bufferEpoch
     public val mouseReporting: Boolean
-        get() = state.modes.mouseTracking != 0 && state.modes.sgrMouse
+        get() = state.modes.mouseTracking != 0
     public val cursor: TerminalCursor
         get() {
             val screen = state.screen

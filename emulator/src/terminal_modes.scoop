@@ -10,6 +10,7 @@ internal class TerminalModes {
     var cursorVisible = true
     var mouseTracking = 0
     var sgrMouse = false
+    var pixelMouse = false
     var focusEvents = false
     var bracketedPaste = false
 }

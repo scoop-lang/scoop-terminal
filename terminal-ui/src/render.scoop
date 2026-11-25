@@ -13,7 +13,8 @@ internal struct GridGeometry(
     val requestedRows: Long,
     val screenRevision: Long,
     val atBottom: Boolean,
-    val reading: TerminalReading
+    val reading: TerminalReading,
+    val scaleFactor: Double = 1.0
 ) {
     fun hit(point: Point): (Long, Long)? {
         if (point.x < 0.0 || point.y < 0.0 || point.x >= size.width || point.y >= size.height)
