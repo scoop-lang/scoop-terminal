@@ -1,0 +1,49 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.AsyncCloseable
+import scoop.concurrent.*
+import scoop.terminal.emulator.*
+
+/** Window-owned query registry. Scanning uses its own worker, independent from VT model work. */
+internal class TerminalSearchExecutor : AsyncCloseable {
+    internal val executor = multiThreadExecutor {
+        workers = 1;
+        blocking { threads = 1 }
+    }
+    private val active = ArrayList<TerminalAsyncSearch>()
+    private var closed = false
+
+    fun create(search: TerminalSearch): TerminalAsyncSearch {
+        if (closed) {
+            search.close()
+            throw IllegalStateException(Some("terminal search executor is closed"))
+        }
+        val result = TerminalAsyncSearch(search, executor, { query -> remove(query) })
+        if (result.status == TerminalSearchStatus.Searching) active.add(result)
+        return result
+    }
+
+    private fun remove(query: TerminalAsyncSearch) {
+        for (index in 0L..<active.size) {
+            if (active[index] === query) {
+                active.removeAt(index)
+                return
+            }
+        }
+    }
+
+    public override suspend fun close() {
+        closed = true
+        val pending = active.toArray()
+        val worker = executor
+        for (query in pending)
+            query.close()
+        nonCancellableScope {
+            for (query in pending)
+                query.awaitIdle()
+            worker.requestShutdown()
+            worker.awaitTermination()
+            worker.join()
+        }
+    }
+}

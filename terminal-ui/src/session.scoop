@@ -31,6 +31,7 @@ public class TerminalEmulatorSession private constructor(
     private val onProgress: (TerminalProgress) -> Unit,
     private val onDiagnostic: (String) -> Unit
 ) : AsyncCloseable {
+    private val searches = TerminalSearchExecutor()
     private val outgoing = TerminalWriteQueue()
     private val writeReady = Channel<Unit>(1L)
     private val resizeReady = Channel<Unit>(1L)
@@ -65,14 +66,14 @@ public class TerminalEmulatorSession private constructor(
     public val metadata: TerminalMetadata get() = terminal.metadata
     public val ambiguousWidth: TerminalAmbiguousWidth get() = terminal.ambiguousWidth
     public fun snapshot(): TerminalSnapshot = terminal.snapshot()
-    /** Captures committed text; each asynchronous page yields and has a fixed maximum batch size. */
+    /** Captures committed text; asynchronous pages scan on a separate, bounded search worker. */
     public fun search(
         query: String,
         options: TerminalSearchOptions = TerminalSearchOptions()
     ): TerminalAsyncSearch {
         val snapshot = terminal.snapshot()
         try {
-            return TerminalAsyncSearch(snapshot.search(query, options))
+            return searches.create(snapshot.search(query, options))
         } finally {
             snapshot.close()
         }
@@ -144,15 +145,25 @@ public class TerminalEmulatorSession private constructor(
                 ambiguousWidth = ambiguousWidth
             )
             val pty = loop.spawnPty(command, columns, rows, searchPath)
-            val session = TerminalEmulatorSession(
-                terminal,
-                pty,
-                onTitle,
-                onBell,
-                synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError,
-                onWorkingDirectory, onProgress, onDiagnostic
-            )
-            session.driver = Some(application.launch { session.run() })
+            val session = try {
+                TerminalEmulatorSession(
+                    terminal,
+                    pty,
+                    onTitle,
+                    onBell,
+                    synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError,
+                    onWorkingDirectory, onProgress, onDiagnostic
+                )
+            } catch (error: Throwable) {
+                nonCancellableScope { pty.close() }
+                throw error
+            }
+            try {
+                session.driver = Some(application.launch { session.run() })
+            } catch (error: Throwable) {
+                session.close()
+                throw error
+            }
             return session
         }
     }
@@ -201,11 +212,19 @@ public class TerminalEmulatorSession private constructor(
     }
 
     public override suspend fun close() {
-        clipboardBridge.close()
-        driver?.cancel()
-        pty.close()
-        driver?.join()
-        if (running) publish(TerminalSessionState.Closed)
+        val session = this
+        nonCancellableScope {
+            session.clipboardBridge.close()
+            session.driver?.cancel()
+            try {
+                session.pty.close()
+                session.driver?.join()
+            } finally {
+                session.searches.close()
+            }
+            if (session.running) session.publish(TerminalSessionState.Closed)
+            Unit
+        }
     }
 
     private fun enqueue(bytes: Array<Byte>) {
