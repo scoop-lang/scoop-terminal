@@ -1,6 +1,10 @@
 package scoop.terminal.emulator
 
 internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
+    if (command.intermediate == '$'.code && command.final == 'p'.code) {
+        queryModes(terminal, command)
+        return false
+    }
     if (command.intermediate == ' '.code && command.final == 'q'.code && command.prefix == 0) {
         val value = command.argument(0L, 0)
         if (value < 0 || value > 6) return false
@@ -110,6 +114,11 @@ internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
         }
 
         case 'u' -> terminal.restoreCursor()
+
+        case 't' -> {
+            queryWindow(terminal, command)
+            return false
+        }
 
         case '@' -> {
             screen.shiftColumns(count, true, style)

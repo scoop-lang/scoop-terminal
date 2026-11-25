@@ -18,6 +18,7 @@ internal class TerminalState(
     val screen: Screen get() = if (alternateScreen) alternate else main
     var style = TerminalStyle()
     var modes = TerminalModes()
+    var pixelSize: TerminalPixelSize? = None
     private var tabs = defaultTabs(columns)
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
@@ -41,7 +42,7 @@ internal class TerminalState(
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
-                .cursorBlink
+                .cursorBlink, pixelSize
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -84,7 +85,17 @@ internal class TerminalState(
         return true
     }
 
-    fun resize(columns: Long, rows: Long, restoreHistory: Boolean): TerminalUpdate {
+    fun resize(
+        columns: Long,
+        rows: Long,
+        restoreHistory: Boolean,
+        pixels: TerminalPixelSize?
+    ): TerminalUpdate {
+        pixelSize = pixels
+        if (columns == main.columns && rows == main.rows) {
+            changed = true
+            return update()
+        }
         main.resize(columns, rows, restoreHistory, style)
         val mainTextChanged = screenChanges.textPending
         screenChanges.textPending = false
@@ -229,7 +240,10 @@ internal class TerminalState(
             effects.add(TerminalEffect.Title(String.fromUtf8Lossy(bytes)))
     }
 
-    public override fun startString(kind: VtStringKind): VtStringSink? = None
+    public override fun startString(kind: VtStringKind): VtStringSink? = when (kind) {
+        case Dcs(val command) -> queryString(this, command)
+        case Apc -> None
+    }
 
     fun reply(text: String) {
         effects.add(TerminalEffect.Reply(text.toByteArray()))

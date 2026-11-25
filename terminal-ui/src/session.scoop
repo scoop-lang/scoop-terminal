@@ -15,7 +15,7 @@ public enum TerminalSessionState {
     Running, Exited(ExitStatus), Closed, Failed(Throwable)
 }
 
-private struct Dimensions(val columns: Long, val rows: Long)
+private struct Dimensions(val columns: Long, val rows: Long, val pixels: TerminalPixelSize?)
 
 /** An application-owned session. The view and session are used on the window owner. */
 public class TerminalEmulatorSession private constructor(
@@ -73,17 +73,17 @@ public class TerminalEmulatorSession private constructor(
         if (running && !childExited) enqueue(terminal.encodeInput(input))
     }
 
-    internal fun requestSize(columns: Long, rows: Long) {
+    internal fun requestSize(columns: Long, rows: Long, pixels: TerminalPixelSize? = None) {
         requirePtySize(columns, rows)
         if (!running) {
-            resizeModel(columns, rows)
+            resizeModel(columns, rows, pixels)
             return
         }
-        if (columns == terminal.columns && rows == terminal.rows) {
+        if (columns == terminal.columns && rows == terminal.rows && pixels == terminal.pixelSize) {
             requestedSize = None
             return
         }
-        requestedSize = Some(Dimensions(columns, rows))
+        requestedSize = Some(Dimensions(columns, rows, pixels))
         resizeReady.trySend(Unit)
     }
 
@@ -219,7 +219,7 @@ public class TerminalEmulatorSession private constructor(
             resizeReady.receive()
             val next = requestedSize ?: continue
             requestedSize = None
-            if (resizeModel(next.columns, next.rows) && !childExited) {
+            if (resizeModel(next.columns, next.rows, next.pixels) && !childExited) {
                 try {
                     pty.resize(next.columns, next.rows)
                 } catch (error: IoClosedException) {
@@ -230,13 +230,19 @@ public class TerminalEmulatorSession private constructor(
         }
     }
 
-    private fun resizeModel(columns: Long, rows: Long): Boolean {
-        if (columns == terminal.columns && rows == terminal.rows) return false
+    private fun resizeModel(columns: Long, rows: Long, pixels: TerminalPixelSize?): Boolean {
+        val cellsChanged = columns != terminal.columns || rows != terminal.rows
+        if (!cellsChanged && pixels == terminal.pixelSize) return false
         apply(
             terminal
-                .resize(columns, rows, restoreHistory = operatingSystem != OperatingSystem.Windows)
+                .resize(
+                    columns,
+                    rows,
+                    restoreHistory = operatingSystem != OperatingSystem.Windows,
+                    pixels = pixels
+                )
         )
-        return true
+        return cellsChanged
     }
 }
 

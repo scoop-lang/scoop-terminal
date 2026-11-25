@@ -24,6 +24,7 @@ public class Terminal public constructor(
 
     public val unicodeVersion: String = unicodeTerminalDataVersion()
     public val ambiguousWidth: TerminalAmbiguousWidth get() = state.ambiguousWidth
+    public val pixelSize: TerminalPixelSize? get() = state.pixelSize
 
     public val columns: Long get() = state.screen.columns
     public val rows: Long get() = state.screen.rows
@@ -51,10 +52,16 @@ public class Terminal public constructor(
     public fun finishOutput(): TerminalUpdate = state.finishOutput()
 
     /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
-    public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true): TerminalUpdate {
+    public fun resize(
+        columns: Long,
+        rows: Long,
+        restoreHistory: Boolean = true,
+        pixels: TerminalPixelSize? = None
+    ): TerminalUpdate {
         checkSize(columns, rows)
-        return if (columns != this.columns || rows != this.rows)
-            state.resize(columns, rows, restoreHistory)
+        checkPixels(pixels)
+        return if (columns != this.columns || rows != this.rows || pixels != pixelSize)
+            state.resize(columns, rows, restoreHistory, pixels)
         else
             TerminalUpdate(false, [])
     }

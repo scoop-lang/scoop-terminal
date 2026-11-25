@@ -272,7 +272,49 @@ private class TerminalViewElement(
                 ) {
                     accepted = Some(geometry)
                     if (geometry.columns > 0L && geometry.requestedRows > 0L)
-                        owner.requestSize(geometry.columns, geometry.requestedRows)
+                        owner
+                            .requestSize(
+                                geometry.columns,
+                                geometry.requestedRows,
+                                Some(
+                                    TerminalPixelSize(
+                                        clamp(
+                                            (
+                                                geometry.columns.toDouble() *
+                                                    geometry.metrics.width *
+                                                    geometry.scaleFactor +
+                                                    0.5
+                                            )
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (
+                                                geometry.requestedRows.toDouble() *
+                                                    geometry.metrics.height *
+                                                    geometry.scaleFactor +
+                                                    0.5
+                                            )
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (geometry.metrics.width * geometry.scaleFactor + 0.5)
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (geometry.metrics.height * geometry.scaleFactor + 0.5)
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        )
+                                    )
+                                )
+                            )
                 }
             }
     }

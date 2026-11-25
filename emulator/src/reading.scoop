@@ -13,6 +13,7 @@ public interface TerminalReading {
     public val presentationVersion: Long
     public val cursor: TerminalCursor
     public val mouseReporting: Boolean
+    public val pixelSize: TerminalPixelSize?
     public fun lines(start: Long, count: Long): Array<TerminalLine>
     public fun findLine(id: Long): Long?
     public fun anchorAt(
@@ -34,7 +35,8 @@ internal class TerminalReadingData(
     public override val cursor: TerminalCursor,
     public override val mouseReporting: Boolean,
     private val history: HistoryReading,
-    val screenLines: Array<TerminalLine>
+    val screenLines: Array<TerminalLine>,
+    public override val pixelSize: TerminalPixelSize?
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size

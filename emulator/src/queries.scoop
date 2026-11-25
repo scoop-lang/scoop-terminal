@@ -1,0 +1,238 @@
+package scoop.terminal.emulator
+
+import scoop.text.split
+
+/** Device pixels measured from an accepted terminal layout, independent of character dimensions. */
+public struct TerminalPixelSize(
+    val width: Long,
+    val height: Long,
+    val cellWidth: Long,
+    val cellHeight: Long
+)
+
+internal fun checkPixels(value: TerminalPixelSize?) {
+    val size = value ?: return
+    for (dimension in [size.width, size.height, size.cellWidth, size.cellHeight]) {
+        if (dimension <= 0L || dimension > 2147483647L)
+            throw IllegalArgumentException(Some("terminal pixel dimensions out of range"))
+    }
+}
+
+internal fun queryModes(terminal: TerminalState, command: VtCsi) {
+    if (command.prefix != 0 && command.prefix != '?'.code) return
+    val prefix = if (command.prefix == 0) "" else "?"
+    for (argument in command.arguments) {
+        val value = if (argument < 0) 0 else argument
+        val state = modeState(terminal, command.prefix != 0, value)
+        val result = when (state) {
+            case Some(val enabled) -> if (enabled) 1 else 2
+            case None -> 0
+        }
+        terminal.reply(f"\u001b[${prefix}${value};${result}" + "$y")
+    }
+}
+
+private fun modeState(terminal: TerminalState, privateMode: Boolean, value: Int): Boolean? {
+    val modes = terminal.modes
+    if (!privateMode)
+        return when (value) {
+            case 4 -> Some(modes.insert)
+            case 20 -> Some(modes.lineFeedNewLine)
+            case _ -> None
+        }
+    return when (value) {
+        case 1 -> Some(modes.applicationCursor)
+        case 6 -> Some(terminal.screen.origin)
+        case 7 -> Some(modes.autoWrap)
+        case 9 -> Some(modes.mouseTracking == 9)
+        case 12 -> Some(modes.cursorBlink)
+        case 25 -> Some(modes.cursorVisible)
+        case 47 -> Some(terminal.alternateScreen)
+        case 66 -> Some(modes.applicationKeypad)
+        case 69 -> Some(modes.horizontalMargins)
+        case 1000 -> Some(modes.mouseTracking == 1000)
+        case 1002 -> Some(modes.mouseTracking == 1002)
+        case 1003 -> Some(modes.mouseTracking == 1003)
+        case 1004 -> Some(modes.focusEvents)
+        case 1006 -> Some(modes.sgrMouse)
+        case 1016 -> Some(modes.pixelMouse)
+        case 1047 -> Some(terminal.alternateScreen)
+        case 1048 -> Some(false)
+        case 1049 -> Some(terminal.alternateScreen)
+        case 2004 -> Some(modes.bracketedPaste)
+        case _ -> None
+    }
+}
+
+internal fun queryWindow(terminal: TerminalState, command: VtCsi) {
+    if (command.argument(1L, 0) != 0) return
+    val pixels = terminal.pixelSize
+    when (command.argument(0L, 0)) {
+        case 14 -> terminal.reply(f"\u001b[4;${pixels?.height ?: 0L};${pixels?.width ?: 0L}t")
+        case 16 ->
+            terminal.reply(f"\u001b[6;${pixels?.cellHeight ?: 0L};${pixels?.cellWidth ?: 0L}t")
+        case 18 -> terminal.reply(f"\u001b[8;${terminal.screen.rows};${terminal.screen.columns}t")
+        case _ -> {}
+    }
+}
+
+internal fun queryString(terminal: TerminalState, command: VtCsi): VtStringSink? {
+    if (command.prefix != 0 || command.final != 'q'.code) return None
+    if (command.intermediate != '$'.code && command.intermediate != '+'.code) return None
+    return Some(QuerySink(terminal, command.intermediate == '+'.code))
+}
+
+private class QuerySink(private val terminal: TerminalState, private val capabilities: Boolean) :
+    VtStringSink {
+    private val bytes = ArrayList<Byte>()
+    private var valid = true
+    private var finished = false
+    public override fun push(byte: Int) {
+        if (finished || !valid) return
+        if (bytes.size >= 4096L || byte < 32 || byte > 126) {
+            valid = false
+            bytes.clear()
+        } else
+            bytes.add(byte.toByte())
+    }
+    public override fun cancel() {
+        bytes.clear()
+        finished = true
+    }
+    public override fun finish() {
+        if (finished) return
+        finished = true
+        val text = if (valid) String.fromUtf8(bytes) else ""
+        bytes.clear()
+        if (capabilities)
+            replyCapabilities(terminal, text)
+        else {
+            val value = statusString(terminal, text)
+            terminal
+                .reply(
+                    when (value) {
+                        case Some(val result) -> "\u001bP1$r" + result + "\u001b\\"
+                        case None -> "\u001bP0$r\u001b\\"
+                    }
+                )
+        }
+    }
+}
+
+private fun replyCapabilities(terminal: TerminalState, text: String) {
+    val result = StringBuilder()
+    var failed = false
+    var havePair = false
+    for (part in text.split(';')) {
+        val name = decodeCapabilityName(part)
+        val value = when (name) {
+            case Some(val decoded) -> terminalCapability(decoded)
+            case None -> None
+        }
+        when (value) {
+            case Some(val supported) -> {
+                if (havePair) result.append(';')
+                havePair = true
+                result.append(part)
+                result.append('=')
+                result.append(encodeHex(supported))
+            }
+
+            case None -> {
+                failed = true
+                break
+            }
+        }
+    }
+    val pairs = result.toString()
+    if (pairs != "") terminal.reply("\u001bP1+r" + pairs + "\u001b\\")
+    if (failed || pairs == "") terminal.reply("\u001bP0+r\u001b\\")
+}
+
+private fun decodeCapabilityName(text: String): String? {
+    if (text.byteLength == 0L || text.byteLength > 128L || text.byteLength % 2L != 0L) return None
+    val bytes = ArrayList<Byte>()
+    var index = 0L
+    while (index < text.charLength) {
+        val high = hexDigit(text.getCharAt(index))
+        val low = hexDigit(text.getCharAt(index + 1L))
+        val value = high * 16 + low
+        if (high < 0 || low < 0 || value < 32 || value > 126) return None
+        bytes.add(value.toByte())
+        index += 2L
+    }
+    return Some(String.fromUtf8(bytes))
+}
+
+internal fun hexDigit(character: Char): Int {
+    val code = character.code
+    if (code >= 48 && code <= 57) return code - 48
+    if (code >= 65 && code <= 70) return code - 55
+    if (code >= 97 && code <= 102) return code - 87
+    return -1
+}
+
+internal fun encodeHex(text: String): String {
+    val alphabet = "0123456789abcdef"
+    val result = StringBuilder()
+    for (byte in text.toByteArray()) {
+        val value = byte.toInt() and 255
+        result.append(alphabet.getCharAt((value / 16).toLong()))
+        result.append(alphabet.getCharAt((value % 16).toLong()))
+    }
+    return result.toString()
+}
+
+private fun statusString(terminal: TerminalState, query: String): String? {
+    val screen = terminal.screen
+    return when (query) {
+        case "m" -> Some(renditionString(terminal.style) + "m")
+        case "r" -> Some(f"${screen.top + 1L};${screen.bottom + 1L}r")
+        case "s" -> Some(f"${screen.left + 1L};${screen.right + 1L}s")
+
+        case " q" -> {
+            val base = when (terminal.modes.cursorShape) {
+                case Block -> 1
+                case Underline -> 3
+                case Bar -> 5
+            }
+            Some(f"${base + if (terminal.modes.cursorBlink) 0 else 1} q")
+        }
+
+        case _ -> None
+    }
+}
+
+private fun renditionString(style: TerminalStyle): String {
+    val result = StringBuilder()
+    result.append('0')
+    if (style.bold) result.append(";1")
+    if (style.faint) result.append(";2")
+    if (style.italic) result.append(";3")
+    if (style.blink) result.append(";5")
+    if (style.inverse) result.append(";7")
+    if (style.concealed) result.append(";8")
+    if (style.struck) result.append(";9")
+    val underline = when (style.underlineStyle) {
+        case None -> 0
+        case Single -> 1
+        case Double -> 2
+        case Curly -> 3
+        case Dotted -> 4
+        case Dashed -> 5
+    }
+    if (underline != 0) result.append(f";4:${underline}")
+    appendColor(result, 38, style.foreground)
+    appendColor(result, 48, style.background)
+    appendColor(result, 58, style.underlineColor)
+    return result.toString()
+}
+
+private fun appendColor(result: StringBuilder, code: Int, color: TerminalColor) {
+    when (color) {
+        case Default -> {}
+        case Indexed(val value) -> result.append(f";${code}:5:${value}")
+        case Rgb(val red, val green, val blue) ->
+            result.append(f";${code}:2::${red}:${green}:${blue}")
+    }
+}

@@ -14,7 +14,12 @@ internal fun readingDamage(
     before: TerminalReadingData,
     after: TerminalReadingData
 ): TerminalDamage {
-    val resized = before.columns != after.columns || before.rows != after.rows
+    val resized = before.columns !=
+        after.columns ||
+        before.rows !=
+        after.rows ||
+        before.pixelSize !=
+        after.pixelSize
     val bufferChanged = before.bufferEpoch != after.bufferEpoch
     val dirty = ArrayList<Long>()
     for (index in 0L..<after.rows) {
