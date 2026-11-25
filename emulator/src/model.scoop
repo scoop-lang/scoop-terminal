@@ -29,7 +29,12 @@ public struct TerminalCell(
 )
 
 /** A physical row, with identity retained when the row moves through scrollback. */
-public struct TerminalLine(val id: Long, val cells: Array<TerminalCell>, val softWrapped: Boolean)
+public struct TerminalLine(
+    val id: Long,
+    val cells: Array<TerminalCell>,
+    val softWrapped: Boolean,
+    val contentVersion: Long = 0L
+)
 
 public struct TerminalCursor(val row: Long, val column: Long, val visible: Boolean)
 

@@ -8,22 +8,34 @@ internal class ScreenRow(
 ) {
     private var cells = MutableArray<TerminalCell>(columns) { TerminalCell(style = style) }
     private var wrapped = false
+    private var version = 0L
+    private var published: TerminalLine? = None
     var softWrapped: Boolean
         get() = wrapped
         set(value) {
             if (wrapped != value) {
                 wrapped = value
-                changes.pending = true
+                invalidate()
             }
         }
 
     operator fun get(column: Long): TerminalCell = cells[column]
 
-    fun snapshot(): TerminalLine = TerminalLine(
-        id,
-        Array<TerminalCell>(cells.size) { column -> cells[column] },
-        softWrapped
-    )
+    fun snapshot(): TerminalLine {
+        when (published) {
+            case Some(val line) -> return line
+            case None -> {}
+        }
+        val line = TerminalLine(id, cells.toArray(), softWrapped, version)
+        published = Some(line)
+        return line
+    }
+
+    private fun invalidate() {
+        published = None
+        version += 1L
+        changes.pending = true
+    }
 
     fun put(column: Long, text: String, width: Long, style: TerminalStyle) {
         val cell = TerminalCell(text, width, style)
@@ -35,7 +47,7 @@ internal class ScreenRow(
             cells[column + 1L] = continuation
         }
         cells[column] = cell
-        changes.pending = true
+        invalidate()
     }
 
     fun erase(start: Long, end: Long, style: TerminalStyle) {
@@ -46,7 +58,7 @@ internal class ScreenRow(
         for (index in left..<right) {
             if (cells[index] != blank) {
                 cells[index] = blank
-                changes.pending = true
+                invalidate()
             }
         }
         if (right == cells.size) softWrapped = false
@@ -72,7 +84,7 @@ internal class ScreenRow(
         }
         repair(style)
         softWrapped = false
-        changes.pending = true
+        invalidate()
     }
 
     fun resize(columns: Long, style: TerminalStyle) {
@@ -84,7 +96,7 @@ internal class ScreenRow(
         }
         repair(style)
         softWrapped = false
-        changes.pending = true
+        invalidate()
     }
 
     private fun clearGlyph(column: Long, style: TerminalStyle) {

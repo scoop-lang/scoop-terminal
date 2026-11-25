@@ -1,7 +1,5 @@
 package scoop.terminal.emulator
 
-import scoop.collections.ArrayDeque
-
 internal class ScreenChanges {
     var pending = false
 }
@@ -31,7 +29,7 @@ internal class Screen(
     private val changes: ScreenChanges
 ) {
     private val cells = ArrayList<ScreenRow>()
-    private val history = ArrayDeque<ScreenRow>()
+    private val history = LineHistory()
     var row = 0L
     var column = 0L
     var top = 0L
@@ -56,34 +54,23 @@ internal class Screen(
         changes
     )
 
-    fun lines(start: Long, count: Long): Array<TerminalLine> {
-        val end = start + count
-        val snapshot = ArrayList<TerminalLine>()
-        var index = 0L
-        if (start < history.size) {
-            for (line in history) {
-                if (index >= end) break
-                if (index >= start) snapshot.add(line.snapshot())
-                index += 1L
-            }
-        }
-        index = if (start > history.size) start else history.size
-        while (index < end) {
-            snapshot.add(cells[index - history.size].snapshot())
-            index += 1L
-        }
-        return snapshot.toArray()
+    fun lines(start: Long, count: Long): Array<TerminalLine> = Array<TerminalLine>(count) {
+        offset
+        ->
+        val index = start + offset
+        if (index < history.size)
+            history[index].snapshot()
+        else
+            cells[index - history.size].snapshot()
     }
 
     fun findLine(id: Long): Long? {
-        var index = 0L
-        for (line in history) {
-            if (line.id == id) return Some(index)
-            index += 1L
+        when (val index = history.find(id)) {
+            case Some(_) -> return index
+            case None -> {}
         }
-        for (line in cells) {
-            if (line.id == id) return Some(index)
-            index += 1L
+        for (index in 0L..<cells.size) {
+            if (cells[index].id == id) return Some(history.size + index)
         }
         return None
     }

@@ -1,0 +1,71 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+import scoop.map
+
+private const val HISTORY_PAGE_ROWS = 64L
+
+private class HistoryPage {
+    val rows = MutableArray<ScreenRow?>(HISTORY_PAGE_ROWS) { None }
+}
+
+/** A terminal-owned paged ring. Ordinals stay stable when the oldest row is evicted. */
+internal class LineHistory {
+    private val pages = HashMap<Long, HistoryPage>()
+    private val positions = HashMap<Long, Long>()
+    private var first = 0L
+    private var end = 0L
+
+    val size: Long get() = end - first
+
+    operator fun get(index: Long): ScreenRow {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        val ordinal = first + index
+        return pages[ordinal / HISTORY_PAGE_ROWS]!!.rows[ordinal % HISTORY_PAGE_ROWS]!!
+    }
+
+    fun find(id: Long): Long? = positions[id].map { ordinal -> ordinal - first }
+
+    fun addLast(line: ScreenRow) {
+        val pageIndex = end / HISTORY_PAGE_ROWS
+        val page = when (pages[pageIndex]) {
+            case Some(val present) -> present
+
+            case None -> {
+                val created = HistoryPage()
+                pages[pageIndex] = created
+                created
+            }
+        }
+        page.rows[end % HISTORY_PAGE_ROWS] = Some(line)
+        positions[line.id] = end
+        end += 1L
+    }
+
+    fun removeFirst(): ScreenRow {
+        val line = this[0L]
+        val pageIndex = first / HISTORY_PAGE_ROWS
+        pages[pageIndex]!!.rows[first % HISTORY_PAGE_ROWS] = None
+        positions.remove(line.id)
+        first += 1L
+        if (first == end) clear() else if (first % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
+        return line
+    }
+
+    fun removeLast(): ScreenRow {
+        val line = this[size - 1L]
+        end -= 1L
+        val pageIndex = end / HISTORY_PAGE_ROWS
+        pages[pageIndex]!!.rows[end % HISTORY_PAGE_ROWS] = None
+        positions.remove(line.id)
+        if (first == end) clear() else if (end % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
+        return line
+    }
+
+    fun clear() {
+        pages.clear()
+        positions.clear()
+        first = 0L
+        end = 0L
+    }
+}
