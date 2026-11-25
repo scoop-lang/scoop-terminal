@@ -52,6 +52,7 @@ public class TerminalSnapshot internal constructor(
     public override val historySize: Long get() = available().historySize
     public override val bufferEpoch: Long get() = available().bufferEpoch
     public override val alternateScreen: Boolean get() = available().alternateScreen
+    public override val ambiguousWidth: TerminalAmbiguousWidth get() = available().ambiguousWidth
     public override val revision: Long get() = available().revision
     public override val screenRevision: Long get() = available().screenRevision
     public override val textRevision: Long get() = available().textRevision

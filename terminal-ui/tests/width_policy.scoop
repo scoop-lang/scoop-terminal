@@ -1,0 +1,42 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalWidthPolicyViewTest {
+    @Test
+    fun selectionSearchAndAcceptedRectanglesFollowTheSameOriginalText() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("·ABC Ω".toByteArray())
+        val match = searchMatches(terminal, "ABC")[0L]
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            controller.select(match.range)
+            controller.setSearchHighlights([match])
+            acceptGrid(controller, terminal, 1L)
+            assertEquals(Some("ABC"), controller.copySelection())
+            assertEquals(Rect(10.0, 0.0, 30.0, 16.0), controller.rectsFor(match)!!.rects[0L])
+            terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+            controller.synchronize()
+            controller.layoutStarted(2L)
+            assertEquals(Some("ABC"), controller.copySelection())
+            assertEquals(TerminalSearchMatchStatus.Current, match.status(terminal.reading))
+            assertEquals(1L, controller.rectsFor(match)!!.frameVersion)
+            assertEquals(Rect(10.0, 0.0, 30.0, 16.0), controller.rectsFor(match)!!.rects[0L])
+            assertEquals(TerminalRevealResult.PendingLayout, controller.reveal(match))
+            acceptGrid(controller, terminal, 2L)
+            assertEquals(Rect(20.0, 0.0, 30.0, 16.0), controller.rectsFor(match)!!.rects[0L])
+            val highlights = controller
+                .visibleHighlights(testGrid(terminal.reading, controller.state.firstRow))
+            assertEquals(1L, highlights.size)
+            assertEquals(Rect(20.0, 0.0, 30.0, 16.0), highlights[0L].bounds)
+            terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow)
+            controller.synchronize()
+            assertEquals(Some("ABC"), controller.copySelection())
+        } finally {
+            controller.close()
+        }
+    }
+}

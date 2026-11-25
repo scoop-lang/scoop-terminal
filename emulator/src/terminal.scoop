@@ -83,6 +83,10 @@ public class Terminal public constructor(
     public fun releaseSynchronizedOutput(): TerminalUpdate = state.releaseSynchronizedOutput()
     public fun setColors(colors: TerminalColors): TerminalUpdate = state.setColors(colors)
 
+    /** Remeasures both buffers and history while preserving stable text anchors. */
+    public fun setAmbiguousWidth(width: TerminalAmbiguousWidth): TerminalUpdate = state
+        .changeAmbiguousWidth(width)
+
     /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
     public fun resize(
         columns: Long,

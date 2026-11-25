@@ -8,13 +8,14 @@ internal fun reflowLines(
     columns: Long,
     required: HashMap<Long, Long>,
     ids: RowIds,
-    changes: ScreenChanges
+    changes: ScreenChanges,
+    ambiguous: TerminalAmbiguousWidth? = None
 ): Array<ScreenRow> {
     val output = ArrayList<ScreenRow>()
     var builder: ReflowLine? = None
     for (index in 0L..<source.size) {
         val line = source[index]
-        val active = builder ?: ReflowLine(line, columns, output, ids, changes)
+        val active = builder ?: ReflowLine(line, columns, output, ids, changes, ambiguous)
         builder = Some(active)
         val minimum = required[line.id] ?: 0L
         val end = if (line.usedColumns > minimum) line.usedColumns else minimum
@@ -37,7 +38,8 @@ private class ReflowLine(
     private val columns: Long,
     private val output: ArrayList<ScreenRow>,
     private val ids: RowIds,
-    private val changes: ScreenChanges
+    private val changes: ScreenChanges,
+    private val ambiguous: TerminalAmbiguousWidth?
 ) {
     private val identity = first.logical
     private var logicalOffset = first.logicalOffset
@@ -46,7 +48,15 @@ private class ReflowLine(
     private var length = 0L
 
     fun append(cell: TerminalCell) {
-        val width = if (cell.logicalWidth > columns) 1L else cell.logicalWidth
+        val measured = when (ambiguous) {
+            case Some(val policy) ->
+                if (cell.text.byteLength <= 1L)
+                    1L
+                else
+                    clamp(clusterWidth(cell.text, policy), 1L, 2L)
+            case None -> cell.logicalWidth
+        }
+        val width = if (measured > columns) 1L else measured
         if (column + width > columns) {
             finish(true)
             current = ScreenRow(ids.take(), columns, TerminalStyle(), changes)
@@ -59,11 +69,12 @@ private class ReflowLine(
                 column,
                 cell.{
                     width: width,
-                    intrinsicWidth: if (width < cell.logicalWidth) cell.logicalWidth else 0L
+                    intrinsicWidth: if (width < measured) measured else 0L,
+                    anchorWidth: if (cell.logicalAdvance != measured) cell.logicalAdvance else 0L
                 }
             )
         column += width
-        length += cell.logicalWidth
+        length += cell.logicalAdvance
     }
 
     fun finish(wrapped: Boolean) {

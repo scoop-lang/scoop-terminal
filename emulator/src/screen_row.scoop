@@ -43,7 +43,7 @@ internal class ScreenRow(
 
             case None -> {
                 val content = cells.toArray()
-                retainedBytes = 64L + cells.size * 192L
+                retainedBytes = 64L + cells.size * 200L
                 for (cell in content)
                     retainedBytes += cell.text.byteLength
                 publishedCells = Some(content)
@@ -96,9 +96,13 @@ internal class ScreenRow(
         style: TerminalStyle,
         intrinsicWidth: Long = 0L,
         dottedCircle: Boolean = false,
-        linkId: Long = 0L
+        linkId: Long = 0L,
+        anchorWidth: Long = 0L
     ) {
-        putCell(column, TerminalCell(text, width, style, intrinsicWidth, dottedCircle, linkId))
+        putCell(
+            column,
+            TerminalCell(text, width, style, intrinsicWidth, dottedCircle, linkId, anchorWidth)
+        )
     }
 
     fun putCell(column: Long, cell: TerminalCell) {
@@ -116,7 +120,9 @@ internal class ScreenRow(
             previous.width !=
             cell.width ||
             previous.logicalWidth !=
-            cell.logicalWidth
+            cell.logicalWidth ||
+            previous.logicalAdvance !=
+            cell.logicalAdvance
         // Hold the incoming ID while clearing an overlapping previous glyph.
         if (textChanged) {
             val left = if (previous.width == 0L) column - 1L else column

@@ -8,6 +8,8 @@
 
 组件提供 [scoop-terminal terminfo](terminfo/README.md)，与 XTGETTCAP 使用同一份能力表。核心也支持 DECRQM、DECRQSS 和字符/设备像素尺寸查询；无窗口使用者通过 `resize(..., pixels = ...)` 提供已接受的像素尺寸，未提供时像素查询报告 0。
 
+Unicode ambiguous 字符默认占一列；创建核心／会话时可传 `ambiguousWidth = TerminalAmbiguousWidth.Wide`，运行中可调用 `setAmbiguousWidth(...)`。切换会提交同步输出并重排主备屏正文及历史，锚点继续指向原文，旧快照保留原策略；备用屏不产生历史，溢出仍按保留范围淘汰。视图接受新布局前，命中和高亮坐标继续使用旧帧。
+
 OSC 52 默认允许写入、拒绝读取，文本上限为 1 MiB。可在创建核心或会话时传入 `TerminalClipboardPolicy(read = true)`，也可禁用写入；这不影响用户主动复制/粘贴。挂载的视图提供本机剪贴板及实际可用的 PRIMARY selection，未挂载时可通过 `start(clipboard = Some(adapter))` 注入 `TerminalClipboardAdapter`。异步读取的完成回调必须回到会话 owner，返回的 `Disposable` 用于取消；默认一秒期限、拒绝或服务不可用都会完成空回复。PTY 写队列为每个读取预留位置，后续回复和用户输入保持顺序。宿主服务错误可通过 `onHostServiceError` 观察。
 
 OSC 8 通过 `TerminalViewOptions(onLinkActivated = ..., onLinkHovered = ...)` 暴露宿主回调，默认使用 Ctrl+点击（macOS 为 Command+点击）激活。组件保留完整 URI，由宿主决定如何打开。

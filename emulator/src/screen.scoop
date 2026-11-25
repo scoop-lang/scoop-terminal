@@ -27,6 +27,8 @@ private struct SavedPosition(
     val style: TerminalStyle
 )
 
+private struct ReflowCursor(val anchor: TerminalAnchor, val trailing: Long)
+
 internal class Screen(
     var columns: Long,
     rows: Long,
@@ -134,14 +136,15 @@ internal class Screen(
         pixels: TerminalPixelSize?,
         colors: TerminalColors,
         metadata: TerminalMetadata,
-        commands: CommandReading
+        commands: CommandReading,
+        ambiguousWidth: TerminalAmbiguousWidth
     ): TerminalReadingData = TerminalReadingData(
         columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
         presentationVersion,
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
         Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
-        changes.links.snapshot(), changes.tracking.snapshot(), commands
+        changes.links.snapshot(), changes.tracking.snapshot(), commands, ambiguousWidth
     )
 
     fun reconcileLogicalLines() {
@@ -429,11 +432,16 @@ internal class Screen(
         changes.pending = true
     }
 
+    fun remeasure(ambiguous: TerminalAmbiguousWidth, style: TerminalStyle) {
+        reflowResize(columns, rows, true, style, Some(ambiguous))
+    }
+
     private fun reflowResize(
         width: Long,
         height: Long,
         restoreHistory: Boolean,
-        style: TerminalStyle
+        style: TerminalStyle,
+        ambiguous: TerminalAmbiguousWidth? = None
     ) {
         reconcileLogicalLines()
         val previousTextPending = changes.textPending
@@ -471,7 +479,7 @@ internal class Screen(
             val tracked = changes.tracking.required(line)
             if (tracked > (required[line.id] ?: 0L)) required[line.id] = tracked
         }
-        val packed = reflowLines(source, width, required, ids, changes)
+        val packed = reflowLines(source, width, required, ids, changes, ambiguous)
         changes.tracking.reflow(source, packed)
         val cursorPosition = resolveReflow(packed, active)
         val savedPosition = resolveReflow(packed, stored)
@@ -498,10 +506,13 @@ internal class Screen(
             cells.add(blank(style))
         row = clamp(cursorPosition.row - start, 0L, height - 1L)
         column = clamp(cursorPosition.column, 0L, width - 1L)
-        pendingWrap = active.affinity == TerminalAffinity.Before && cursorPosition.column == width
+        pendingWrap = active.anchor.affinity ==
+            TerminalAffinity.Before &&
+            cursorPosition.column ==
+            width
         saved = SavedPosition(
             savedPosition.row - start, clamp(savedPosition.column, 0L, width - 1L),
-            stored.affinity == TerminalAffinity.Before && savedPosition.column == width,
+            stored.anchor.affinity == TerminalAffinity.Before && savedPosition.column == width,
             saved.origin, saved.style
         )
         top = 0L
@@ -509,12 +520,15 @@ internal class Screen(
         changes.pending = true
     }
 
-    private fun capture(row: Long, column: Long, wrap: Boolean): TerminalAnchor {
+    private fun capture(row: Long, column: Long, wrap: Boolean): ReflowCursor {
         val line = cells[row]
-        return TerminalAnchor(
-            bufferEpoch, line.logical.id,
-            line.logicalOffset + line.logicalColumn(column + if (wrap) 1L else 0L),
-            if (wrap) TerminalAffinity.Before else TerminalAffinity.After
+        val trailing = if (!wrap && line[column].width == 0L) 1L else 0L
+        return ReflowCursor(
+            TerminalAnchor(
+                bufferEpoch, line.logical.id,
+                line.logicalOffset + line.logicalColumn(column - trailing + if (wrap) 1L else 0L),
+                if (wrap) TerminalAffinity.Before else TerminalAffinity.After
+            ), trailing
         )
     }
 
@@ -546,7 +560,8 @@ internal class Screen(
     }
 }
 
-private fun resolveReflow(lines: Array<ScreenRow>, anchor: TerminalAnchor): TerminalPosition {
+private fun resolveReflow(lines: Array<ScreenRow>, cursor: ReflowCursor): TerminalPosition {
+    val anchor = cursor.anchor
     var candidate = TerminalPosition(0L, 0L)
     for (index in 0L..<lines.size) {
         val line = lines[index]
@@ -558,7 +573,17 @@ private fun resolveReflow(lines: Array<ScreenRow>, anchor: TerminalAnchor): Term
             line.logicalLength ||
             (relative == line.logicalLength && anchor.affinity == TerminalAffinity.Before)
         )
-            return candidate
+            return reflowCursorTail(lines, candidate, cursor.trailing)
     }
-    return candidate
+    return reflowCursorTail(lines, candidate, cursor.trailing)
+}
+
+private fun reflowCursorTail(
+    lines: Array<ScreenRow>,
+    position: TerminalPosition,
+    trailing: Long
+): TerminalPosition {
+    if (trailing == 0L || position.column >= lines[position.row].columns) return position
+    val width = lines[position.row][position.column].width
+    return position.{column: position.column + if (width > 1L) trailing else 0L}
 }

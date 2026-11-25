@@ -7,6 +7,7 @@ public interface TerminalReading {
     public val historySize: Long
     public val bufferEpoch: Long
     public val alternateScreen: Boolean
+    public val ambiguousWidth: TerminalAmbiguousWidth
     public val revision: Long
     public val screenRevision: Long
     public val textRevision: Long
@@ -53,7 +54,8 @@ internal class TerminalReadingData(
     public override val metadata: TerminalMetadata,
     private val links: LinkReading,
     private val tracking: TrackingReading,
-    private val commandData: CommandReading
+    private val commandData: CommandReading,
+    public override val ambiguousWidth: TerminalAmbiguousWidth
 ) : TerminalReading {
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
@@ -70,7 +72,7 @@ internal class TerminalReadingData(
     }
     public override fun link(key: Long): TerminalLink? = links.get(key)
     val retainedBytes: Long = readingBytes(history, screenLines) +
-        8384L +
+        8392L +
         metadataBytes(metadata) +
         links.bytes +
         tracking.count *

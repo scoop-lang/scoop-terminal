@@ -230,7 +230,7 @@ internal fun testGrid(reading: TerminalReading, first: Long): GridGeometry = Gri
     first == reading.historySize, reading
 )
 
-private fun acceptGrid(controller: TerminalViewController, terminal: Terminal, version: Long) {
+internal fun acceptGrid(controller: TerminalViewController, terminal: Terminal, version: Long) {
     controller.layoutStarted(version)
     controller.frameAccepted(testGrid(terminal.reading, controller.state.firstRow), version)
 }

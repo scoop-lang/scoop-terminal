@@ -15,7 +15,7 @@
 | M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
 | M1 | 上下/左右边距、矩形滚动、宽字符编辑、DECSC/DECSTR/RIS | 已实现，核心 40 项测试通过 |
 | M1 | Unicode 17 字素/宽度、创建时 ambiguous 策略、变体序列与零宽前缀 | 已实现，核心 46 项测试通过 |
-| M1 | 运行中修改宽度策略的全量重排 | 待实现 |
+| M1 | 运行中修改宽度策略的全量重排 | 已实现，7 项核心与 1 项视图用例通过，完整核心 112 项／UI 54 项通过 |
 | M1 | 传统键鼠、1016 像素鼠标、水平滚轮 | 已实现，5 项输入协议用例通过 |
 | M1 | 下划线类型/颜色、光标形状、独立闪烁 | 已实现，4 项协议及 3 项绘制/缓存用例通过 |
 | M1 | DECRQM/DECRQSS/XTGETTCAP、尺寸查询及共享 terminfo 能力表 | 已实现，5 项协议用例及生成一致性/语法检查通过；图形能力在图形阶段加入 |
@@ -74,6 +74,8 @@
 - 字体缓存：`TerminalGlyphLruTest` 3/3，原 `TerminalGlyphCacheTest` 4/4 通过。验证 LRU 最近访问、缓存满后继续复用、条目/估算字节上限、超大布局不驻留、幂等租约关闭、缓存关闭后的独立绘制，以及旧帧在淘汰和字体来源关闭后的逐像素一致性。固定官方 Fira Code 6.2，字体来源、摘要和 OFL 许可随测试保存；下载使用指定代理，依赖压缩包留在 `~/repos/scoop-dep/terminal-fonts`。
 - `FontCollection.copy()` 已在 Scoop 独立分支提交并合并 [PR #224](https://github.com/scoop-lang/scoop/pull/224)，main 已回合并修复分支并推送。4 项字体集合用例、原生 `-Werror` 编译、局部 API 文档检索及关闭来源后延迟排版的实际示例通过。开发 sysroot 已更新；本轮探测程序、字体临时副本、PR 文本和局部 API 文档已清理。
 - 连字：`TerminalLigatureTest` 5/5、`TerminalRunFallbackTest` 3/3，通过后完整 `terminal-ui` 53/53。实际像素对照原生 Fira Code 排版，验证 Enabled/Disabled/显式 feature 优先级、所有 caret 列、组合字素、背景/链接/装饰/选择不打断兼容 run、跨行边界、原文复制和块光标裁剪重着色。AtCursor 计数验证只新排版当前片段，移开后原行像素恢复，重复绘制命中缓存；比例字体以“总宽一致、内部不同”的反例验证退回，固定 CJK 缺字 fallback 与双宽尾格、bidi 重排也有覆盖。Roboto/CJK 字体复用本地既有资料，许可证和摘要随测试保存，没有额外下载。
+
+运行时宽度切换已覆盖创建即 Wide、Narrow/Wide 往返、活动／保存光标及宽尾格、单列占位、历史限额、主备屏、同步输出、REP、分段 UTF-8、OSC 8/133 和既有样式。锚点使用固定 Narrow 列跨度，纯重排不增加文字版本，旧快照保留旧策略；选择与搜索原文保持，已接受帧在新布局完成前继续提供旧坐标。`RuntimeWidthPolicyTest` 7/7、`TerminalWidthPolicyViewTest` 1/1，随后完整核心 112/112、UI 54/54 通过。没有新增下载或本轮临时文件。
 
 ## 后续执行约束
 

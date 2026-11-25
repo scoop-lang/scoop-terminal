@@ -63,6 +63,7 @@ public class TerminalEmulatorSession private constructor(
     public val reading: TerminalReading get() = terminal.reading
     public val mouseReporting: Boolean get() = terminal.mouseReporting
     public val metadata: TerminalMetadata get() = terminal.metadata
+    public val ambiguousWidth: TerminalAmbiguousWidth get() = terminal.ambiguousWidth
     public fun snapshot(): TerminalSnapshot = terminal.snapshot()
     /** Captures committed text; each asynchronous page yields and has a fixed maximum batch size. */
     public fun search(
@@ -103,6 +104,9 @@ public class TerminalEmulatorSession private constructor(
     public fun setColors(colors: TerminalColors) {
         apply(terminal.setColors(colors))
     }
+    public fun setAmbiguousWidth(width: TerminalAmbiguousWidth) {
+        apply(terminal.setAmbiguousWidth(width))
+    }
 
     private val running: Boolean
         get() = when (current) {
@@ -118,6 +122,7 @@ public class TerminalEmulatorSession private constructor(
             rows: Long = 24L,
             historyLimit: Long = 10000L,
             searchPath: Boolean = false,
+            ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
             onTitle: (String) -> Unit = {},
             onBell: () -> Unit = {},
             synchronizedOutputTimeout: Duration = Duration.seconds(1L),
@@ -134,7 +139,10 @@ public class TerminalEmulatorSession private constructor(
             requirePtySize(columns, rows)
             if (synchronizedOutputTimeout <= Duration.ZERO || clipboardReadTimeout <= Duration.ZERO)
                 throw IllegalArgumentException(Some("terminal service timeouts must be positive"))
-            val terminal = Terminal(columns, rows, historyLimit, clipboardPolicy = clipboardPolicy)
+            val terminal = Terminal(
+                columns, rows, historyLimit, clipboardPolicy = clipboardPolicy,
+                ambiguousWidth = ambiguousWidth
+            )
             val pty = loop.spawnPty(command, columns, rows, searchPath)
             val session = TerminalEmulatorSession(
                 terminal,

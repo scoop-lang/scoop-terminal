@@ -8,7 +8,7 @@ internal class TerminalState(
     rows: Long,
     historyLimit: Long,
     parserLimits: TerminalParserLimits,
-    val ambiguousWidth: TerminalAmbiguousWidth,
+    var ambiguousWidth: TerminalAmbiguousWidth,
     colors: TerminalColors,
     val clipboardPolicy: TerminalClipboardPolicy,
     linkLimits: TerminalLinkLimits,
@@ -61,7 +61,8 @@ internal class TerminalState(
         .snapshot(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
-                .cursorBlink, pixelSize, colorState.current, metadata, commands.snapshot(screen)
+                .cursorBlink, pixelSize, colorState.current, metadata, commands.snapshot(screen),
+            ambiguousWidth
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -145,6 +146,21 @@ internal class TerminalState(
         return update(before)
     }
 
+    fun changeAmbiguousWidth(value: TerminalAmbiguousWidth): TerminalUpdate {
+        val before = committed
+        if (value == ambiguousWidth) return update(before)
+        setSynchronizedOutput(false)
+        ambiguousWidth = value
+        main.remeasure(value, style)
+        val mainTextChanged = screenChanges.textPending
+        screenChanges.textPending = false
+        alternate.remeasure(value, style)
+        if (!alternateScreen) screenChanges.textPending = mainTextChanged
+        combining = None
+        changed = true
+        return update(before)
+    }
+
     private fun updateScreenRevision(): Boolean {
         if (!screenChanges.pending) return false
         screenChanges.pending = false
@@ -210,10 +226,14 @@ internal class TerminalState(
                     width,
                     cell.style,
                     dottedCircle = dotted,
-                    linkId = cell.linkId
+                    linkId = cell.linkId,
+                    anchorWidth = anchorWidth(combined, width)
                 )
             moveAfter(startColumn, width)
-            lastPrinted = TerminalCell(combined, width, cell.style, dottedCircle = dotted)
+            lastPrinted = TerminalCell(
+                combined, width, cell.style, dottedCircle = dotted,
+                anchorWidth = anchorWidth(combined, width)
+            )
             changed = true
         }
         return true
@@ -235,12 +255,36 @@ internal class TerminalState(
         val row = grid.current
         val position = grid.column
         if (modes.insert) grid.shiftColumns(occupied, true, style)
-        row.put(position, displayed, occupied, style, intrinsic, dottedCircle, links.active)
+        val advance = anchorWidth(displayed, if (intrinsic > 0L) intrinsic else occupied)
+        row
+            .put(
+                position,
+                displayed,
+                occupied,
+                style,
+                intrinsic,
+                dottedCircle,
+                links.active,
+                advance
+            )
         combining = Some(row)
         startColumn = position
-        lastPrinted = TerminalCell(displayed, occupied, style, intrinsic, dottedCircle)
+        lastPrinted = TerminalCell(
+            displayed,
+            occupied,
+            style,
+            intrinsic,
+            dottedCircle,
+            anchorWidth = advance
+        )
         moveAfter(position, occupied)
         changed = true
+    }
+
+    private fun anchorWidth(text: String, width: Long): Long {
+        if (ambiguousWidth == TerminalAmbiguousWidth.Narrow || width <= 1L) return 0L
+        val advance = clamp(clusterWidth(text, TerminalAmbiguousWidth.Narrow), 1L, 2L)
+        return if (advance == width) 0L else advance
     }
 
     private fun moveAfter(column: Long, occupied: Long) {
@@ -390,8 +434,9 @@ internal class TerminalState(
     fun repeat(count: Long) {
         val glyph = lastPrinted
         if (glyph.text != "") {
+            val width = clamp(clusterWidth(glyph.text, ambiguousWidth), 1L, 2L)
             for (index in 0L..<clamp(count, 0L, 65535L))
-                put(glyph.text, glyph.logicalWidth, glyph.dottedCircle)
+                put(glyph.text, width, glyph.dottedCircle)
         }
     }
 
@@ -494,7 +539,7 @@ private fun defaultTabs(columns: Long): MutableArray<Boolean> = MutableArray<Boo
     defaultTab(column)
 }
 
-private fun clusterWidth(text: String, ambiguous: TerminalAmbiguousWidth): Long = clamp(
+internal fun clusterWidth(text: String, ambiguous: TerminalAmbiguousWidth): Long = clamp(
     unicodeTextWidth(text, ambiguousAsWide = ambiguous == TerminalAmbiguousWidth.Wide),
     -1L,
     2L

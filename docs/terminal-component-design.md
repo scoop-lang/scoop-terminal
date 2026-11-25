@@ -84,7 +84,7 @@ flowchart LR
 
 明确区分 Unicode 标量、UTF-8 字节、字素簇、终端列、UI 逻辑坐标和设备像素。所有跨层数据标明单位。VT 协议使用的像素尺寸来自已接受布局及其缩放因子；不得用未接受的 measure 结果提前回复或命中。
 
-文本位置采用 `TerminalAnchor(bufferEpoch, logicalLineId, cellOffset, affinity)`。`cellOffset` 是逻辑行中的终端列偏移，宽字符尾列不能成为独立文本端点；`affinity` 决定插入点两侧归属。范围采用半开区间。重排插入的右缘占位空格不计入逻辑内容。
+文本位置采用 `TerminalAnchor(bufferEpoch, logicalLineId, cellOffset, affinity)`。`cellOffset` 以 Unicode Narrow 策略的列数作为固定逻辑单位，与当前物理宽度策略分开；例如 ambiguous 字素的逻辑跨度始终为 1，显示时可占 1 或 2 列。宽字符尾列不能成为独立文本端点；`affinity` 决定插入点两侧归属。范围采用半开区间。重排插入的右缘占位空格不计入逻辑内容。调用方通过 resolve/anchorAt 转换物理位置，不把逻辑偏移直接当作屏幕列。
 
 `bufferEpoch` 区分主屏/备用屏及重置代次，防止旧搜索结果定位到后来复用的位置。行号、数组下标、像素坐标和某次物理行 ID 都不能作为长期文本身份。
 
@@ -148,6 +148,8 @@ VT 光标寻址仍作用于物理行列。保留当前行存储的基本模型�
 没有协商现代键盘协议时，不为 Shift+Enter 等组合擅自发明编码。IME 继续以原生 commit/preedit 为唯一文本来源，不能同时从字符键再发送一次。
 
 字素分段和宽度采用同一工具链 Unicode 数据版本，并把版本写入兼容说明。宽度不能用 `String.length` 或字体 glyph advance 代替；组合标记、VS15/VS16、ZWJ 序列及跨 feed 拼接都要更新完整字素。默认 ambiguous width 为 1，可在创建终端时配置为 2；运行中变更按显式全量重排处理，不让旧内容和新内容使用两种宽度规则。所有写入、擦除和插删操作共同维护“宽字符头格/尾格成对”的不变量。
+
+`setAmbiguousWidth` 的实际变更释放同步输出冻结，重新度量主屏历史和两个 buffer 的保留字素并重排；逻辑行身份、原文版本及固定逻辑跨度保留，现有锚点无需转换日志。宽度策略变更属于显式正文重新解释，备用屏也重排，并依其零历史预算淘汰溢出内容；普通 resize 仍使用备用屏的网格裁剪策略。当前及保存光标跟随原字素，宽尾中的光标保留可表示的尾格偏移，缩到单宽时落在字素头格。读取快照保留各自的宽度策略与布局。
 
 能力表是查询与 terminfo 的共同来源。仅回复真实实现的能力；未知模式按 DECRQM 的“不识别”回复，未知 DECRQSS/XTGETTCAP 按协议报告失败。图形只有配置了实际可用的 decoder/renderer 才宣告。交付组件 terminfo 及安装方式，demo 后续采用；未安装环境使用有文档的回退，不继续无条件宣告完整 xterm 扩展。
 

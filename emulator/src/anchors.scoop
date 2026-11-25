@@ -5,7 +5,7 @@ public enum TerminalAffinity {
     Before, After
 }
 
-/** A logical terminal-column offset, independent of physical wrapping and viewport position. */
+/** Narrow-policy column units, independent of physical wrapping and the active width policy. */
 public struct TerminalAnchor(
     val bufferEpoch: Long,
     val logicalLineId: Long,
@@ -29,8 +29,9 @@ internal fun logicalColumn(cells: List<TerminalCell>, column: Long): Long {
     while (visual < end) {
         val cell = cells[visual]
         val width = if (cell.width == 0L) 1L else cell.width
-        if (visual + width > end) return logical + end - visual
-        logical += if (cell.width == 0L) 1L else cell.logicalWidth
+        val advance = if (cell.width == 0L) 1L else cell.logicalAdvance
+        if (visual + width > end) return logical + clamp(end - visual, 0L, advance - 1L)
+        logical += advance
         visual += width
     }
     return logical
@@ -42,7 +43,7 @@ internal fun visualColumn(cells: List<TerminalCell>, column: Long): Long {
     while (visual < cells.size && logical < column) {
         val cell = cells[visual]
         val width = if (cell.width == 0L) 1L else cell.width
-        val length = if (cell.width == 0L) 1L else cell.logicalWidth
+        val length = if (cell.width == 0L) 1L else cell.logicalAdvance
         if (logical + length > column) return visual + clamp(column - logical, 0L, width)
         logical += length
         visual += width

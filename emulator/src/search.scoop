@@ -234,13 +234,13 @@ public class TerminalSearch internal constructor(
                                 TerminalAnchor(
                                     epoch,
                                     value.logicalLineId,
-                                    logicalColumn + cell.logicalWidth,
+                                    logicalColumn + cell.logicalAdvance,
                                     TerminalAffinity.Before
                                 )
                             )
                         )
                         characters = Some((if (cell.text == "") " " else cell.text).iterator())
-                        logicalColumn += cell.logicalWidth
+                        logicalColumn += cell.logicalAdvance
                     }
                     column += width
                     return true

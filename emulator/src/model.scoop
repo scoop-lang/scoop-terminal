@@ -39,10 +39,13 @@ public struct TerminalCell(
     val style: TerminalStyle = TerminalStyle(),
     val intrinsicWidth: Long = 0L,
     val dottedCircle: Boolean = false,
-    val linkId: Long = 0L
+    val linkId: Long = 0L,
+    val anchorWidth: Long = 0L
 ) {
     /** A narrow-window placeholder retains the original grapheme and its logical width. */
     public val logicalWidth: Long get() = if (intrinsicWidth > 0L) intrinsicWidth else width
+    /** Stable Narrow-policy columns; zero anchorWidth means the current logical width. */
+    public val logicalAdvance: Long get() = if (anchorWidth > 0L) anchorWidth else logicalWidth
     public val displayText: String
         get() = if (logicalWidth > width) "�" else if (dottedCircle) "◌" + text else text
 }
