@@ -1,0 +1,28 @@
+package scoop.terminal.emulator
+
+import scoop.map
+
+/** No mutable row or page is reachable from this root. */
+internal class HistoryReading(
+    private val first: Long,
+    private val end: Long,
+    private val pages: SnapshotIndex<Array<TerminalLine?>>?,
+    private val positions: SnapshotIndex<Long>?,
+    private val logicalPositions: SnapshotIndex<LogicalSpan>?,
+    private val versions: SnapshotIndex<Long>?,
+    val retainedBytes: Long
+) {
+    val size: Long get() = end - first
+
+    operator fun get(index: Long): TerminalLine {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        val ordinal = first + index
+        val line = indexValue(pages, ordinal / HISTORY_PAGE_ROWS)!![ordinal % HISTORY_PAGE_ROWS]!!
+        return line.{textVersion: indexValue(versions, line.logicalLineId) ?: line.textVersion}
+    }
+
+    fun find(id: Long): Long? = indexValue(positions, id).map { ordinal -> ordinal - first }
+
+    fun findLogical(id: Long): LogicalSpan? = indexValue(logicalPositions, id)
+        .map { span -> LogicalSpan(span.first - first, span.last - first) }
+}

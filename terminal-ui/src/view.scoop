@@ -38,12 +38,12 @@ private class TerminalViewElement(
     scope: ComponentScope
 ) : Element<TerminalFrame>(scope) {
     private var session = props.value.session
-    private var viewport = TerminalViewport(session.terminal)
+    private var viewport = TerminalViewport { session.reading }
     private var attachment: Disposable? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
-    private var observedScreen = session.terminal.screenRevision
-    private var observedCursor = session.terminal.cursor
+    private var observedScreen = session.reading.screenRevision
+    private var observedCursor = session.reading.cursor
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
     private var selecting = false
@@ -70,8 +70,8 @@ private class TerminalViewElement(
     }
 
     private fun attach() {
-        observedScreen = session.terminal.screenRevision
-        observedCursor = session.terminal.cursor
+        observedScreen = session.reading.screenRevision
+        observedCursor = session.reading.cursor
         attachment = Some(session.attach { if (scope.isMounted) modelChanged() })
         refresh()
     }
@@ -85,7 +85,7 @@ private class TerminalViewElement(
             reported = TerminalMouseButton.NonePressed
             composition.restart()
             session = next
-            viewport = TerminalViewport(next.terminal)
+            viewport = TerminalViewport { next.reading }
             attach()
         }
         return UiInvalidation.Layout
@@ -100,7 +100,7 @@ private class TerminalViewElement(
     }
 
     private fun modelChanged() {
-        val terminal = session.terminal
+        val terminal = session.reading
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
         observedCursor = cursor
@@ -166,7 +166,7 @@ private class TerminalViewElement(
     > {
         val appearance = props.value.appearance
         val glyphs = glyphs(scope.defaultFonts, appearance)
-        val terminal = session.terminal
+        val terminal = session.reading
         val metrics = glyphs.metrics
         val size = constraints
             .constrain(
@@ -181,7 +181,7 @@ private class TerminalViewElement(
         val visible = terminal.lines(first, clamp(rows, 0L, terminal.rows))
         val geometry = GridGeometry(
             size, metrics, first, visible, columns, rows, terminal.screenRevision,
-            first == terminal.historySize
+            first == terminal.historySize, terminal
         )
         paintRevision += 1L
         val frame = TerminalFrame(
@@ -200,7 +200,7 @@ private class TerminalViewElement(
         val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
         val owner = session
         val geometry = measured.geometry
-        val terminal = owner.terminal
+        val terminal = owner.reading
         // The live cursor belongs to this grid only until pending screen output changes it.
         val cursor = if (geometry.screenRevision == terminal.screenRevision)
             terminal.cursor
@@ -423,10 +423,10 @@ private class TerminalViewElement(
     }
 
     private fun reportMouse(frame: GridGeometry, modifiers: Modifiers): Boolean {
-        val terminal = session.terminal
+        val terminal = session.reading
         return !modifiers.shift &&
             viewport.atBottom &&
-            terminal.mouseReporting &&
+            session.mouseReporting &&
             frame.columns ==
             terminal.columns &&
             frame.requestedRows ==
@@ -456,5 +456,6 @@ private class TerminalViewElement(
 private fun location(frame: GridGeometry, row: Long, column: Long): CellLocation {
     val line = frame.rows[row]
     val index = clamp(column, 0L, line.cells.size - 1L)
-    return CellLocation(line.id, if (line.cells[index].width == 0L) index - 1L else index)
+    val start = if (line.cells[index].width == 0L) index - 1L else index
+    return CellLocation(line.id, start, frame.reading.anchorAt(frame.first + row, start))
 }

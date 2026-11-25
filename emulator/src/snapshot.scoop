@@ -1,0 +1,95 @@
+package scoop.terminal.emulator
+
+/** Conservative retained-content accounting; shared handles of one generation are charged once. */
+public struct TerminalSnapshotLimits(
+    val maxHandles: Long = 16L,
+    val maxRetainedBytes: Long = 268435456L
+)
+
+/** An owned immutable reading. close releases its lease; reading after close is an error. */
+public class TerminalSnapshot internal constructor(
+    reading: TerminalReadingData,
+    private val budget: SnapshotBudget
+) : TerminalReading, Closeable {
+    private var retained: TerminalReadingData? = Some(reading)
+    public val isClosed: Boolean
+        get() = when (retained) {
+            case None -> true;
+            case Some(_) -> false
+        }
+    private fun available(): TerminalReadingData = retained ?:
+        throw IllegalStateException(Some("terminal snapshot is closed"))
+    public override val columns: Long get() = available().columns
+    public override val rows: Long get() = available().rows
+    public override val historySize: Long get() = available().historySize
+    public override val bufferEpoch: Long get() = available().bufferEpoch
+    public override val alternateScreen: Boolean get() = available().alternateScreen
+    public override val revision: Long get() = available().revision
+    public override val screenRevision: Long get() = available().screenRevision
+    public override val textRevision: Long get() = available().textRevision
+    public override val presentationVersion: Long get() = available().presentationVersion
+    public override val cursor: TerminalCursor get() = available().cursor
+    public override val mouseReporting: Boolean get() = available().mouseReporting
+    public override fun lines(start: Long, count: Long): Array<TerminalLine> = available()
+        .lines(start, count)
+    public override fun findLine(id: Long): Long? = available().findLine(id)
+    public override fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity
+    ): TerminalAnchor? = available().anchorAt(row, column, affinity)
+    public override fun resolve(anchor: TerminalAnchor): TerminalPosition? = available()
+        .resolve(anchor)
+    public override fun close() {
+        val value = retained ?: return
+        retained = None
+        budget.release(value)
+    }
+}
+
+private class SnapshotLease(val reading: TerminalReadingData) {
+    var references = 1L
+}
+
+internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
+    private val leases = ArrayList<SnapshotLease>()
+    private var handles = 0L
+    private var bytes = 0L
+    init {
+        if (limits.maxHandles < 0L || limits.maxRetainedBytes < 0L)
+            throw IllegalArgumentException(Some("negative terminal snapshot limit"))
+    }
+
+    fun acquire(reading: TerminalReadingData): TerminalSnapshot {
+        if (handles == limits.maxHandles)
+            throw IllegalStateException(Some("terminal snapshot handle limit exceeded"))
+        for (lease in leases) {
+            if (lease.reading === reading) {
+                lease.references += 1L
+                handles += 1L
+                return TerminalSnapshot(reading, this)
+            }
+        }
+        if (reading.retainedBytes > limits.maxRetainedBytes - bytes)
+            throw IllegalStateException(Some("terminal snapshot retained-content limit exceeded"))
+        leases.add(SnapshotLease(reading))
+        handles += 1L
+        bytes += reading.retainedBytes
+        return TerminalSnapshot(reading, this)
+    }
+
+    fun release(reading: TerminalReadingData) {
+        for (index in 0L..<leases.size) {
+            val lease = leases[index]
+            if (lease.reading === reading) {
+                lease.references -= 1L
+                handles -= 1L
+                if (lease.references == 0L) {
+                    leases.removeAt(index)
+                    bytes -= reading.retainedBytes
+                }
+                return
+            }
+        }
+    }
+}

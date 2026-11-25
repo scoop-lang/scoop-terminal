@@ -21,3 +21,78 @@ public struct TerminalPosition(val row: Long, val column: Long)
 internal class LogicalLine(val id: Long) {
     var version = 0L
 }
+
+internal fun logicalColumn(cells: List<TerminalCell>, column: Long): Long {
+    var visual = 0L
+    var logical = 0L
+    val end = clamp(column, 0L, cells.size)
+    while (visual < end) {
+        val cell = cells[visual]
+        val width = if (cell.width == 0L) 1L else cell.width
+        if (visual + width > end) return logical + end - visual
+        logical += if (cell.width == 0L) 1L else cell.logicalWidth
+        visual += width
+    }
+    return logical
+}
+
+internal fun visualColumn(cells: List<TerminalCell>, column: Long): Long {
+    var visual = 0L
+    var logical = 0L
+    while (visual < cells.size && logical < column) {
+        val cell = cells[visual]
+        val width = if (cell.width == 0L) 1L else cell.width
+        val length = if (cell.width == 0L) 1L else cell.logicalWidth
+        if (logical + length > column) return visual + clamp(column - logical, 0L, width)
+        logical += length
+        visual += width
+    }
+    return visual
+}
+
+internal fun anchorInLine(
+    epoch: Long,
+    line: TerminalLine,
+    column: Long,
+    affinity: TerminalAffinity
+): TerminalAnchor? {
+    if (column < 0L || column > line.cells.size) return None
+    var edge = column
+    if (edge < line.cells.size && line.cells[edge].width == 0L)
+        edge += if (affinity == TerminalAffinity.Before) -1L else 1L
+    if (line.softWrapped && edge > line.usedColumns) edge = line.usedColumns
+    return Some(
+        TerminalAnchor(
+            epoch,
+            line.logicalLineId,
+            line.logicalOffset + logicalColumn(line.cells, edge),
+            affinity
+        )
+    )
+}
+
+internal fun resolveInLines(
+    anchor: TerminalAnchor,
+    span: LogicalSpan,
+    read: (Long) -> TerminalLine
+): TerminalPosition? {
+    var low = span.first
+    var high = span.last + 1L
+    while (low < high) {
+        val middle = low + (high - low) / 2L
+        val offset = read(middle).logicalOffset
+        if (offset <
+            anchor.cellOffset ||
+            (offset == anchor.cellOffset && anchor.affinity == TerminalAffinity.After)
+        )
+            low = middle + 1L
+        else
+            high = middle
+    }
+    val index = clamp(low - 1L, span.first, span.last)
+    val line = read(index)
+    val relative = anchor.cellOffset - line.logicalOffset
+    val end = if (line.softWrapped) line.usedColumns else line.cells.size
+    if (relative < 0L || relative > logicalColumn(line.cells, end)) return None
+    return Some(TerminalPosition(index, visualColumn(line.cells, relative)))
+}

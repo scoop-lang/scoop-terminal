@@ -22,9 +22,19 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     private var changed = false
     private var modelRevision = 0L
     private var gridRevision = 0L
+    private var textRevision = 0L
+    private var presentationVersion = 0L
     val revision: Long get() = modelRevision
     val screenRevision: Long get() = gridRevision
     private val parser = VtParser(this)
+    private var committed = captureReading()
+    val reading: TerminalReadingData get() = committed
+
+    private fun captureReading(): TerminalReadingData = screen
+        .snapshot(
+            modelRevision, gridRevision, textRevision, presentationVersion,
+            alternateScreen, modes.cursorVisible, modes.mouseTracking != 0 && modes.sgrMouse
+        )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
         parser.feed(bytes)
@@ -41,8 +51,19 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         screen.reconcileLogicalLines()
         val screenChanged = updateScreenRevision()
         val modified = changed || screenChanged
-        if (modified) modelRevision += 1L
-        val result = TerminalUpdate(modified, effects.toArray())
+        var damage = TerminalDamage()
+        if (screenChanges.textPending) {
+            textRevision += 1L
+            screenChanges.textPending = false
+        }
+        if (modified) {
+            modelRevision += 1L
+            presentationVersion += 1L
+            val next = captureReading()
+            damage = readingDamage(committed, next)
+            committed = next
+        }
+        val result = TerminalUpdate(modified, effects.toArray(), damage)
         effects.clear()
         changed = false
         return result
@@ -55,16 +76,19 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         return true
     }
 
-    fun resize(columns: Long, rows: Long, restoreHistory: Boolean) {
+    fun resize(columns: Long, rows: Long, restoreHistory: Boolean): TerminalUpdate {
         main.resize(columns, rows, restoreHistory, style)
+        val mainTextChanged = screenChanges.textPending
+        screenChanges.textPending = false
         alternate.resize(columns, rows, false, style)
+        if (!alternateScreen) screenChanges.textPending = mainTextChanged
         val previous = tabs
         tabs = MutableArray<Boolean>(columns) { index ->
             if (index < previous.size) previous[index] else defaultTab(index)
         }
         combining = None
-        updateScreenRevision()
-        modelRevision += 1L
+        changed = true
+        return update()
     }
 
     public override fun print(character: Char) {
@@ -252,6 +276,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         }
         if (!enabled && save) restoreCursor()
         screenChanges.pending = true
+        screenChanges.textPending = true
         changed = true
     }
 

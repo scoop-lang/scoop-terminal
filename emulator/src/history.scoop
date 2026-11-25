@@ -3,7 +3,7 @@ package scoop.terminal.emulator
 import scoop.collections.HashMap
 import scoop.map
 
-private const val HISTORY_PAGE_ROWS = 64L
+internal const val HISTORY_PAGE_ROWS = 64L
 
 internal struct LogicalSpan(val first: Long, val last: Long)
 
@@ -14,8 +14,12 @@ private class HistoryPage {
 /** A terminal-owned paged ring. Ordinals stay stable when the oldest row is evicted. */
 internal class LineHistory {
     private val pages = HashMap<Long, HistoryPage>()
-    private val positions = HashMap<Long, Long>()
-    private val logicalPositions = HashMap<Long, LogicalSpan>()
+    private var positions: SnapshotIndex<Long>? = None
+    private var logicalPositions: SnapshotIndex<LogicalSpan>? = None
+    private var versions: SnapshotIndex<Long>? = None
+    private var publishedPages: SnapshotIndex<Array<TerminalLine?>>? = None
+    private val dirtyPages = HashMap<Long, Boolean>()
+    private var bytes = 0L
     private var first = 0L
     private var end = 0L
 
@@ -27,9 +31,9 @@ internal class LineHistory {
         return pages[ordinal / HISTORY_PAGE_ROWS]!!.rows[ordinal % HISTORY_PAGE_ROWS]!!
     }
 
-    fun find(id: Long): Long? = positions[id].map { ordinal -> ordinal - first }
+    fun find(id: Long): Long? = indexValue(positions, id).map { ordinal -> ordinal - first }
 
-    fun findLogical(id: Long): LogicalSpan? = logicalPositions[id]
+    fun findLogical(id: Long): LogicalSpan? = indexValue(logicalPositions, id)
         .map { span -> LogicalSpan(span.first - first, span.last - first) }
 
     fun addLast(line: ScreenRow) {
@@ -44,9 +48,18 @@ internal class LineHistory {
             }
         }
         page.rows[end % HISTORY_PAGE_ROWS] = Some(line)
-        positions[line.id] = end
-        val previous = logicalPositions[line.logical.id]
-        logicalPositions[line.logical.id] = LogicalSpan(previous?.first ?: end, end)
+        positions = Some(indexUpdated(positions, line.id, end))
+        val previous = indexValue(logicalPositions, line.logical.id)
+        logicalPositions = Some(
+            indexUpdated(
+                logicalPositions,
+                line.logical.id,
+                LogicalSpan(previous?.first ?: end, end)
+            )
+        )
+        versions = Some(indexUpdated(versions, line.logical.id, line.logical.version))
+        bytes += line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
         end += 1L
     }
 
@@ -54,12 +67,21 @@ internal class LineHistory {
         val line = this[0L]
         val pageIndex = first / HISTORY_PAGE_ROWS
         pages[pageIndex]!!.rows[first % HISTORY_PAGE_ROWS] = None
-        positions.remove(line.id)
-        val span = logicalPositions[line.logical.id]!!
-        if (span.first == span.last)
-            logicalPositions.remove(line.logical.id)
-        else
-            logicalPositions[line.logical.id] = LogicalSpan(span.first + 1L, span.last)
+        positions = indexRemoved(positions, line.id)
+        val span = indexValue(logicalPositions, line.logical.id)!!
+        if (span.first == span.last) {
+            logicalPositions = indexRemoved(logicalPositions, line.logical.id)
+            versions = indexRemoved(versions, line.logical.id)
+        } else
+            logicalPositions = Some(
+                indexUpdated(
+                    logicalPositions,
+                    line.logical.id,
+                    LogicalSpan(span.first + 1L, span.last)
+                )
+            )
+        bytes -= line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
         first += 1L
         if (first == end) clear() else if (first % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
         return line
@@ -70,20 +92,63 @@ internal class LineHistory {
         end -= 1L
         val pageIndex = end / HISTORY_PAGE_ROWS
         pages[pageIndex]!!.rows[end % HISTORY_PAGE_ROWS] = None
-        positions.remove(line.id)
-        val span = logicalPositions[line.logical.id]!!
-        if (span.first == span.last)
-            logicalPositions.remove(line.logical.id)
-        else
-            logicalPositions[line.logical.id] = LogicalSpan(span.first, span.last - 1L)
+        positions = indexRemoved(positions, line.id)
+        val span = indexValue(logicalPositions, line.logical.id)!!
+        if (span.first == span.last) {
+            logicalPositions = indexRemoved(logicalPositions, line.logical.id)
+            versions = indexRemoved(versions, line.logical.id)
+        } else
+            logicalPositions = Some(
+                indexUpdated(
+                    logicalPositions,
+                    line.logical.id,
+                    LogicalSpan(span.first, span.last - 1L)
+                )
+            )
+        bytes -= line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
         if (first == end) clear() else if (end % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
         return line
     }
 
+    fun snapshot(): HistoryReading {
+        if (size > 0L) {
+            val tail = this[size - 1L].logical
+            if (indexValue(versions, tail.id) != Some(tail.version))
+                versions = Some(indexUpdated(versions, tail.id, tail.version))
+        }
+        for (key in dirtyPages.keys) {
+            when (pages[key]) {
+                case Some(val page) -> {
+                    val frozen = Array<TerminalLine?>(HISTORY_PAGE_ROWS) { offset ->
+                        page.rows[offset].map { row -> row.snapshot() }
+                    }
+                    publishedPages = Some(indexUpdated(publishedPages, key, frozen))
+                }
+
+                case None -> publishedPages = indexRemoved(publishedPages, key)
+            }
+        }
+        dirtyPages.clear()
+        return HistoryReading(
+            first,
+            end,
+            publishedPages,
+            positions,
+            logicalPositions,
+            versions,
+            bytes
+        )
+    }
+
     fun clear() {
         pages.clear()
-        positions.clear()
-        logicalPositions.clear()
+        positions = None
+        logicalPositions = None
+        versions = None
+        publishedPages = None
+        dirtyPages.clear()
+        bytes = 0L
         first = 0L
         end = 0L
     }

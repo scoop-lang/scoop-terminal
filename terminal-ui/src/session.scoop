@@ -19,7 +19,7 @@ private struct Dimensions(val columns: Long, val rows: Long)
 
 /** An application-owned session. The view and session are used on the window owner. */
 public class TerminalEmulatorSession private constructor(
-    public val terminal: Terminal,
+    private val terminal: Terminal,
     private val pty: AsyncPty,
     private val onTitle: (String) -> Unit,
     private val onBell: () -> Unit
@@ -35,6 +35,10 @@ public class TerminalEmulatorSession private constructor(
     private var current = TerminalSessionState.Running
 
     public val state: TerminalSessionState get() = current
+    /** The current immutable presentation. The mutable emulator remains session-owned. */
+    public val reading: TerminalReading get() = terminal.reading
+    public val mouseReporting: Boolean get() = terminal.mouseReporting
+    public fun snapshot(): TerminalSnapshot = terminal.snapshot()
 
     private val running: Boolean
         get() = when (current) {
@@ -228,8 +232,10 @@ public class TerminalEmulatorSession private constructor(
 
     private fun resizeModel(columns: Long, rows: Long): Boolean {
         if (columns == terminal.columns && rows == terminal.rows) return false
-        terminal.resize(columns, rows, restoreHistory = operatingSystem != OperatingSystem.Windows)
-        observer?.invoke()
+        apply(
+            terminal
+                .resize(columns, rows, restoreHistory = operatingSystem != OperatingSystem.Windows)
+        )
         return true
     }
 }

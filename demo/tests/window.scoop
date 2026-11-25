@@ -54,15 +54,15 @@ private class WindowProbe {
         try {
             host.attach(window, { scope -> TestView(session, scope) })
             awaitWindow("first accepted terminal layout and CPR") {
-                title == "reply-ok" && session.terminal.columns != 80L
+                title == "reply-ok" && session.reading.columns != 80L
             }
-            val oldColumns = session.terminal.columns
-            val oldRows = session.terminal.rows
+            val oldColumns = session.reading.columns
+            val oldRows = session.reading.rows
             window.requestSize(LogicalSize(650.0, 420.0))
             awaitWindow("second accepted terminal layout") {
-                session.terminal.columns > oldColumns && session.terminal.rows > oldRows
+                session.reading.columns > oldColumns && session.reading.rows > oldRows
             }
-            val dimensions = f"${session.terminal.rows} ${session.terminal.columns}"
+            val dimensions = f"${session.reading.rows} ${session.reading.columns}"
             session.send(TerminalInput.Text(dimensions + "\r"))
             awaitWindow("session exit and EOF") {
                 when (session.state) {
@@ -76,7 +76,7 @@ private class WindowProbe {
                 else -> fail(Some("expected a normal process exit"))
             }
             assertEquals(dimensions, title)
-            val cells = session.terminal.lines(session.terminal.historySize, 1L)[0L].cells
+            val cells = session.reading.lines(session.reading.historySize, 1L)[0L].cells
             assertEquals("中", cells[0L].text)
             assertEquals("文", cells[2L].text)
         } finally {

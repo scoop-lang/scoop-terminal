@@ -4,6 +4,7 @@ import scoop.collections.HashMap
 
 internal class ScreenChanges {
     var pending = false
+    var textPending = false
 }
 
 internal class RowIds {
@@ -86,21 +87,8 @@ internal class Screen(
         cells[index - history.size]
 
     fun anchorAt(index: Long, column: Long, affinity: TerminalAffinity): TerminalAnchor? {
-        if (index < 0L || index >= history.size + rows || column < 0L || column > columns)
-            return None
-        val line = lineAt(index)
-        var edge = column
-        if (edge < columns && line[edge].width == 0L)
-            edge += if (affinity == TerminalAffinity.Before) -1L else 1L
-        if (line.softWrapped && edge > line.usedColumns) edge = line.usedColumns
-        return Some(
-            TerminalAnchor(
-                bufferEpoch,
-                line.logical.id,
-                line.logicalOffset + line.logicalColumn(edge),
-                affinity
-            )
-        )
+        if (index < 0L || index >= history.size + rows) return None
+        return anchorInLine(bufferEpoch, lineAt(index).snapshot(), column, affinity)
     }
 
     fun resolve(anchor: TerminalAnchor): TerminalPosition? {
@@ -115,26 +103,27 @@ internal class Screen(
             }
         }
         if (first < 0L) return None
-        var low = first
-        var high = last + 1L
-        while (low < high) {
-            val middle = low + (high - low) / 2L
-            val offset = lineAt(middle).logicalOffset
-            if (offset <
-                anchor.cellOffset ||
-                (offset == anchor.cellOffset && anchor.affinity == TerminalAffinity.After)
-            )
-                low = middle + 1L
-            else
-                high = middle
-        }
-        val index = clamp(low - 1L, first, last)
-        val line = lineAt(index)
-        val relative = anchor.cellOffset - line.logicalOffset
-        val length = if (line.softWrapped) line.logicalLength else line.logicalColumn(columns)
-        if (relative < 0L || relative > length) return None
-        return Some(TerminalPosition(index, line.visualColumn(relative)))
+        return resolveInLines(
+            anchor,
+            LogicalSpan(first, last),
+            { index -> lineAt(index).snapshot() }
+        )
     }
+
+    fun snapshot(
+        revision: Long,
+        screenRevision: Long,
+        textRevision: Long,
+        presentationVersion: Long,
+        alternate: Boolean,
+        visible: Boolean,
+        mouseReporting: Boolean
+    ): TerminalReadingData = TerminalReadingData(
+        columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
+        presentationVersion,
+        TerminalCursor(row, column, visible), mouseReporting, history.snapshot(),
+        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }
+    )
 
     fun reconcileLogicalLines() {
         var previous: ScreenRow? = if (history.size == 0L)
@@ -232,6 +221,7 @@ internal class Screen(
                 if (history.size != 0L) {
                     history.clear()
                     changes.pending = true
+                    changes.textPending = true
                 }
             case _ -> {}
         }
@@ -259,6 +249,7 @@ internal class Screen(
             if (record && first == 0L) remember(removed)
             cells.add(last, blank(style))
             changes.pending = true
+            changes.textPending = true
         }
     }
 
@@ -267,14 +258,18 @@ internal class Screen(
             cells.removeAt(last)
             cells.add(first, blank(style))
             changes.pending = true
+            changes.textPending = true
         }
     }
 
     private fun remember(line: ScreenRow) {
         if (historyLimit != 0L) {
-            if (history.size == historyLimit) history.removeFirst()
+            if (history.size == historyLimit) {
+                history.removeFirst()
+                changes.textPending = true
+            }
             history.addLast(line)
-        }
+        } else if (line.usedColumns > 0L) changes.textPending = true
     }
 
     fun resize(width: Long, height: Long, restoreHistory: Boolean, style: TerminalStyle) {
@@ -331,6 +326,7 @@ internal class Screen(
         style: TerminalStyle
     ) {
         reconcileLogicalLines()
+        val previousTextPending = changes.textPending
         val oldRows = rows
         val active = capture(row, column, pendingWrap)
         val stored = capture(
@@ -371,6 +367,7 @@ internal class Screen(
         history.clear()
         cells.clear()
         val retained = if (start > historyLimit) start - historyLimit else 0L
+        changes.textPending = previousTextPending || retained > 0L
         for (index in retained..<start)
             history.addLast(packed[index])
         for (index in start..<packed.size)
@@ -411,6 +408,7 @@ internal class Screen(
 
     fun reset(style: TerminalStyle) {
         epoch = ids.take()
+        changes.textPending = true
         for (index in 0L..<rows)
             cells[index] = blank(style)
         history.clear()

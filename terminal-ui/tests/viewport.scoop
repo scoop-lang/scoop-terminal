@@ -11,7 +11,7 @@ private class TerminalViewportTest {
         val terminal = Terminal(4L, 3L)
         terminal.feed("中abD\r\nZ".toByteArray())
         val lines = terminal.lines(0L, 3L)
-        val viewport = TerminalViewport(terminal)
+        val viewport = TerminalViewport { terminal.reading }
         viewport.select(CellLocation(lines[0L].id, 1L))
         assertEquals(Some("中"), viewport.copy())
         assertEquals(Some(Utf8Selection(0L, 3L)), viewport.visibleText().selection)
@@ -23,7 +23,7 @@ private class TerminalViewportTest {
     fun selectedContentAndViewportSurviveReflow() {
         val terminal = Terminal(10L, 3L)
         terminal.feed("abcdefghij".toByteArray())
-        val viewport = TerminalViewport(terminal)
+        val viewport = TerminalViewport { terminal.reading }
         val id = terminal.lines(0L, 1L)[0L].id
         viewport.select(CellLocation(id, 3L))
         viewport.extend(CellLocation(id, 8L))
@@ -40,7 +40,7 @@ private class TerminalViewportTest {
     fun wideWrapPaddingDoesNotBecomeCopiedText() {
         val terminal = Terminal(5L, 3L)
         terminal.feed("abcd中e".toByteArray())
-        val viewport = TerminalViewport(terminal)
+        val viewport = TerminalViewport { terminal.reading }
         val lines = terminal.lines(0L, 2L)
         viewport.select(CellLocation(lines[0L].id, 0L))
         viewport.extend(CellLocation(lines[1L].id, 2L))
@@ -51,9 +51,30 @@ private class TerminalViewportTest {
     }
 
     @Test
+    fun acceptedFrameCoordinatesResolveAfterTheLiveGridResizes() {
+        val terminal = Terminal(10L, 3L)
+        terminal.feed("abcdefghij".toByteArray())
+        val displayed = terminal.snapshot()
+        try {
+            val line = displayed.lines(0L, 1L)[0L]
+            val location = CellLocation(line.id, 6L, displayed.anchorAt(0L, 6L))
+            terminal.resize(4L, 3L)
+            val viewport = TerminalViewport { terminal.reading }
+            viewport.select(location)
+            assertEquals(Some("g"), viewport.copy())
+            terminal.feed("\u001bcnew".toByteArray())
+            viewport.update()
+            viewport.select(location)
+            assertEquals(None, viewport.copy())
+        } finally {
+            displayed.close()
+        }
+    }
+
+    @Test
     fun historyViewportUsesStableRowsAndRetiresEvictedSelection() {
         val terminal = Terminal(6L, 2L, 3L)
-        val viewport = TerminalViewport(terminal)
+        val viewport = TerminalViewport { terminal.reading }
         terminal.feed("a\r\nb\r\nc\r\nd".toByteArray())
         assertTrue(viewport.scroll(-1L))
         val anchored = terminal.lines(viewport.first, 1L)[0L].id

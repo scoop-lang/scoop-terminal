@@ -2,7 +2,7 @@
 
 `scoop.terminal.emulator` 是纯 Scoop 的 VT 核心。`Terminal.feed()` 接收输出字节并更新屏幕和历史，`encodeInput()` 根据当前模式编码文本、按键、鼠标和粘贴。回包、标题和响铃以值返回，可以在无窗口环境回放测试。
 
-`scoop.ui.terminal` 提供桌面会话和 `terminalView(session)`。在 `Application.runWithAsyncio` 的作用域中调用 `TerminalEmulatorSession.start(command)`，把视图挂到 UI 树。会话通过 `EventLoop.spawnPty()` 启动子进程，并按序写入用户输入和 VT 回包。视图处理已接受的尺寸、历史浏览、选择、剪贴板和输入法。嵌入方负责调用 `session.close()`，自然退出后可以继续展示最后的屏幕和状态。
+`scoop.ui.terminal` 提供桌面会话和 `terminalView(session)`。在 `Application.runWithAsyncio` 的作用域中调用 `TerminalEmulatorSession.start(command)`，把视图挂到 UI 树。会话通过 `EventLoop.spawnPty()` 启动子进程，并按序写入用户输入和 VT 回包。视图处理已接受的尺寸、历史浏览、选择、剪贴板和输入法。通过 `session.reading` 读取已提交的不可变画面；需要跨更新保留内容时取得 `session.snapshot()` 并在使用结束后关闭。嵌入方负责调用 `session.close()`，自然退出后可以继续展示最后的屏幕和状态。
 
 组件后续改进见 [Terminal 组件改进设计](docs/terminal-component-design.md)，包含核心正确性、OSC、选择与搜索 API、字体连字、图形和性能；外围工具 UI 留给后续 demo。
 

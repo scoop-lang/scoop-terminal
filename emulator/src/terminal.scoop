@@ -1,8 +1,18 @@
 package scoop.terminal.emulator
 
 /** An incremental VT emulator with reflowable main-screen scrollback. All access is serialized by its owner. */
-public class Terminal public constructor(columns: Long, rows: Long, historyLimit: Long = 10000L) {
+public class Terminal public constructor(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long = 10000L,
+    snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits()
+) {
     private val state = createState(columns, rows, historyLimit)
+    private val snapshotBudget = SnapshotBudget(snapshotLimits)
+
+    /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
+    public val reading: TerminalReading get() = state.reading
+    public fun snapshot(): TerminalSnapshot = snapshotBudget.acquire(state.reading)
 
     public val columns: Long get() = state.screen.columns
     public val rows: Long get() = state.screen.rows
@@ -27,10 +37,12 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     public fun finishOutput(): TerminalUpdate = state.finishOutput()
 
     /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
-    public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true) {
+    public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true): TerminalUpdate {
         checkSize(columns, rows)
-        if (columns != this.columns || rows != this.rows)
+        return if (columns != this.columns || rows != this.rows)
             state.resize(columns, rows, restoreHistory)
+        else
+            TerminalUpdate(false, [])
     }
 
     /** Reads zero-based physical rows, starting at the oldest retained scrollback row. */

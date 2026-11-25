@@ -12,7 +12,8 @@ internal struct GridGeometry(
     val columns: Long,
     val requestedRows: Long,
     val screenRevision: Long,
-    val atBottom: Boolean
+    val atBottom: Boolean,
+    val reading: TerminalReading
 ) {
     fun hit(point: Point): (Long, Long)? {
         if (point.x < 0.0 || point.y < 0.0 || point.x >= size.width || point.y >= size.height)

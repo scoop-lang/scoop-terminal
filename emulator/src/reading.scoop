@@ -1,0 +1,96 @@
+package scoop.terminal.emulator
+
+/** An immutable, committed terminal generation. Long-lived consumers acquire an owned snapshot. */
+public interface TerminalReading {
+    public val columns: Long
+    public val rows: Long
+    public val historySize: Long
+    public val bufferEpoch: Long
+    public val alternateScreen: Boolean
+    public val revision: Long
+    public val screenRevision: Long
+    public val textRevision: Long
+    public val presentationVersion: Long
+    public val cursor: TerminalCursor
+    public val mouseReporting: Boolean
+    public fun lines(start: Long, count: Long): Array<TerminalLine>
+    public fun findLine(id: Long): Long?
+    public fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity = TerminalAffinity.After
+    ): TerminalAnchor?
+    public fun resolve(anchor: TerminalAnchor): TerminalPosition?
+}
+
+internal class TerminalReadingData(
+    public override val columns: Long,
+    public override val bufferEpoch: Long,
+    public override val alternateScreen: Boolean,
+    public override val revision: Long,
+    public override val screenRevision: Long,
+    public override val textRevision: Long,
+    public override val presentationVersion: Long,
+    public override val cursor: TerminalCursor,
+    public override val mouseReporting: Boolean,
+    private val history: HistoryReading,
+    val screenLines: Array<TerminalLine>
+) : TerminalReading {
+    public override val rows: Long get() = screenLines.size
+    public override val historySize: Long get() = history.size
+    val retainedBytes: Long = readingBytes(history, screenLines)
+
+    private fun line(index: Long): TerminalLine = if (index < historySize)
+        history[index]
+    else
+        screenLines[index - historySize]
+
+    public override fun lines(start: Long, count: Long): Array<TerminalLine> {
+        val total = historySize + rows
+        if (start < 0L || start > total || count < 0L || count > total - start)
+            throw IndexOutOfBoundsException()
+        return Array<TerminalLine>(count) { offset -> line(start + offset) }
+    }
+
+    public override fun findLine(id: Long): Long? {
+        when (val found = history.find(id)) {
+            case Some(_) -> return found
+            case None -> {}
+        }
+        for (index in 0L..<rows) {
+            if (screenLines[index].id == id) return Some(historySize + index)
+        }
+        return None
+    }
+
+    public override fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity
+    ): TerminalAnchor? {
+        if (row < 0L || row >= historySize + rows) return None
+        return anchorInLine(bufferEpoch, line(row), column, affinity)
+    }
+
+    public override fun resolve(anchor: TerminalAnchor): TerminalPosition? {
+        if (anchor.bufferEpoch != bufferEpoch || anchor.cellOffset < 0L) return None
+        val stored = history.findLogical(anchor.logicalLineId)
+        var first = stored?.first ?: -1L
+        var last = stored?.last ?: -1L
+        for (index in 0L..<rows) {
+            if (screenLines[index].logicalLineId == anchor.logicalLineId) {
+                if (first < 0L) first = historySize + index
+                last = historySize + index
+            }
+        }
+        if (first < 0L) return None
+        return resolveInLines(anchor, LogicalSpan(first, last), { index -> line(index) })
+    }
+}
+
+private fun readingBytes(history: HistoryReading, rows: Array<TerminalLine>): Long {
+    var bytes = history.retainedBytes
+    for (line in rows)
+        bytes += line.retainedBytes
+    return bytes
+}

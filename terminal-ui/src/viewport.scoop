@@ -4,7 +4,7 @@ import scoop.collections.withIndex
 import scoop.terminal.emulator.*
 import scoop.window.Utf8Selection
 
-internal struct CellLocation(val id: Long, val column: Long)
+internal struct CellLocation(val id: Long, val column: Long, val anchor: TerminalAnchor? = None)
 
 internal struct CellSpan(val start: Long, val end: Long)
 
@@ -33,7 +33,8 @@ internal struct SelectionRange(
 
 internal struct VisibleText(val text: String, val selection: Utf8Selection?)
 
-internal class TerminalViewport(val terminal: Terminal) {
+internal class TerminalViewport(private val current: () -> TerminalReading) {
+    val terminal: TerminalReading get() = current()
     private var anchor: TerminalAnchor? = None
     private var selection: SelectedCells? = None
     private var alternate = terminal.alternateScreen
@@ -84,6 +85,11 @@ internal class TerminalViewport(val terminal: Terminal) {
     }
 
     private fun locationAnchor(location: CellLocation): TerminalAnchor? {
+        when (location.anchor) {
+            case Some(val value) ->
+                return if (terminal.resolve(value) != None) Some(value) else None
+            case None -> {}
+        }
         val index = terminal.findLine(location.id) ?: return None
         val line = terminal.lines(index, 1L)[0L]
         val column = clamp(location.column, 0L, line.cells.size - 1L)

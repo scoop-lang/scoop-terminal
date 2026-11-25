@@ -42,7 +42,8 @@ public struct TerminalLine(
     val logicalLineId: Long = 0L,
     val logicalOffset: Long = 0L,
     val usedColumns: Long = 0L,
-    val textVersion: Long = 0L
+    val textVersion: Long = 0L,
+    val retainedBytes: Long = 0L
 )
 
 public struct TerminalCursor(val row: Long, val column: Long, val visible: Boolean)
@@ -52,7 +53,11 @@ public enum TerminalEffect {
     Reply(Array<Byte>), Title(String), Bell
 }
 
-public struct TerminalUpdate(val changed: Boolean, val effects: Array<TerminalEffect>)
+public struct TerminalUpdate(
+    val changed: Boolean,
+    val effects: Array<TerminalEffect>,
+    val damage: TerminalDamage = TerminalDamage()
+)
 
 internal fun clamp(value: Long, lower: Long, upper: Long): Long = if (value < lower)
     lower

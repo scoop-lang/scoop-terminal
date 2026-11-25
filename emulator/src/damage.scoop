@@ -1,0 +1,53 @@
+package scoop.terminal.emulator
+
+/** Dirty row indices are relative to the visible screen, independent of history length. */
+public struct TerminalDamage(
+    val rows: Array<Long> = [],
+    val cursorChanged: Boolean = false,
+    val historyChanged: Boolean = false,
+    val resized: Boolean = false,
+    val bufferChanged: Boolean = false,
+    val scrollDelta: Long = 0L
+)
+
+internal fun readingDamage(
+    before: TerminalReadingData,
+    after: TerminalReadingData
+): TerminalDamage {
+    val resized = before.columns != after.columns || before.rows != after.rows
+    val bufferChanged = before.bufferEpoch != after.bufferEpoch
+    val dirty = ArrayList<Long>()
+    for (index in 0L..<after.rows) {
+        val row = after.screenLines[index]
+        if (resized ||
+            bufferChanged ||
+            index >=
+            before.rows ||
+            before.screenLines[index].id !=
+            row.id ||
+            before.screenLines[index].contentVersion !=
+            row.contentVersion
+        )
+            dirty.add(index)
+    }
+    var historyChanged = before.historySize != after.historySize
+    if (!historyChanged && before.historySize > 0L)
+        historyChanged = before.lines(0L, 1L)[0L].id != after.lines(0L, 1L)[0L].id
+    var scrollDelta = 0L
+    if (!resized && !bufferChanged) {
+        for (index in 1L..<before.rows) {
+            if (before.screenLines[index].id == after.screenLines[0L].id) {
+                scrollDelta = index
+                break
+            }
+        }
+    }
+    return TerminalDamage(
+        dirty.toArray(),
+        before.cursor != after.cursor,
+        historyChanged,
+        resized,
+        bufferChanged,
+        scrollDelta
+    )
+}

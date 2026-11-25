@@ -11,6 +11,7 @@ internal class ScreenRow(
     private var version = 0L
     private var published: TerminalLine? = None
     private var publishedCells: Array<TerminalCell>? = None
+    private var retainedBytes = 0L
     private var identity = LogicalLine(id)
     private var offset = 0L
     private var used = if (style == TerminalStyle()) 0L else columns
@@ -24,7 +25,7 @@ internal class ScreenRow(
         set(value) {
             if (wrapped != value) {
                 wrapped = value
-                invalidate()
+                invalidate(cellsChanged = false)
             }
         }
 
@@ -40,6 +41,9 @@ internal class ScreenRow(
 
             case None -> {
                 val content = cells.toArray()
+                retainedBytes = 64L + cells.size * 48L
+                for (cell in content)
+                    retainedBytes += cell.text.byteLength
                 publishedCells = Some(content)
                 content
             }
@@ -52,17 +56,21 @@ internal class ScreenRow(
             identity.id,
             offset,
             used,
-            identity.version
+            identity.version,
+            retainedBytes
         )
         published = Some(line)
         return line
     }
 
-    private fun invalidate() {
+    private fun invalidate(textChanged: Boolean = true, cellsChanged: Boolean = true) {
         published = None
-        publishedCells = None
+        if (cellsChanged) publishedCells = None
         version += 1L
-        identity.version += 1L
+        if (textChanged) {
+            identity.version += 1L
+            changes.textPending = true
+        }
         changes.pending = true
     }
 
@@ -74,33 +82,9 @@ internal class ScreenRow(
         changes.pending = true
     }
 
-    fun logicalColumn(column: Long): Long {
-        var visual = 0L
-        var logical = 0L
-        val end = clamp(column, 0L, cells.size)
-        while (visual < end) {
-            val cell = cells[visual]
-            val width = if (cell.width == 0L) 1L else cell.width
-            if (visual + width > end) return logical + end - visual
-            logical += if (cell.width == 0L) 1L else cell.logicalWidth
-            visual += width
-        }
-        return logical
-    }
+    fun logicalColumn(column: Long): Long = logicalColumn(cells, column)
 
-    fun visualColumn(column: Long): Long {
-        var visual = 0L
-        var logical = 0L
-        while (visual < cells.size && logical < column) {
-            val cell = cells[visual]
-            val width = if (cell.width == 0L) 1L else cell.width
-            val length = if (cell.width == 0L) 1L else cell.logicalWidth
-            if (logical + length > column) return visual + clamp(column - logical, 0L, width)
-            logical += length
-            visual += width
-        }
-        return visual
-    }
+    fun visualColumn(column: Long): Long = visualColumn(cells, column)
 
     fun put(
         column: Long,
@@ -120,6 +104,14 @@ internal class ScreenRow(
             if (extended) invalidate()
             return
         }
+        val previous = cells[column]
+        val textChanged = extended ||
+            previous.text !=
+            cell.text ||
+            previous.width !=
+            cell.width ||
+            previous.logicalWidth !=
+            cell.logicalWidth
         clearGlyph(column, cell.style)
         if (cell.width == 2L) {
             clearGlyph(column + 1L, cell.style)
@@ -127,13 +119,15 @@ internal class ScreenRow(
         }
         cells[column] = cell
         trim()
-        invalidate()
+        invalidate(textChanged)
     }
 
     private fun trim() {
+        val previous = used
         val blank = TerminalCell()
         while (used > 0L && cells[used - 1L] == blank)
             used -= 1L
+        if (previous != used) invalidate(cellsChanged = false)
     }
 
     fun erase(start: Long, end: Long, style: TerminalStyle) {
@@ -144,8 +138,9 @@ internal class ScreenRow(
         if (style != TerminalStyle() && right > used) used = right
         for (index in left..<right) {
             if (cells[index] != blank) {
+                val previous = cells[index]
                 cells[index] = blank
-                invalidate()
+                invalidate(previous.text != blank.text || previous.width != blank.width)
             }
         }
         trim()
