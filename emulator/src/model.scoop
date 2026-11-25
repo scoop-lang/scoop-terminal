@@ -79,7 +79,10 @@ public enum TerminalEffect {
 public struct TerminalUpdate(
     val changed: Boolean,
     val effects: Array<TerminalEffect>,
-    val damage: TerminalDamage = TerminalDamage()
+    val damage: TerminalDamage = TerminalDamage(),
+    val revision: Long = 0L,
+    val textRevision: Long = 0L,
+    val presentationVersion: Long = 0L
 )
 
 internal fun clamp(value: Long, lower: Long, upper: Long): Long = if (value < lower)

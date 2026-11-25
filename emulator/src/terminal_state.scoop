@@ -32,6 +32,9 @@ internal class TerminalState(
     private var gridRevision = 0L
     private var textRevision = 0L
     private var presentationVersion = 0L
+    private var presentationPending = false
+    var synchronizedOutput = false
+    var synchronizationGeneration = 0L
     val revision: Long get() = modelRevision
     val screenRevision: Long get() = gridRevision
     private val parser = VtParser(this, parserLimits)
@@ -46,36 +49,68 @@ internal class TerminalState(
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
+        val before = committed
         parser.feed(bytes)
-        return update()
+        return update(before)
     }
 
     fun finishOutput(): TerminalUpdate {
+        val before = committed
         parser.finish()
         combining = None
-        return update()
+        setSynchronizedOutput(false)
+        return update(before)
     }
 
-    private fun update(): TerminalUpdate {
+    private fun flush(publish: Boolean) {
         screen.reconcileLogicalLines()
         val screenChanged = updateScreenRevision()
         val modified = changed || screenChanged
-        var damage = TerminalDamage()
         if (screenChanges.textPending) {
             textRevision += 1L
             screenChanges.textPending = false
         }
         if (modified) {
             modelRevision += 1L
-            presentationVersion += 1L
-            val next = captureReading()
-            damage = readingDamage(committed, next)
-            committed = next
+            presentationPending = true
         }
-        val result = TerminalUpdate(modified, effects.toArray(), damage)
-        effects.clear()
         changed = false
+        if (publish && presentationPending) {
+            presentationVersion += 1L
+            committed = captureReading()
+            presentationPending = false
+        }
+    }
+
+    private fun update(before: TerminalReadingData): TerminalUpdate {
+        flush(!synchronizedOutput)
+        val modified = committed !== before
+        val result = TerminalUpdate(
+            modified, effects.toArray(),
+            if (modified) readingDamage(before, committed) else TerminalDamage(),
+            modelRevision, textRevision, presentationVersion
+        )
+        effects.clear()
         return result
+    }
+
+    fun setSynchronizedOutput(enabled: Boolean) {
+        if (enabled == synchronizedOutput) return
+        if (enabled) {
+            // Commit the exact prefix before BSU, even in the middle of one feed.
+            flush(true)
+            synchronizedOutput = true
+            synchronizationGeneration += 1L
+        } else {
+            synchronizedOutput = false
+            flush(true)
+        }
+    }
+
+    fun releaseSynchronizedOutput(): TerminalUpdate {
+        val before = committed
+        setSynchronizedOutput(false)
+        return update(before)
     }
 
     private fun updateScreenRevision(): Boolean {
@@ -91,10 +126,12 @@ internal class TerminalState(
         restoreHistory: Boolean,
         pixels: TerminalPixelSize?
     ): TerminalUpdate {
+        val before = committed
+        setSynchronizedOutput(false)
         pixelSize = pixels
         if (columns == main.columns && rows == main.rows) {
             changed = true
-            return update()
+            return update(before)
         }
         main.resize(columns, rows, restoreHistory, style)
         val mainTextChanged = screenChanges.textPending
@@ -107,7 +144,7 @@ internal class TerminalState(
         }
         combining = None
         changed = true
-        return update()
+        return update(before)
     }
 
     public override fun print(character: Char) {
@@ -323,6 +360,7 @@ internal class TerminalState(
     }
 
     fun softReset() {
+        setSynchronizedOutput(false)
         modes = TerminalModes()
         style = TerminalStyle()
         screen.softReset()
@@ -337,6 +375,7 @@ internal class TerminalState(
     }
 
     private fun reset() {
+        setSynchronizedOutput(false)
         style = TerminalStyle()
         modes = TerminalModes()
         main.reset(style)

@@ -60,6 +60,7 @@ private fun modeState(terminal: TerminalState, privateMode: Boolean, value: Int)
         case 1048 -> Some(false)
         case 1049 -> Some(terminal.alternateScreen)
         case 2004 -> Some(modes.bracketedPaste)
+        case 2026 -> Some(terminal.synchronizedOutput)
         case _ -> None
     }
 }

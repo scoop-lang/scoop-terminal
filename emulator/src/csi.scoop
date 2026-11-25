@@ -170,6 +170,7 @@ private fun applyModes(terminal: TerminalState, command: VtCsi, enabled: Boolean
             case 1048 -> if (enabled) terminal.saveCursor() else terminal.restoreCursor()
             case 1049 -> terminal.switchScreen(enabled, true, true)
             case 2004 -> modes.bracketedPaste = enabled
+            case 2026 -> terminal.setSynchronizedOutput(enabled)
             case _ -> {}
         }
     }

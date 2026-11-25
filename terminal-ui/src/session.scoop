@@ -9,6 +9,7 @@ import scoop.platform.process.ExitStatus
 import scoop.platform.process.requirePtySize
 import scoop.platform.system.*
 import scoop.terminal.emulator.*
+import scoop.time.Duration
 import scoop.window.asyncio.currentApplicationScope
 
 public enum TerminalSessionState {
@@ -22,7 +23,8 @@ public class TerminalEmulatorSession private constructor(
     private val terminal: Terminal,
     private val pty: AsyncPty,
     private val onTitle: (String) -> Unit,
-    private val onBell: () -> Unit
+    private val onBell: () -> Unit,
+    private val synchronizedOutputTimeout: Duration
 ) : AsyncCloseable {
     private val outgoing = ArrayDeque<Array<Byte>>()
     private val writeReady = Channel<Unit>(1L)
@@ -33,6 +35,9 @@ public class TerminalEmulatorSession private constructor(
     private var driver: Job? = None
     private var observer: (() -> Unit)? = None
     private var current = TerminalSessionState.Running
+    private var deadlineScope: CoroutineScope? = None
+    private var synchronizationDeadline: Job? = None
+    private var deadlineGeneration = -1L
 
     public val state: TerminalSessionState get() = current
     /** The current immutable presentation. The mutable emulator remains session-owned. */
@@ -55,14 +60,23 @@ public class TerminalEmulatorSession private constructor(
             historyLimit: Long = 10000L,
             searchPath: Boolean = false,
             onTitle: (String) -> Unit = {},
-            onBell: () -> Unit = {}
+            onBell: () -> Unit = {},
+            synchronizedOutputTimeout: Duration = Duration.seconds(1L)
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
             val loop = currentEventLoop()
             requirePtySize(columns, rows)
+            if (synchronizedOutputTimeout <= Duration.ZERO)
+                throw IllegalArgumentException(Some("synchronized output timeout must be positive"))
             val terminal = Terminal(columns, rows, historyLimit)
             val pty = loop.spawnPty(command, columns, rows, searchPath)
-            val session = TerminalEmulatorSession(terminal, pty, onTitle, onBell)
+            val session = TerminalEmulatorSession(
+                terminal,
+                pty,
+                onTitle,
+                onBell,
+                synchronizedOutputTimeout
+            )
             session.driver = Some(application.launch { session.run() })
             return session
         }
@@ -115,6 +129,7 @@ public class TerminalEmulatorSession private constructor(
         var result: TerminalSessionState = try {
             coroutineScope<TerminalSessionState> {
                 val scope = this
+                session.deadlineScope = Some(scope)
                 val output = scope.async { session.readOutput() }
                 val child = scope
                     .async {
@@ -131,6 +146,9 @@ public class TerminalEmulatorSession private constructor(
                 } finally {
                     input.cancel()
                     resize.cancel()
+                    session.synchronizationDeadline?.cancel()
+                    session.synchronizationDeadline = None
+                    session.deadlineScope = None
                 }
                 ended
             }
@@ -149,6 +167,7 @@ public class TerminalEmulatorSession private constructor(
             }
         }
         outgoing.clear()
+        apply(terminal.finishOutput())
         publish(result)
     }
 
@@ -183,7 +202,35 @@ public class TerminalEmulatorSession private constructor(
                 case Bell -> onBell()
             }
         }
+        updateSynchronizationDeadline()
         if (update.changed) observer?.invoke()
+    }
+
+    private fun updateSynchronizationDeadline() {
+        if (!terminal.synchronizedOutput) {
+            synchronizationDeadline?.cancel()
+            synchronizationDeadline = None
+            return
+        }
+        val generation = terminal.synchronizationGeneration
+        if (generation == deadlineGeneration) return
+        val scope = deadlineScope ?: return
+        deadlineGeneration = generation
+        synchronizationDeadline?.cancel()
+        val session = this
+        synchronizationDeadline = Some(
+            scope
+                .launch {
+                    currentEventLoop().sleep(session.synchronizedOutputTimeout)
+                    if (session.terminal.synchronizedOutput &&
+                        session.terminal.synchronizationGeneration ==
+                        generation
+                    ) {
+                        session.synchronizationDeadline = None
+                        session.apply(session.terminal.releaseSynchronizedOutput())
+                    }
+                }
+        )
     }
 
     private suspend fun writeInput() {

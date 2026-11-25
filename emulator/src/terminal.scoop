@@ -25,6 +25,8 @@ public class Terminal public constructor(
     public val unicodeVersion: String = unicodeTerminalDataVersion()
     public val ambiguousWidth: TerminalAmbiguousWidth get() = state.ambiguousWidth
     public val pixelSize: TerminalPixelSize? get() = state.pixelSize
+    public val synchronizedOutput: Boolean get() = state.synchronizedOutput
+    public val synchronizationGeneration: Long get() = state.synchronizationGeneration
 
     public val columns: Long get() = state.screen.columns
     public val rows: Long get() = state.screen.rows
@@ -51,6 +53,9 @@ public class Terminal public constructor(
     /** Completes pending text when the output stream ends. */
     public fun finishOutput(): TerminalUpdate = state.finishOutput()
 
+    /** Host-clock expiry and lifecycle events may release an unfinished synchronized frame. */
+    public fun releaseSynchronizedOutput(): TerminalUpdate = state.releaseSynchronizedOutput()
+
     /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
     public fun resize(
         columns: Long,
@@ -63,7 +68,7 @@ public class Terminal public constructor(
         return if (columns != this.columns || rows != this.rows || pixels != pixelSize)
             state.resize(columns, rows, restoreHistory, pixels)
         else
-            TerminalUpdate(false, [])
+            state.releaseSynchronizedOutput()
     }
 
     /** Reads zero-based physical rows, starting at the oldest retained scrollback row. */

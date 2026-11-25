@@ -19,7 +19,8 @@
 | M1 | 传统键鼠、1016 像素鼠标、水平滚轮 | 已实现，5 项输入协议用例通过 |
 | M1 | 下划线类型/颜色、光标形状、独立闪烁 | 已实现，4 项协议及 3 项绘制/缓存用例通过 |
 | M1 | DECRQM/DECRQSS/XTGETTCAP、尺寸查询及共享 terminfo 能力表 | 已实现，5 项协议用例及生成一致性/语法检查通过；图形能力在图形阶段加入 |
-| M2 | 同步输出 2026、期限、流顺序与有序效果 | 待实现 |
+| M2 | 同步输出 2026、序列边界提交、独立硬期限 | 已实现，完整核心 65 项通过；真实 PTY 期限在集中验收验证 |
+| M2 | 异步宿主效果的有序回复票据 | 待 OSC 52 阶段实现 |
 | M2 | OSC 颜色查询/设置/重置 | 待实现 |
 | M2 | OSC 8、OSC 52 与宿主服务策略 | 待实现 |
 | M2 | OSC 7 工作目录、9;4 进度事件 | 待实现 |
@@ -42,6 +43,7 @@
 
 - 工具链：`~/.scoop/bin/scoop`，`0.0.0-dev.20261126`，编译器 `bb295704d`。
 - `scoop --sysroot ../scoop/sysroot test --release emulator`：46/46 通过，包括 8 项边距/编辑/复位、6 项解析、3 项存储、11 项 reflow、5 项快照及 6 项 Unicode 宽度测试。
+- 同步输出改动后的完整 `emulator` 回归：65/65 通过。新增 5 项覆盖 feed 内多次 BSU/ESU、冻结期间查询与输入、重复 BSU 的同一期限代次、显式期限释放、EOF/resize/RIS 及旧历史快照隔离；UI 测试代码编译检查通过。
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter InputProtocolTest`：5/5 通过，覆盖 Ctrl 别名、修饰功能键/方向键、小键盘、X10/传统原始字节、跟踪/编码独立切换、1016 像素及横向滚轮。视图从已接受布局的设备缩放计算像素坐标；未接受尺寸或 DPI 不用于鼠标报告。
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter RenditionTest`：4/4 通过，覆盖 4:0..5、21/24、58/59、无效色彩空间、DECSCUSR、光标可见性/闪烁独立及保存恢复。
 - `scoop --sysroot ../scoop/sysroot test --release emulator --filter CapabilityQueryTest`：5/5 通过，覆盖流顺序中的真实模式、SGR 回包回放、分块/取消/上限、未知查询失败及像素变化保留边距。UI 测试代码编译检查通过。
