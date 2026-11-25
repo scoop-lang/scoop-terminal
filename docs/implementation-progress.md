@@ -29,7 +29,8 @@
 | M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 7 项及 session 协作式异步分页 2 项通过；独立后台执行器随 M5 接入 |
 | M3 | reveal、矩形、高亮与结果失效 | 已实现，6 项定位与 3 项高亮/光栅验证通过 |
 | M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
-| M4 | 连字、网格校验、字体 fallback、装饰及缓存 | 待实现 |
+| M4 | 独立字体副本、LRU 与帧排版租约 | 已实现，3 项淘汰/寿命/像素及原有 4 项绘制回归通过 |
+| M4 | 连字 run、逐列网格校验、字体 fallback 与装饰 | 待实现 |
 | M5 | 串行后台 model、图片 store/decoder/cache、预算 | 待实现 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 待实现 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
@@ -71,6 +72,9 @@
 - 无排版分词入口 `scoop.charset.wordBoundaries` 已在 Scoop 独立提交、推送并合并 [PR #223](https://github.com/scoop-lang/scoop/pull/223)，main 已回合并到该修复分支并推送。复用现有 ICU4X dictionary 数据，未下载新依赖；release Clippy、2 项适配、3 项原生 ABI、实际示例与 API 文档检索通过，开发 sysroot 已更新。本轮 PR 文本与局部文档临时目录已清理。
 
 ## 后续执行约束
+
+- 字体缓存：`TerminalGlyphLruTest` 3/3，原 `TerminalGlyphCacheTest` 4/4 通过。验证 LRU 最近访问、缓存满后继续复用、条目/估算字节上限、超大布局不驻留、幂等租约关闭、缓存关闭后的独立绘制，以及旧帧在淘汰和字体来源关闭后的逐像素一致性。固定官方 Fira Code 6.2，字体来源、摘要和 OFL 许可随测试保存；下载使用指定代理，依赖压缩包留在 `~/repos/scoop-dep/terminal-fonts`。
+- `FontCollection.copy()` 已在 Scoop 独立分支提交并合并 [PR #224](https://github.com/scoop-lang/scoop/pull/224)，main 已回合并修复分支并推送。4 项字体集合用例、原生 `-Werror` 编译、局部 API 文档检索及关闭来源后延迟排版的实际示例通过。开发 sysroot 已更新；本轮探测程序、字体临时副本、PR 文本和局部 API 文档已清理。
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。
 

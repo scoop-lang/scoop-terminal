@@ -89,11 +89,13 @@ internal class TerminalFrame(
     private val background = colors.background.color()
     private val cursorColor = colors.cursor.color()
     private val cells = ArrayList<PaintCell>()
+    private val leases = ArrayList<TerminalGlyphLease>()
     private val selection = ArrayList<Rect>()
     private val links = ArrayList<PaintLink>()
     private val separators = ArrayList<Double>()
     private var preedit: TextLayout? = None
     private var blinkingText = false
+    private var closed = false
     val hasBlink: Boolean get() = blinkingText
 
     init {
@@ -153,7 +155,12 @@ internal class TerminalFrame(
             fullInk
         val visible = cell.text != "" && !cell.style.concealed
         if (cell.style.blink && !cell.style.concealed) blinkingText = true
-        val glyph = if (visible) Some(glyphs.layout(cell, ink)) else None
+        val glyph = if (visible) {
+            val lease = glyphs.acquire(cell, ink)
+            leases.add(lease)
+            Some(lease.layout)
+        } else
+            None
         if (!cell.style.concealed) {
             when (val link = geometry.reading.link(cell.linkId)) {
                 case Some(val value) ->
@@ -309,7 +316,7 @@ internal class TerminalFrame(
     }
 
     // A cursor-only scene can recolor one cached glyph without reshaping the grid.
-    fun cursorGlyph(cursor: TerminalCursor): TextLayout? {
+    fun cursorGlyph(cursor: TerminalCursor): TerminalGlyphLease? {
         if (cursor.shape !=
             TerminalCursorShape.Block ||
             !cursor.visible ||
@@ -325,7 +332,7 @@ internal class TerminalFrame(
             resolveColor(cell.style.foreground, foreground, colors)
         else
             resolveColor(cell.style.background, background, colors)
-        return Some(glyphs.layout(cell, paper))
+        return Some(glyphs.acquire(cell, paper))
     }
 
     private fun drawGlyph(canvas: Canvas, cell: PaintCell) {
@@ -351,8 +358,13 @@ internal class TerminalFrame(
     }
 
     public override fun close() {
+        if (closed) return
+        closed = true
         try {
             preedit?.close()
+            for (lease in leases)
+                lease.close()
+            leases.clear()
         } finally {
             glyphs.release()
         }

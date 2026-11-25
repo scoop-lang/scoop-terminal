@@ -22,9 +22,11 @@ OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, coun
 
 视图支持双击按 Unicode 词选择、三击按逻辑行选择、Shift 扩展、Alt 矩形选择和越界拖动自动滚动。`TerminalViewOptions.additionalWordCharacters` 可增加路径／标识符字符。主备屏分别保留滚动与选择；矩形在重排后仍按原各行文字范围复制。`TerminalCopyOptions(trimPadding = false)` 可保留网格补齐空白，默认只去掉这些补齐格，始终保留显式输出的空格。
 
+文字缓存持有独立字体副本，按 LRU 局部淘汰；默认最多 1024 项、16 MiB 估算权重。正在展示的帧独立持有其排版引用，淘汰不会关闭帧仍需使用的资源；字体来源更新或关闭后，旧帧的延迟光标排版仍使用原字体。
+
 ## 开发
 
-使用包含伪终端接口及纯文本 `scoop.charset.wordBoundaries` 接口的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
+使用包含伪终端接口、纯文本 `scoop.charset.wordBoundaries` 及 `FontCollection.copy()` 的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
 
 ```sh
 scoop --sysroot ../scoop/sysroot test --release emulator

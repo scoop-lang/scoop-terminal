@@ -342,11 +342,17 @@ private class TerminalViewElement(
                 val focused = area.isFocusActive
                 val blinkVisible = cursorBlinkVisible
                 val glyph = if (focused) measured.cursorGlyph(cursor) else None
-                context
-                    .draw { paint ->
-                        measured
-                            .drawCursor(paint.canvas, rect, cursor, focused, blinkVisible, glyph)
-                    }
+                try {
+                    context
+                        .draw { paint ->
+                            measured
+                                .drawCursor(
+                                    paint.canvas, rect, cursor, focused, blinkVisible, glyph?.layout
+                                )
+                        }
+                } finally {
+                    glyph?.close()
+                }
             }
 
             case None -> {}

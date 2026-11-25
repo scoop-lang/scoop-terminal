@@ -1,0 +1,134 @@
+package scoop.ui.terminal
+
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.graphics.text.drawText
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalGlyphLruTest {
+    @Test
+    fun recentEntriesSurviveAndEvictedLayoutsStayAliveUntilTheirLastLeaseCloses() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                val cache = TerminalGlyphCache(fonts, appearance, maxEntries = 2L)
+                val first = cache.acquire(TerminalCell("a"), Color.White)
+                val kept = first.layout
+                try {
+                    val old = cache
+                        .acquire(TerminalCell("b"), Color.White)
+                        .use { value -> value.layout }
+                    cache
+                        .acquire(TerminalCell("a"), Color.White)
+                        .use { value -> assertSame(kept, value.layout) }
+                    cache.acquire(TerminalCell("c"), Color.White).close()
+                    assertTrue(old.isClosed)
+                    assertFalse(kept.isClosed)
+                    assertEquals(2L, cache.cachedCount)
+                    assertEquals(3L, cache.shapeCount)
+                    assertTrue(cache.canReuse(fonts, appearance))
+                    assertTrue(cache.canReuse(fonts, terminalTestAppearance()))
+                    cache.acquire(TerminalCell("d"), Color.White).close()
+                    assertFalse(kept.isClosed)
+                } finally {
+                    cache.release()
+                }
+                assertFalse(kept.isClosed)
+                assertEquals("a", kept.text)
+                first.close()
+                first.close()
+                assertTrue(kept.isClosed)
+                assertFailsWith<IllegalStateException> { first.layout }
+                assertFailsWith<IllegalStateException> {
+                    cache.acquire(TerminalCell("e"), Color.White)
+                }
+            }
+    }
+
+    @Test
+    fun oversizedLayoutsBypassTheByteBudgetWhileTheirCallerOwnsThem() {
+        terminalTestFonts()
+            .use { fonts ->
+                val cache = TerminalGlyphCache(fonts, terminalTestAppearance(), maxBytes = 300L)
+                val lease = cache.acquire("long run != arrow ->", false, false, Color.White)
+                val layout = lease.layout
+                assertEquals(0L, cache.cachedCount)
+                assertEquals(0L, cache.estimatedBytes)
+                cache.release()
+                try {
+                    assertEquals(0, layout.unresolvedGlyphCount)
+                    RasterSurface(280, 32)
+                        .use { surface ->
+                            surface
+                                .draw { canvas ->
+                                    canvas.clear(Color.Black)
+                                    canvas.drawText(layout)
+                                }
+                            var ink = false
+                            val pixels = surface.readPixels()
+                            for (index in 0L..<pixels.size / 4L)
+                                if ((pixels[index * 4L].toInt() and 255) > 0) ink = true
+                            assertTrue(ink)
+                        }
+                } finally {
+                    lease.close()
+                }
+                assertTrue(layout.isClosed)
+            }
+    }
+
+    @Test
+    fun retainedFramesKeepTheirPixelsAndFontSnapshotAfterEvictionAndSourceClose() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                val cache = TerminalGlyphCache(fonts, appearance, maxEntries = 2L)
+                val terminal = Terminal(10L, 1L)
+                terminal.setColors(appearance.colorTheme())
+                terminal.feed("a != b\r".toByteArray())
+                val reading = terminal.reading
+                val geometry = GridGeometry(
+                    Size(160.0, 32.0), cache.metrics, 0L, reading.lines(0L, 1L),
+                    10L, 1L, reading.screenRevision, true, reading
+                )
+                try {
+                    TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                        .use { frame ->
+                            frame.shape([], "")
+                            val before = cacheFramePixels(frame)
+                            fonts
+                                .register(
+                                    includeBytes("data/FiraCode-Regular.ttf"),
+                                    "Another Alias"
+                                )
+                            assertFalse(cache.canReuse(fonts, appearance))
+                            fonts.close()
+                            for (index in 0L..<10L)
+                                cache.acquire(index.toString(), false, false, Color.White).close()
+                            val after = cacheFramePixels(frame)
+                            assertEquals(before.size, after.size)
+                            for (index in 0L..<before.size)
+                                assertEquals(before[index], after[index])
+                            val cursor = frame.cursorGlyph(reading.cursor) ?:
+                                fail(Some("missing cursor glyph"))
+                            cursor
+                                .use { value ->
+                                    assertEquals("a", value.layout.text)
+                                    assertEquals(0, value.layout.unresolvedGlyphCount)
+                                }
+                            assertEquals(2L, cache.cachedCount)
+                        }
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+}
+
+private fun cacheFramePixels(frame: TerminalFrame): Array<Byte> = RasterSurface(160, 32)
+    .use { surface ->
+        surface.draw { canvas -> frame.drawScreen(canvas) }
+        surface.readPixels()
+    }

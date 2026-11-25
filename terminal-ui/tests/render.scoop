@@ -122,13 +122,22 @@ private class TerminalGlyphCacheTest {
                 val cache = TerminalGlyphCache(fonts, TerminalAppearance())
                 try {
                     val cell = TerminalCell("中", 1L, intrinsicWidth = 2L)
-                    val layout = cache.layout(cell, Color.White)
-                    assertEquals("�", layout.text)
-                    assertEquals("中", cell.text)
-                    assertTrue(layout === cache.layout(TerminalCell("�"), Color.White))
-                    assertEquals("中", cache.layout(TerminalCell("中", 2L), Color.White).text)
+                    cache
+                        .acquire(cell, Color.White)
+                        .use { placeholder ->
+                            assertEquals("�", placeholder.layout.text)
+                            assertEquals("中", cell.text)
+                            cache
+                                .acquire(TerminalCell("�"), Color.White)
+                                .use { again -> assertTrue(placeholder.layout === again.layout) }
+                        }
+                    cache
+                        .acquire(TerminalCell("中", 2L), Color.White)
+                        .use { wide -> assertEquals("中", wide.layout.text) }
                     val mark = TerminalCell("\u0301", dottedCircle = true)
-                    assertEquals("◌\u0301", cache.layout(mark, Color.White).text)
+                    cache
+                        .acquire(mark, Color.White)
+                        .use { dotted -> assertEquals("◌\u0301", dotted.layout.text) }
                     assertEquals("\u0301", mark.text)
                 } finally {
                     cache.release()
@@ -142,18 +151,28 @@ private class TerminalGlyphCacheTest {
             .use { fonts ->
                 val cache = TerminalGlyphCache(fonts, TerminalAppearance())
                 val cell = TerminalCell("A", 1L, TerminalStyle())
-                val plain = cache.layout(cell, Color.White)
+                val lease = cache.acquire(cell, Color.White)
+                val plain = lease.layout
                 cache.retain()
                 cache.release()
                 try {
-                    assertTrue(plain === cache.layout(cell, Color.White))
-                    assertTrue(plain !== cache.layout(cell, Color.Black))
+                    cache
+                        .acquire(cell, Color.White)
+                        .use { same -> assertTrue(plain === same.layout) }
+                    cache
+                        .acquire(cell, Color.Black)
+                        .use { recolored -> assertTrue(plain !== recolored.layout) }
                     val bold = TerminalCell("A", 1L, TerminalStyle(flags = 1))
-                    assertTrue(plain !== cache.layout(bold, Color.White))
+                    cache
+                        .acquire(bold, Color.White)
+                        .use { heavier -> assertTrue(plain !== heavier.layout) }
                     assertTrue(!plain.isClosed)
                 } finally {
                     cache.release()
                 }
+                assertFalse(plain.isClosed)
+                lease.close()
+                lease.close()
                 assertTrue(plain.isClosed)
             }
     }

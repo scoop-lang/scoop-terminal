@@ -1,0 +1,21 @@
+package scoop.ui.terminal
+
+import scoop.compiler.includeBytes
+import scoop.graphics.Color
+import scoop.graphics.text.FontCollection
+
+internal fun terminalTestFonts(): FontCollection {
+    val fonts = FontCollection(false)
+    try {
+        fonts.register(includeBytes("data/FiraCode-Regular.ttf"), "Terminal Test Mono")
+        return fonts
+    } catch (error: Throwable) {
+        fonts.close()
+        throw error
+    }
+}
+
+internal fun terminalTestAppearance(): TerminalAppearance = TerminalAppearance(
+    families = ["Terminal Test Mono"], fontSize = 20.0,
+    foreground = Color.White, background = Color.Black
+)
