@@ -147,6 +147,8 @@ PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty �
 
 真实参考终端：Kitty 0.51.0、Ghostty 1.4.0 各录制 12 组字节与回包，使用其实际像素尺寸回放到核心。发现 Kitty 放置后光标多下移一行：固定实现与两个终端实际使用最后一行，已修复并明确记录与协议文字的取舍；Kitty 定向回归 19/19 通过，修复后的放置 ACK／CPR 完全相同。OSC 终止符、feature query 和 Sixel 支持范围的差异逐项写入 [兼容性报告](compatibility.md)，未将它们隐去或计为等价支持。原始输入及回复归档，专用窗口与进程结束，录制临时 JSON 清理；xterm 源码参考仍留到 Linux 对照结束。
 
+本机最终常规回归：核心 186/186、UI 97/97，能力表／图片 fixture 生成一致性与 terminfo 语法通过。完整 demo 发现两个独立用例重复创建进程唯一 Application；根据现有工具链的 `@Test(useProcess = true)` 合同标注窗口、剪贴板及窗口基准用例，恢复独立测试结构，完整 demo 2/2 和手动剪贴板 1/1 通过。窗口基准实跑确认隔离子进程与父进程各产生一份运行时统计，脚本分别记录，不混合 RSS 或分配。没有底层改动或新依赖。
+
 ## 后续执行约束
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。

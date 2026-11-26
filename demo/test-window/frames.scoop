@@ -19,7 +19,7 @@ import scoop.window.asyncio.*
 
 @Test
 private class TerminalNativeFrameBenchmark {
-    @Test
+    @Test(useProcess = true)
     @Ignore("manual desktop frame measurement")
     fun windowFrames() {
         val probe = NativeFrameProbe()

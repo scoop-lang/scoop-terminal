@@ -144,3 +144,5 @@ reflow 的 p95 从 M5 的 231.85 ms 降至 97.13 ms，累计耗时约减半，�
 | 1024 placements | 585.6 | 67.1 | 分配含逐次创建 placement 的协议事务；稳定帧没有重复解码／准备 |
 
 UHD 的完整 RGBA 等价像素为 31.64 MiB，Sixel 实际保留索引颜色面。`native_estimated_bytes` 是组件预算：每块按一份 native CPU 像素、可能的一份 GPU texture 及对象成本保守计费；**不是驱动报告的 GPU 显存**。本组 RasterSurface 在 CPU 绘制，不创建 GPU 渲染目标，也未取得独立 GPU 物理内存峰值。原生 `Image` 准备计数同样不冒充驱动 texture 上传遥测。每个场景清空缓存后权重归零、RIS 清掉 placements；擦除当前屏幕只裁去对应 Sixel 区域，不能用于断言屏外片段已释放。
+
+窗口测试使用 `@Test(useProcess = true)` 后重新验证了基准采集：[隔离进程记录](performance-window-isolation.json)。同一 120 次 PTY 交付得到 58 个 Accepted 样本，交付到 Accepted 的 p95 为 9.37 ms，退出后 1.35 秒无新帧；测试子进程峰值 RSS 116.9 MiB，调度父进程 19.0 MiB。脚本按子进程结束、父进程结束的顺序分别记录 `runtime` 与 `runner_runtime`，不相加或以父进程代替绘制进程。原基线数据仍保留其实际测试方式。

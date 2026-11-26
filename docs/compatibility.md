@@ -40,6 +40,8 @@ libsixel 是仅用于互操作测试的工具，没有加入组件运行依赖�
 
 `scoop --sysroot ../scoop/sysroot test --release demo` 包含真实窗口 resize、PTY 光标查询、PNG ACK、退出后最终画面及独立装饰的 Accepted 帧验证。选择、清除选择和纯 OSC 133 分割线更新不会增加父布局次数。无桌面环境时不能用该项代替无窗口测试。
 
+创建 `Application` 的窗口、原生剪贴板和窗口基准用例均标注 `@Test(useProcess = true)`。每个用例在独立子进程的主线程完成构造、hooks 和正文，因此完整套件不会重复初始化进程唯一的窗口应用；普通无窗口用例继续共享测试进程。完整 macOS 回归为核心 186 项、UI 97 项、demo 2 项通过，另有已单独执行的手动剪贴板、应用及性能场景。窗口基准脚本分别保存用例子进程和测试调度父进程的运行时指标。
+
 `TerminalNativeClipboardTest` 使用实际窗口的剪贴板 adapter，将 OSC 52 读取接入有序回复队列，验证其内容与原生读取一致、DSR 排在它之后、没有 pending 读取或错误。它只读取既有剪贴板，不替换内容，也不将内容写入日志。默认作为手动桌面测试忽略：
 
 ```sh

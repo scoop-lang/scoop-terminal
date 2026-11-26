@@ -14,7 +14,7 @@ import scoop.window.asyncio.*
 
 @Test
 private class TerminalWindowTest {
-    @Test
+    @Test(useProcess = true)
     fun nativeFrameResizeAndTerminalReplyReachTheChild() {
         val probe = WindowProbe()
         UiHost { host, active, event -> probe.onEvent(host, active, event) }

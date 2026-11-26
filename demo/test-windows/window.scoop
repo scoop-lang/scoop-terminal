@@ -16,7 +16,7 @@ import scoop.window.asyncio.*
 
 @Test
 private class ConPtyWindowTest {
-    @Test
+    @Test(useProcess = true)
     fun windowResizesAndRetainsWindowsShellOutput() {
         val probe = ConPtyWindowProbe()
         UiHost { host, active, event -> probe.onEvent(host, active, event) }

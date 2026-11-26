@@ -8,7 +8,7 @@ import scoop.window.*
 /** Reads the existing system clipboard without replacing any clipboard item or logging its content. */
 @Test
 private class TerminalNativeClipboardTest {
-    @Test
+    @Test(useProcess = true)
     @Ignore("manual desktop clipboard integration")
     fun osc52ReadsTheNativeClipboardBeforeTheFollowingDsr() {
         val handler = NativeClipboardProbe()

@@ -38,9 +38,13 @@ def run_case(root: Path, args, label: str, case: str) -> dict:
             records.append({key: int(value) if key != "name" else value for key, value in record.items()})
         if line.startswith('{"scoop_gc":'):
             metrics.append(json.loads(line))
-    if len(records) != 1 or len(metrics) != 1:
-        raise RuntimeError(f"{label}/{case}: expected one benchmark and one process metric record:\n{text}")
+    # useProcess desktop cases finish their child before the suite parent exits.
+    expected_metrics = 2 if case in DESKTOP else 1
+    if len(records) != 1 or len(metrics) != expected_metrics:
+        raise RuntimeError(f"{label}/{case}: expected one benchmark and {expected_metrics} process metric records:\n{text}")
     result = {"label": label, "case": case, **records[0], "runtime": metrics[0]}
+    if case in DESKTOP:
+        result["runner_runtime"] = metrics[1]
     print(f"{label}/{case}: {result['ns'] / 1e6:.2f} ms, "
           f"p95 {result['p95'] / 1e6:.3f} ms, "
           f"allocated {metrics[0]['allocated_bytes'] / 1048576:.1f} MiB, "

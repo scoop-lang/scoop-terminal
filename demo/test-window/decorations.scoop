@@ -16,7 +16,7 @@ import scoop.window.asyncio.*
 
 @Test
 private class TerminalNativeDecorationTest {
-    @Test
+    @Test(useProcess = true)
     fun selectionAndShellMarkersReachAcceptedFramesWithoutAnotherLayout() {
         val probe = DecorationProbe()
         UiHost { host, active, event -> probe.event(host, active, event) }
