@@ -65,15 +65,20 @@ def export_baseline(destination: Path, reference: str) -> None:
     view = view.replace('frame.shape([], "")', 'frame.shape(None, "")')
     view = view[:view.index("private fun prepareViewBenchmark")] + """private fun prepareViewBenchmark(terminal: Terminal, appearance: TerminalAppearance) {}
 private fun closeViewBenchmark(terminal: Terminal) {}
-private fun viewBenchmarkFrame(
-    terminal: Terminal, appearance: TerminalAppearance, cache: TerminalGlyphCache,
+private class BenchmarkFrames(private val cache: TerminalGlyphCache) : Closeable {
+    var builtRows = 0L
+    fun frame(
+    terminal: Terminal, appearance: TerminalAppearance,
     size: Size, columns: Long, rows: Long, scale: Long, revision: Long
 ): TerminalFrame {
+    builtRows += rows
     val geometry = GridGeometry(
         size, cache.metrics, terminal.historySize, terminal.lines(terminal.historySize, rows),
         columns, rows, terminal.screenRevision, true
     )
     return TerminalFrame(geometry, revision, terminal.cursor, 0L, appearance, cache)
+}
+    public override fun close() {}
 }
 """
     (destination / "terminal-ui/tests/benchmarks.scoop").write_text(view)
@@ -113,6 +118,7 @@ def main() -> None:
         parser.error("repetitions must be positive")
     report = {"timestamp": datetime.now(timezone.utc).isoformat(), "machine": platform.machine(),
               "platform": platform.platform(), "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+              "working_tree_changes": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)),
               "toolchain": subprocess.check_output([str(args.scoop), "--version"], text=True).strip(), "results": []}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="scoop-terminal-baseline-") as temporary:

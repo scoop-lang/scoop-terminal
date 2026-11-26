@@ -49,6 +49,7 @@ private class TerminalViewElement(
     private var clipboardAdapter: WindowTerminalClipboardAdapter? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
+    private var rowCache: TerminalRowCache? = None
     private var imageCache: TerminalImageCache? = None
     private var fontSubscription: Closeable? = None
     private var observedScreen = session.reading.screenRevision
@@ -167,6 +168,7 @@ private class TerminalViewElement(
             controller.unbind()
             if (ownsController) controller.close()
             accepted = None
+            rowCache?.clear()
             imageCache?.clear()
             selecting = false
             reported = TerminalMouseButton.NonePressed
@@ -196,6 +198,8 @@ private class TerminalViewElement(
         accepted = None
         fontSubscription?.close()
         fontSubscription = None
+        rowCache?.close()
+        rowCache = None
         glyphCache?.release()
         glyphCache = None
         imageCache?.close()
@@ -330,6 +334,17 @@ private class TerminalViewElement(
         return next
     }
 
+    private fun rows(glyphs: TerminalGlyphCache): TerminalRowCache {
+        when (rowCache) {
+            case Some(val cache) -> if (cache.canReuse(glyphs)) return cache
+            case None -> {}
+        }
+        rowCache?.close()
+        val cache = TerminalRowCache(glyphs)
+        rowCache = Some(cache)
+        return cache
+    }
+
     public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
         TerminalViewLayout
     > {
@@ -368,7 +383,8 @@ private class TerminalViewElement(
         controller.layoutStarted(paintRevision)
         val frame = TerminalFrame(
             geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
-            props.value.options.commandSeparators, Some(images), props.value.options.onImageError
+            props.value.options.commandSeparators, Some(images), props.value.options.onImageError,
+            Some(rows(glyphs))
         )
         try {
             frame.shape(viewport.ranges(), composition.text)

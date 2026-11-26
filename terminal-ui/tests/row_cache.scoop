@@ -1,0 +1,219 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalRowCacheTest {
+    @Test
+    fun scrollingAndOneCellEditsReuseUnchangedRowsWithTheSamePixels() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                Terminal(24L, 3L)
+                    .use { terminal ->
+                        terminal.setColors(appearance.colorTheme())
+                        terminal.feed("aa == bb\r\ncc <= dd\r\nee != ff".toByteArray())
+                        val glyphs = TerminalGlyphCache(fonts, appearance)
+                        val rows = TerminalRowCache(glyphs)
+                        try {
+                            rowCacheFrame(terminal, glyphs, Some(rows), appearance)
+                                .use { first ->
+                                    val oldPixels = terminalRunPixels(first)
+                                    assertEquals(3L, rows.buildCount)
+                                    terminal.feed("\r\ngg -> hh".toByteArray())
+                                    compareRowCacheFrame(terminal, glyphs, rows, appearance)
+                                    assertEquals(4L, rows.buildCount)
+                                    assertTrue(
+                                        sameTerminalPixels(oldPixels, terminalRunPixels(first))
+                                    )
+                                    terminal.feed("\u001b[2;2HX".toByteArray())
+                                    compareRowCacheFrame(terminal, glyphs, rows, appearance)
+                                    assertEquals(5L, rows.buildCount)
+                                    terminal.feed("\u001b[1;1H".toByteArray())
+                                    compareRowCacheFrame(terminal, glyphs, rows, appearance)
+                                    assertEquals(5L, rows.buildCount)
+                                    terminal.feed("\u001b]10;#22ff66\u0007".toByteArray())
+                                    compareRowCacheFrame(terminal, glyphs, rows, appearance)
+                                    assertEquals(8L, rows.buildCount)
+                                    terminal.resize(12L, 3L)
+                                    compareRowCacheFrame(terminal, glyphs, rows, appearance)
+                                    assertEquals(11L, rows.buildCount)
+                                    assertTrue(
+                                        sameTerminalPixels(oldPixels, terminalRunPixels(first))
+                                    )
+                                }
+                        } finally {
+                            rows.close();
+                            glyphs.release()
+                        }
+                    }
+            }
+    }
+
+    @Test
+    fun evictionBudgetAndOwnerClosureKeepOldFramesAndCursorFragmentsAlive() {
+        val fonts = terminalTestFonts()
+        val appearance = terminalTestAppearance().{ligatures: TerminalLigatures.AtCursor}
+        val terminal = Terminal(24L, 3L)
+        terminal.setColors(appearance.colorTheme())
+        terminal
+            .feed(
+                "\u001b]8;id=cache;https://example.test\u001b\\\u001b[4:3m==>\u001b[0m\u001b]8;;\u001b\\\r\nsecond\r\nthird"
+                    .toByteArray()
+            )
+        val glyphs = TerminalGlyphCache(fonts, appearance)
+        val rows = TerminalRowCache(glyphs, maxEntries = 1L, maxBytes = 16384L)
+        val first = rowCacheFrame(terminal, glyphs, Some(rows), appearance)
+        var ownerOpen = true
+        try {
+            val cursor = TerminalCursor(0L, 1L, true)
+            val original = terminalRunPixels(first, Some(cursor))
+            assertTrue(rows.cachedCount <= 1L)
+            assertTrue(rows.estimatedBytes <= 16384L)
+            terminal.feed("\r\nreplacement".toByteArray())
+            rowCacheFrame(terminal, glyphs, Some(rows), appearance).close()
+            rows.clear()
+            assertEquals(0L, rows.cachedCount)
+            assertEquals(0L, rows.estimatedBytes)
+            rows.close()
+            glyphs.release()
+            ownerOpen = false
+            fonts.close()
+            terminal.close()
+            assertTrue(sameTerminalPixels(original, terminalRunPixels(first, Some(cursor))))
+            first.cursorGlyph(cursor)!!.close()
+            first.close()
+            first.close()
+        } finally {
+            first.close()
+            rows.close()
+            if (ownerOpen) glyphs.release()
+            terminal.close()
+            fonts.close()
+        }
+    }
+
+    @Test
+    fun lruHitsDoNotRebuildAndOversizeRowsBypassResidentStorage() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                Terminal(24L, 3L)
+                    .use { terminal ->
+                        terminal.feed("one\r\ntwo\r\nthree".toByteArray())
+                        val glyphs = TerminalGlyphCache(fonts, appearance)
+                        try {
+                            val lines = terminal.reading.lines(0L, 3L)
+                            TerminalRowCache(glyphs, maxEntries = 2L)
+                                .use { rows ->
+                                    rows.acquire(lines[0L], 24L, terminal.reading).close()
+                                    rows.acquire(lines[1L], 24L, terminal.reading).close()
+                                    rows.acquire(lines[0L], 24L, terminal.reading).close()
+                                    rows.acquire(lines[2L], 24L, terminal.reading).close()
+                                    assertEquals(3L, rows.buildCount)
+                                    rows.acquire(lines[0L], 24L, terminal.reading).close()
+                                    assertEquals(3L, rows.buildCount)
+                                    rows.acquire(lines[1L], 24L, terminal.reading).close()
+                                    assertEquals(4L, rows.buildCount)
+                                    assertEquals(2L, rows.cachedCount)
+                                    val fixed = CellMetrics(8.0, 16.0, 12.0)
+                                    rows
+                                        .acquire(lines[1L], 24L, terminal.reading, fixed)
+                                        .use { lease ->
+                                            assertEquals(fixed, lease.layout.metrics)
+                                            assertEquals(8.0, lease.layout.cells[0L].bounds.width)
+                                        }
+                                    assertEquals(5L, rows.buildCount)
+                                    rows.acquire(lines[1L], 24L, terminal.reading, fixed).close()
+                                    assertEquals(5L, rows.buildCount)
+                                }
+                            TerminalRowCache(glyphs, maxBytes = 1L)
+                                .use { rows ->
+                                    val lease = rows.acquire(lines[0L], 24L, terminal.reading)
+                                    assertEquals(0L, rows.cachedCount)
+                                    assertEquals(0L, rows.estimatedBytes)
+                                    rows.close()
+                                    assertEquals("one", lease.layout.runs[0L].source.text)
+                                    lease.close()
+                                    lease.close()
+                                    assertFailsWith<IllegalStateException> {
+                                        lease.layout;
+                                        Unit
+                                    }
+                                }
+                        } finally {
+                            glyphs.release()
+                        }
+                    }
+            }
+    }
+
+    @Test
+    fun blankBackgroundsDoNotAnimateButVisibleBlinkDecorationsDo() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                val glyphs = TerminalGlyphCache(fonts, appearance)
+                try {
+                    Terminal(24L, 3L)
+                        .use { terminal ->
+                            terminal.feed("\u001b[44;5m\u001b[2J".toByteArray())
+                            rowCacheFrame(terminal, glyphs, None, appearance)
+                                .use { frame -> assertFalse(frame.hasBlink) }
+                            terminal.feed("\u001b[4m\u001b[K".toByteArray())
+                            rowCacheFrame(terminal, glyphs, None, appearance)
+                                .use { frame -> assertTrue(frame.hasBlink) }
+                            terminal.feed("\u001b[8m\u001b[2J".toByteArray())
+                            rowCacheFrame(terminal, glyphs, None, appearance)
+                                .use { frame -> assertFalse(frame.hasBlink) }
+                        }
+                } finally {
+                    glyphs.release()
+                }
+            }
+    }
+}
+
+private fun rowCacheFrame(
+    terminal: Terminal,
+    glyphs: TerminalGlyphCache,
+    cache: TerminalRowCache?,
+    appearance: TerminalAppearance
+): TerminalFrame {
+    val reading = terminal.reading
+    val geometry = GridGeometry(
+        Size(320.0, 100.0), glyphs.metrics, reading.historySize,
+        reading.lines(reading.historySize, reading.rows), reading.columns, reading.rows,
+        reading.screenRevision, true, reading
+    )
+    val frame = TerminalFrame(
+        geometry, reading.presentationVersion, reading.cursor, 0L,
+        appearance, glyphs, rowCache = cache
+    )
+    try {
+        frame.shape([], "");
+        return frame
+    } catch (error: Throwable) {
+        frame.close();
+        throw error
+    }
+}
+
+private fun compareRowCacheFrame(
+    terminal: Terminal,
+    glyphs: TerminalGlyphCache,
+    rows: TerminalRowCache,
+    appearance: TerminalAppearance
+) {
+    rowCacheFrame(terminal, glyphs, Some(rows), appearance)
+        .use { cached ->
+            rowCacheFrame(terminal, glyphs, None, appearance)
+                .use { fresh ->
+                    assertTrue(
+                        sameTerminalPixels(terminalRunPixels(fresh), terminalRunPixels(cached))
+                    )
+                }
+        }
+}

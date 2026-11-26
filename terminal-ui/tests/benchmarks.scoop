@@ -49,6 +49,7 @@ private fun viewBenchmark(columns: Long, rows: Long, scale: Long) {
             val terminal = Terminal(columns, rows, 10000L)
             prepareViewBenchmark(terminal, appearance)
             val cache = TerminalGlyphCache(fonts, appearance)
+            val frames = BenchmarkFrames(cache)
             try {
                 for (index in 0L..<rows)
                     terminal.feed(benchmarkOutput(index))
@@ -61,22 +62,23 @@ private fun viewBenchmark(columns: Long, rows: Long, scale: Long) {
                 val times = ArrayList<Long>()
                 var bytes = 0L
                 var initialShapes = 0L
+                var initialRows = 0L
                 val surface = RasterSurface(width, height)
                 try {
                     for (index in 0L..<208L) {
                         val payload = benchmarkOutput(rows + index)
                         val started = MonotonicTimeSource.now()
                         terminal.feed(payload)
-                        viewBenchmarkFrame(
-                            terminal,
-                            appearance,
-                            cache,
-                            size,
-                            columns,
-                            rows,
-                            scale,
-                            index
-                        )
+                        frames
+                            .frame(
+                                terminal,
+                                appearance,
+                                size,
+                                columns,
+                                rows,
+                                scale,
+                                index
+                            )
                             .use { frame ->
                                 frame.shape([], "")
                                 surface
@@ -86,9 +88,10 @@ private fun viewBenchmark(columns: Long, rows: Long, scale: Long) {
                                     }
                             }
                         val elapsed = (MonotonicTimeSource.now() - started).inWholeNanoseconds
-                        if (index < 16L)
+                        if (index < 16L) {
                             initialShapes = cache.shapeCount
-                        else {
+                            initialRows = frames.builtRows
+                        } else {
                             times.add(elapsed)
                             bytes += payload.size
                         }
@@ -108,9 +111,10 @@ private fun viewBenchmark(columns: Long, rows: Long, scale: Long) {
                         samples[last * 95L / 100L]
                     } p99=${samples[last * 99L / 100L]} shapes=${
                         cache.shapeCount - initialShapes
-                    } uploads=0"
+                    } uploads=0 row_builds=${frames.builtRows - initialRows}"
                 )
             } finally {
+                frames.close()
                 cache.release()
                 closeViewBenchmark(terminal)
             }
@@ -125,20 +129,29 @@ private fun closeViewBenchmark(terminal: Terminal) {
     terminal.close()
 }
 
-private fun viewBenchmarkFrame(
-    terminal: Terminal,
-    appearance: TerminalAppearance,
-    cache: TerminalGlyphCache,
-    size: Size,
-    columns: Long,
-    rows: Long,
-    scale: Long,
-    revision: Long
-): TerminalFrame {
-    val reading = terminal.reading
-    val geometry = GridGeometry(
-        size, cache.metrics, reading.historySize, reading.lines(reading.historySize, rows),
-        columns, rows, reading.screenRevision, true, reading, scale.toDouble()
-    )
-    return TerminalFrame(geometry, revision, reading.cursor, 0L, appearance, cache)
+private class BenchmarkFrames(private val cache: TerminalGlyphCache) : Closeable {
+    private val rowCache = TerminalRowCache(cache)
+    val builtRows: Long get() = rowCache.buildCount
+    fun frame(
+        terminal: Terminal,
+        appearance: TerminalAppearance,
+        size: Size,
+        columns: Long,
+        rows: Long,
+        scale: Long,
+        revision: Long
+    ): TerminalFrame {
+        val reading = terminal.reading
+        val geometry = GridGeometry(
+            size, cache.metrics, reading.historySize, reading.lines(reading.historySize, rows),
+            columns, rows, reading.screenRevision, true, reading, scale.toDouble()
+        )
+        return TerminalFrame(
+            geometry, revision, reading.cursor, 0L, appearance, cache,
+            rowCache = Some(rowCache)
+        )
+    }
+    public override fun close() {
+        rowCache.close()
+    }
 }

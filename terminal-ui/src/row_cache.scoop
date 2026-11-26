@@ -1,0 +1,254 @@
+package scoop.ui.terminal
+
+import scoop.collections.LinkedHashMap
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+
+internal struct TerminalRowCell(
+    val bounds: Rect,
+    val foreground: Color,
+    val background: Color,
+    val underline: TerminalUnderline,
+    val underlineColor: Color,
+    val struck: Boolean,
+    val blink: Boolean
+)
+
+internal struct TerminalRowLink(val bounds: Rect, val link: TerminalLink, val color: Color)
+
+/** A row-local layout can move vertically without rebuilding its runs or native leases. */
+internal class TerminalRowLayout(
+    val line: TerminalLine,
+    val columns: Long,
+    val metrics: CellMetrics,
+    private val glyphs: TerminalGlyphCache,
+    private val colors: TerminalColors,
+    readLink: (Long) -> TerminalLink?
+) {
+    private val foreground = colors.foreground.color()
+    private val background = colors.background.color()
+    val cells = ArrayList<TerminalRowCell>()
+    val runs = ArrayList<TerminalPaintRun>()
+    val links = ArrayList<TerminalRowLink>()
+    private var blinking = false
+    private var bytes = 512L + line.retainedBytes
+    private var references = 1L
+    val hasBlink: Boolean get() = blinking
+    val estimatedBytes: Long get() = bytes
+
+    init {
+        glyphs.retain()
+        try {
+            for (
+                run in terminalTextRuns(0L, line, columns) { column, cell ->
+                    addCell(column, cell, if (cell.linkId == 0L) None else readLink(cell.linkId))
+                }
+            ) {
+                runs.add(TerminalPaintRun(run, glyphs, metrics.width))
+                bytes += 512L + run.cells.size * 400L + run.text.byteLength * 2L
+            }
+            bytes += cells.size * 200L + links.size * 128L
+        } catch (error: Throwable) {
+            release()
+            throw error
+        }
+    }
+
+    private fun addCell(column: Long, cell: TerminalCell, link: TerminalLink?): TerminalRunStyle? {
+        val foregroundInk = resolveColor(cell.style.foreground, foreground, colors)
+        val backgroundInk = resolveColor(cell.style.background, background, colors)
+        val fullInk = if (cell.style.inverse) backgroundInk else foregroundInk
+        val paper = if (cell.style.inverse) foregroundInk else backgroundInk
+        val ink = if (cell.style.faint)
+            Color(
+                (fullInk.red + paper.red) / 2.0, (fullInk.green + paper.green) / 2.0,
+                (fullInk.blue + paper.blue) / 2.0, fullInk.alpha
+            )
+        else
+            fullInk
+        val visible = cell.text != "" && !cell.style.concealed
+        if (cell.style.blink &&
+            !cell.style.concealed &&
+            (visible || cell.style.underlined || cell.style.struck)
+        )
+            blinking = true
+        val rect = Rect(
+            column.toDouble() * metrics.width, 0.0,
+            cell.width.toDouble() * metrics.width, metrics.height
+        )
+        if (!cell.style.concealed) {
+            when (link) {
+                case Some(val value) -> {
+                    links.add(TerminalRowLink(rect, value, ink))
+                    bytes += value.uri.byteLength + (value.id?.byteLength ?: 0L)
+                    for (parameter in value.parameters)
+                        bytes += 64L + parameter.name.byteLength + parameter.value.byteLength
+                }
+
+                case None -> {}
+            }
+        }
+        if (visible || paper != background || cell.style.underlined || cell.style.struck)
+            cells
+                .add(
+                    TerminalRowCell(
+                        rect, ink, paper,
+                        if (cell.style.concealed)
+                            TerminalUnderline.None
+                        else
+                            cell.style.underlineStyle,
+                        resolveColor(cell.style.underlineColor, ink, colors),
+                        cell.style.struck && !cell.style.concealed, cell.style.blink
+                    )
+                )
+        return if (visible)
+            Some(TerminalRunStyle(cell.style.bold, cell.style.italic, ink, cell.style.blink))
+        else
+            None
+    }
+
+    fun acquire(): TerminalRowLease {
+        if (references == 0L) throw IllegalStateException(Some("terminal row layout is closed"))
+        references += 1L
+        return TerminalRowLease(this)
+    }
+
+    fun release() {
+        if (references == 0L) throw IllegalStateException(Some("terminal row layout is closed"))
+        references -= 1L
+        if (references != 0L) return
+        try {
+            for (run in runs)
+                run.close()
+            runs.clear()
+            cells.clear()
+            links.clear()
+        } finally {
+            glyphs.release()
+        }
+    }
+}
+
+internal class TerminalRowLease internal constructor(layout: TerminalRowLayout) : Closeable {
+    private var retained: TerminalRowLayout? = Some(layout)
+    val layout: TerminalRowLayout
+        get() = retained ?: throw IllegalStateException(Some("terminal row lease is closed"))
+    public override fun close() {
+        val previous = retained ?: return
+        retained = None
+        previous.release()
+    }
+}
+
+/** Bounded resident LRU. Frames separately retain rows evicted or replaced by later content. */
+internal class TerminalRowCache(
+    private val glyphs: TerminalGlyphCache,
+    private val maxEntries: Long = 256L,
+    private val maxBytes: Long = 8L * 1024L * 1024L
+) : Closeable {
+    private val rows = LinkedHashMap<Long, TerminalRowLayout>()
+    private var colors: TerminalColors? = None
+    private var bytes = 0L
+    private var builds = 0L
+    private var closed = false
+    val cachedCount: Long get() = rows.size
+    val estimatedBytes: Long get() = bytes
+    val buildCount: Long get() = builds
+
+    init {
+        if (maxEntries < 1L || maxBytes < 1L)
+            throw IllegalArgumentException(Some("terminal row cache limits must be positive"))
+        glyphs.retain()
+    }
+
+    fun canReuse(glyphs: TerminalGlyphCache): Boolean = !closed && this.glyphs === glyphs
+
+    fun acquire(line: TerminalLine, columns: Long, reading: TerminalReading): TerminalRowLease =
+        acquire(line, columns, reading, glyphs.metrics)
+
+    fun acquire(
+        line: TerminalLine,
+        columns: Long,
+        reading: TerminalReading,
+        metrics: CellMetrics
+    ): TerminalRowLease {
+        if (closed) throw IllegalStateException(Some("terminal row cache is closed"))
+        when (colors) {
+            case Some(val previous) -> if (previous !== reading.colors) clear()
+            case None -> {}
+        }
+        colors = Some(reading.colors)
+        when (rows.remove(line.id)) {
+            case Some(val previous) -> {
+                if (previous.line.cells ===
+                    line.cells &&
+                    previous.columns ==
+                    columns &&
+                    previous.metrics ==
+                    metrics
+                ) {
+                    rows[line.id] = previous
+                    return previous.acquire()
+                }
+                bytes -= previous.estimatedBytes
+                previous.release()
+            }
+
+            case None -> {}
+        }
+        val created = TerminalRowLayout(
+            line,
+            columns,
+            metrics,
+            glyphs,
+            reading.colors,
+            { id -> reading.link(id) }
+        )
+        builds += 1L
+        val lease = created.acquire()
+        rows[line.id] = created
+        bytes += created.estimatedBytes
+        while (rows.size > maxEntries || bytes > maxBytes) {
+            val entry = rows.iterator().next()!!
+            rows.remove(entry.key)
+            bytes -= entry.value.estimatedBytes
+            entry.value.release()
+        }
+        return lease
+    }
+
+    fun clear() {
+        for ((_, row) in rows)
+            row.release()
+        rows.clear()
+        bytes = 0L
+        colors = None
+    }
+
+    public override fun close() {
+        if (closed) return
+        closed = true
+        clear()
+        glyphs.release()
+    }
+}
+
+internal fun terminalRowWithoutCache(
+    line: TerminalLine,
+    columns: Long,
+    glyphs: TerminalGlyphCache,
+    reading: TerminalReading,
+    metrics: CellMetrics
+): TerminalRowLease {
+    val row = TerminalRowLayout(
+        line,
+        columns,
+        metrics,
+        glyphs,
+        reading.colors,
+        { id -> reading.link(id) }
+    )
+    val lease = row.acquire()
+    row.release()
+    return lease
+}

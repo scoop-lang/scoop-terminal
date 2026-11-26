@@ -62,18 +62,6 @@ internal struct GridGeometry(
     )
 }
 
-private struct PaintCell(
-    val bounds: Rect,
-    val foreground: Color,
-    val background: Color,
-    val underline: TerminalUnderline,
-    val underlineColor: Color,
-    val struck: Boolean,
-    val blink: Boolean
-)
-
-private struct PaintLink(val bounds: Rect, val link: TerminalLink, val color: Color)
-
 internal class TerminalFrame(
     val geometry: GridGeometry,
     val paintRevision: Long,
@@ -83,16 +71,15 @@ internal class TerminalFrame(
     private val glyphs: TerminalGlyphCache,
     private val commandSeparators: Boolean = false,
     private val imageCache: TerminalImageCache? = None,
-    private val onImageError: (Throwable) -> Unit = {}
+    private val onImageError: (Throwable) -> Unit = {},
+    private val rowCache: TerminalRowCache? = None
 ) : Closeable {
     private val colors = geometry.reading.colors
     private val foreground = colors.foreground.color()
     private val background = colors.background.color()
     private val cursorColor = colors.cursor.color()
-    private val cells = ArrayList<PaintCell>()
-    private val runs = ArrayList<TerminalPaintRun>()
+    private val rows = ArrayList<TerminalRowLease>()
     private val selection = ArrayList<Rect>()
-    private val links = ArrayList<PaintLink>()
     private val separators = ArrayList<Double>()
     private val images = TerminalImagePaint()
     private var preedit: TextLayout? = None
@@ -111,13 +98,20 @@ internal class TerminalFrame(
         }
         var index = 0L
         for (line in geometry.rows) {
-            val row = index
-            for (
-                run in terminalTextRuns(row, line, geometry.columns) { column, cell ->
-                    addCell(row, column, cell)
-                }
-            )
-                runs.add(TerminalPaintRun(run, glyphs, geometry.metrics.width))
+            val lease = when (rowCache) {
+                case Some(val cache) ->
+                    cache.acquire(line, geometry.columns, geometry.reading, geometry.metrics)
+                case None ->
+                    terminalRowWithoutCache(
+                        line,
+                        geometry.columns,
+                        glyphs,
+                        geometry.reading,
+                        geometry.metrics
+                    )
+            }
+            rows.add(lease)
+            blinkingText = blinkingText || lease.layout.hasBlink
             for (range in ranges) {
                 when (val selected = range.onRow(geometry.first + index, line)) {
                     case Some(val span) -> {
@@ -147,47 +141,6 @@ internal class TerminalFrame(
         }
     }
 
-    private fun addCell(row: Long, column: Long, cell: TerminalCell): TerminalRunStyle? {
-        val foregroundInk = resolveColor(cell.style.foreground, foreground, colors)
-        val backgroundInk = resolveColor(cell.style.background, background, colors)
-        val fullInk = if (cell.style.inverse) backgroundInk else foregroundInk
-        val paper = if (cell.style.inverse) foregroundInk else backgroundInk
-        val ink = if (cell.style.faint)
-            Color(
-                (fullInk.red + paper.red) / 2.0, (fullInk.green + paper.green) / 2.0,
-                (fullInk.blue + paper.blue) / 2.0, fullInk.alpha
-            )
-        else
-            fullInk
-        val visible = cell.text != "" && !cell.style.concealed
-        if (cell.style.blink && !cell.style.concealed) blinkingText = true
-        if (!cell.style.concealed) {
-            when (val link = geometry.reading.link(cell.linkId)) {
-                case Some(val value) ->
-                    links.add(PaintLink(geometry.rect(row, column, cell.width), value, ink))
-                case None -> {}
-            }
-        }
-        if (visible || paper != background || cell.style.underlined || cell.style.struck)
-            cells
-                .add(
-                    PaintCell(
-                        geometry.rect(row, column, cell.width), ink, paper,
-                        if (cell.style.concealed)
-                            TerminalUnderline.None
-                        else
-                            cell.style.underlineStyle,
-                        resolveColor(cell.style.underlineColor, ink, colors), cell.style.struck &&
-                            !cell.style.concealed,
-                        cell.style.blink
-                    )
-                )
-        return if (visible)
-            Some(TerminalRunStyle(cell.style.bold, cell.style.italic, ink, cell.style.blink))
-        else
-            None
-    }
-
     private val clip: Rect get() = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
 
     fun textCursorKey(cursor: TerminalCursor): Long = if (appearance.ligatures ==
@@ -214,20 +167,32 @@ internal class TerminalFrame(
         canvas.clipRect(clip)
         canvas.drawRect(clip, Paint(background))
         images.draw(canvas, 0)
-        for (cell in cells) {
-            if (cell.background != background) canvas.drawRect(cell.bounds, Paint(cell.background))
+        for (index in 0L..<rows.size) {
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (cell in rows[index].layout.cells) {
+                if (cell.background != background)
+                    canvas.drawRect(cell.bounds, Paint(cell.background))
+            }
+            canvas.restore()
         }
         images.draw(canvas, 1)
-        for (run in runs) {
-            if (!run.source.style.blink || blinkVisible)
-                run
-                    .draw(
-                        canvas, geometry,
-                        if (split && run.source.row == current.row) Some(current.column) else None
-                    )
-        }
-        for (cell in cells) {
-            if (!cell.blink || blinkVisible) drawDecoration(canvas, cell)
+        for (index in 0L..<rows.size) {
+            val row = rows[index].layout
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (run in row.runs) {
+                if (!run.source.style.blink || blinkVisible)
+                    run
+                        .draw(
+                            canvas, geometry,
+                            if (split && index == current.row) Some(current.column) else None
+                        )
+            }
+            for (cell in row.cells) {
+                if (!cell.blink || blinkVisible) drawDecoration(canvas, cell)
+            }
+            canvas.restore()
         }
         images.draw(canvas, 2)
         for (highlight in selection)
@@ -343,9 +308,14 @@ internal class TerminalFrame(
         val active = hovered ?: return
         canvas.save()
         canvas.clipRect(clip)
-        for (link in links) {
-            if (active.sameGroup(link.link))
-                drawUnderline(canvas, link.bounds, TerminalUnderline.Single, link.color)
+        for (index in 0L..<rows.size) {
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (link in rows[index].layout.links) {
+                if (active.sameGroup(link.link))
+                    drawUnderline(canvas, link.bounds, TerminalUnderline.Single, link.color)
+            }
+            canvas.restore()
         }
         canvas.restore()
     }
@@ -367,8 +337,8 @@ internal class TerminalFrame(
             resolveColor(cell.style.foreground, foreground, colors)
         else
             resolveColor(cell.style.background, background, colors)
-        for (run in runs) {
-            if (run.source.row == cursor.row && run.source.contains(cursor.column))
+        for (run in rows[cursor.row].layout.runs) {
+            if (run.source.contains(cursor.column))
                 return Some(
                     run
                         .cursorGlyph(
@@ -380,7 +350,7 @@ internal class TerminalFrame(
         return None
     }
 
-    private fun drawDecoration(canvas: Canvas, cell: PaintCell) {
+    private fun drawDecoration(canvas: Canvas, cell: TerminalRowCell) {
         val rect = cell.bounds
         val baseline = geometry.metrics.baseline
         drawUnderline(canvas, rect, cell.underline, cell.underlineColor)
@@ -397,9 +367,9 @@ internal class TerminalFrame(
         closed = true
         try {
             preedit?.close()
-            for (run in runs)
-                run.close()
-            runs.clear()
+            for (row in rows)
+                row.close()
+            rows.clear()
         } finally {
             try {
                 images.close()
