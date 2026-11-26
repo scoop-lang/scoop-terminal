@@ -16,11 +16,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ("ascii120", "ascii240", "sgr120", "sgr240", "unicode120", "unicode240", "history100k", "reflow10k")
 VIEWS = ("paint120x1", "paint120x2", "paint240x1", "paint240x2")
+DESKTOP = ("windowFrames",)
 
 
 def run_case(root: Path, args, label: str, case: str) -> dict:
     environment = dict(os.environ, SCOOP_GC_STATS="1")
-    cone = "terminal-ui" if case in VIEWS else "emulator"
+    cone = "demo" if case in DESKTOP else "terminal-ui" if case in VIEWS else "emulator"
     command = [str(args.scoop), "--sysroot", str(args.sysroot), "test", "--release",
                str(root / cone), "--ignored", "--nocapture", "--filter", case]
     process = subprocess.run(command, cwd=root, env=environment, text=True,
@@ -85,6 +86,13 @@ private fun viewBenchmarkFrame(
     text = glyphs.read_text().replace("    private var references = 1L", "    private var references = 1L\n    var shapeCount = 0L")
     text = text.replace("        layouts[key] = value", "        shapeCount += 1L\n        layouts[key] = value")
     glyphs.write_text(text)
+    native = destination / "demo/test-window"
+    native.mkdir(exist_ok=True)
+    source = (ROOT / "demo/test-window/frames.scoop").read_text()
+    (native / "frames.scoop").write_text(source.replace("session.reading.", "session.terminal."))
+    manifest = destination / "demo/Cone.toml"
+    text = manifest.read_text().replace("[test-dependencies]", '[test-dependencies]\n"scoop:scoop.graphics" = "0.1.0"\n"scoop:scoop.surface" = "0.1.0"')
+    manifest.write_text(text + '\n[[test.sources]]\npath = "test-window"\n')
 
 
 def main() -> None:
@@ -94,7 +102,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="raw JSON report outside the repository")
     parser.add_argument("--label", default="working")
     parser.add_argument("--baseline", choices=("d990f72",), help="fixed design baseline with documented API-only adapters")
-    parser.add_argument("--cases", nargs="+", choices=CORE + VIEWS, default=list(CORE + VIEWS))
+    parser.add_argument("--cases", nargs="+", choices=CORE + VIEWS + DESKTOP, default=list(CORE + VIEWS))
     parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
     # The installed launcher selects its command by executable name; preserve its symlink path.

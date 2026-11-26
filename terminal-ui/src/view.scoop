@@ -4,7 +4,6 @@ import scoop.graphics.*
 import scoop.graphics.text.FontCollection
 import scoop.platform.system.OperatingSystem
 import scoop.platform.system.operatingSystem
-import scoop.platform.time.MonotonicInstant
 import scoop.platform.time.MonotonicTimeSource
 import scoop.surface.*
 import scoop.terminal.emulator.*
@@ -12,10 +11,6 @@ import scoop.time.Duration
 import scoop.ui.*
 import scoop.window.*
 import scoop.window.accessibility.*
-
-private val outputQuietInterval = Duration.milliseconds(24L)
-
-private val outputRefreshInterval = Duration.milliseconds(96L)
 
 /** Embeds one active view of the session, optionally focusing it on its first placement. */
 public fun terminalView(
@@ -37,10 +32,12 @@ private struct TerminalViewProps(
     val controller: TerminalViewController?
 )
 
+private class TerminalViewLayout(val frame: TerminalFrame, val text: VisibleText)
+
 private class TerminalViewElement(
     private val props: Props<TerminalViewProps>,
     scope: ComponentScope
-) : Element<TerminalFrame>(scope) {
+) : Element<TerminalViewLayout>(scope) {
     private var session = props.value.session
     private var controller = props.value.controller ?: TerminalViewController(session)
     private var ownsController = when (props.value.controller) {
@@ -81,14 +78,25 @@ private class TerminalViewElement(
         .createArea(focusable = true, textInput = true) { context, event -> route(context, event) }
     private val focus = scope.focusTarget(area)
     private val semantics = scope.semantics(SemanticRole.Text)
-    private var lastOutput = MonotonicInstant(0L, 0)
-    private var outputRefreshLimit: MonotonicInstant? = None
-    private val refreshDeadline = scope.createDeadline { refreshOutput() }
     private var cursorBlinkVisible = true
     private var textBlinkVisible = true
     private val cursorBlinkDeadline = scope.createDeadline { blinkCursor() }
     private val textBlinkDeadline = scope.createDeadline { blinkText() }
     private var visibleTextBlinks = false
+    private val activitySubscription = scope
+        .observeWindowActivity { activity ->
+            if (!activity.focused || !activity.visible || activity.occluded) {
+                cursorBlinkDeadline.cancel()
+                textBlinkDeadline.cancel()
+                cursorBlinkVisible = true
+                textBlinkVisible = true
+                cancelInteraction()
+                scope.requestFrame()
+            } else {
+                resetCursorBlink()
+                scope.requestFrame()
+            }
+        }
     private val composition = TerminalComposition(
         scope.nativeWindow, area,
         { value -> session.send(TerminalInput.Text(value)) },
@@ -101,7 +109,6 @@ private class TerminalViewElement(
         semantics.bindFocus(Some(focus))
         attach()
         resetCursorBlink()
-        textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
         if (props.value.autoFocus) focus.handle.requestFocus()
     }
 
@@ -177,10 +184,9 @@ private class TerminalViewElement(
 
     public override fun onUnmount() {
         cancelInteraction()
-        refreshDeadline.cancel()
-        outputRefreshLimit = None
         cursorBlinkDeadline.cancel()
         textBlinkDeadline.cancel()
+        activitySubscription.close()
         attachment?.dispose()
         attachment = None
         controller.unbind()
@@ -210,61 +216,91 @@ private class TerminalViewElement(
         val moved = cursor != observedCursor
         if (moved) resetCursorBlink()
         observedCursor = cursor
+        updateBlinkSchedules(cursor)
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
             if (colorsChanged || commandsChanged || imagesChanged)
                 refresh()
-            else if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
+            else if (moved && viewport.atBottom) scope.requestFrame()
             return
         }
         observedScreen = screen
-        val now = MonotonicTimeSource.now()
-        lastOutput = now
-        if (outputRefreshLimit == None) {
-            outputRefreshLimit = Some(now + outputRefreshInterval)
-            refreshDeadline.schedule(now + outputQuietInterval)
-        }
+        refresh()
     }
 
     private fun resetCursorBlink() {
         cursorBlinkVisible = true
-        cursorBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
+        cursorBlinkDeadline.cancel()
+    }
+
+    private fun canBlink(): Boolean {
+        if (!scope.isMounted ||
+            !scope.isFrameEnabled ||
+            !area.isFocusActive ||
+            area.visibleBounds ==
+            None ||
+            !scope.nativeWindow.isVisible ||
+            scope.nativeWindow.isOccluded
+        )
+            return false
+        return when (session.state) {
+            case Running -> true
+            case _ -> false
+        }
+    }
+
+    private fun cursorCanBlink(cursor: TerminalCursor): Boolean = canBlink() &&
+        viewport.atBottom &&
+        cursor.visible &&
+        cursor.blink &&
+        area.visibleCaretBounds !=
+        None &&
+        composition.text ==
+        ""
+
+    private fun updateBlinkSchedules(cursor: TerminalCursor, arm: Boolean = false) {
+        val wasCursorVisible = cursorBlinkVisible
+        val wasTextVisible = textBlinkVisible
+        if (cursorCanBlink(cursor)) {
+            if (arm && !cursorBlinkDeadline.isScheduled)
+                cursorBlinkDeadline
+                    .schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
+        } else {
+            cursorBlinkDeadline.cancel()
+            cursorBlinkVisible = true
+        }
+        if (canBlink() && visibleTextBlinks) {
+            if (arm && !textBlinkDeadline.isScheduled)
+                textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
+        } else {
+            textBlinkDeadline.cancel()
+            textBlinkVisible = true
+        }
+        if (wasCursorVisible != cursorBlinkVisible || wasTextVisible != textBlinkVisible)
+            scope.requestFrame()
     }
 
     private fun blinkCursor() {
-        if (!scope.isMounted) return
+        if (!cursorCanBlink(session.reading.cursor)) return
         cursorBlinkVisible = !cursorBlinkVisible
-        if (area.isFocusActive && session.reading.cursor.blink) scope.requestFrame()
-        cursorBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
+        scope.requestFrame()
+        // Only a successfully presented scene may request another tick.
     }
 
     private fun blinkText() {
-        if (!scope.isMounted) return
+        if (!canBlink() || !visibleTextBlinks) return
         textBlinkVisible = !textBlinkVisible
-        if (area.isFocusActive && visibleTextBlinks) scope.requestFrame()
-        textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
-    }
-
-    private fun refreshOutput() {
-        // Coalesce a burst until it quiets down, with a deadline for sustained output.
-        val limit = outputRefreshLimit ?: return
-        val quiet = lastOutput + outputQuietInterval
-        val next = if (quiet < limit) quiet else limit
-        if (MonotonicTimeSource.now() < next) {
-            refreshDeadline.schedule(next)
-        } else {
-            outputRefreshLimit = None
-            refresh()
-        }
+        scope.requestFrame()
     }
 
     private fun refresh() {
         controller.synchronize()
-        if (outputRefreshLimit != None) {
-            outputRefreshLimit = None
-            refreshDeadline.cancel()
-        }
-        val visible = viewport.visibleText()
+        area.setCaret(None, Some(composition.revision))
+        // The UI root coalesces layout requests until its next eligible frame.
+        scope.requestLayout()
+    }
+
+    private fun updateSemantics(visible: VisibleText) {
         semantics
             .update(
                 SemanticProperties(
@@ -272,8 +308,6 @@ private class TerminalViewElement(
                     readOnly = true, selection = visible.selection
                 )
             )
-        area.setCaret(None, Some(composition.revision))
-        scope.requestLayout()
     }
 
     private fun glyphs(fonts: FontCollection, appearance: TerminalAppearance): TerminalGlyphCache {
@@ -297,7 +331,7 @@ private class TerminalViewElement(
     }
 
     public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
-        TerminalFrame
+        TerminalViewLayout
     > {
         val appearance = props.value.appearance
         val glyphs = glyphs(scope.defaultFonts, appearance)
@@ -338,14 +372,16 @@ private class TerminalViewElement(
         )
         try {
             frame.shape(viewport.ranges(), composition.text)
-            return LayoutResult(LayoutMetrics(size), frame, { frame.close() })
+            val layout = TerminalViewLayout(frame, viewport.visibleText())
+            return LayoutResult(LayoutMetrics(size), layout, { frame.close() })
         } catch (error: Throwable) {
             frame.close()
             throw error
         }
     }
 
-    public override fun scene(context: SceneContext, measured: TerminalFrame) {
+    public override fun scene(context: SceneContext, layout: TerminalViewLayout) {
+        val measured = layout.frame
         val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
         val owner = session
         val geometry = measured.geometry
@@ -360,6 +396,7 @@ private class TerminalViewElement(
         context.place(area, bounds)
         context.semantics(semantics, bounds)
         visibleTextBlinks = measured.hasBlink
+        updateBlinkSchedules(cursor)
         val textVisible = !area.isFocusActive || textBlinkVisible || !measured.hasBlink
         val textCursor = measured.textCursorKey(cursor)
         if (screenPaintFrame !=
@@ -414,7 +451,9 @@ private class TerminalViewElement(
                     FrameSubmission.Accepted
                 ) {
                     accepted = Some(geometry)
+                    updateSemantics(layout.text)
                     controller.frameAccepted(geometry, measured.paintRevision)
+                    updateBlinkSchedules(cursor, arm = true)
                     updateHover(geometry)
                     if (geometry.columns > 0L && geometry.requestedRows > 0L)
                         owner
@@ -475,6 +514,7 @@ private class TerminalViewElement(
                     // The surface also delivers focus loss during retirement.
                     if (scope.isMounted) {
                         resetCursorBlink()
+                        updateBlinkSchedules(session.reading.cursor)
                         scope.requestFrame()
                     }
                 }

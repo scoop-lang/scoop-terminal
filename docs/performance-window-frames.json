@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-11-26T09:51:10.690773+00:00",
+  "machine": "arm64",
+  "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+  "commit": "640942c72d20bb00eef2b440056504f44fbf38a3",
+  "toolchain": "scoop 0.0.0-dev.20261126 (bb295704db1ae4592a065fa424dead159cfd5d84)",
+  "results": [
+    {
+      "label": "d990f72",
+      "case": "windowFrames",
+      "name": "window",
+      "columns": 113,
+      "rows": 40,
+      "scale_milli": 2000,
+      "bytes": 0,
+      "samples": 11,
+      "ns": 107693000,
+      "p50": 6545000,
+      "p95": 27869000,
+      "p99": 27869000,
+      "interval_p50": 99538000,
+      "interval_p95": 100960000,
+      "interval_p99": 100960000,
+      "delivered": 120,
+      "idle_frames": 0,
+      "runtime": {
+        "allocated_bytes": 12396080,
+        "pause_ns": 8938000,
+        "maximum_pause_ns": 337000,
+        "current_rss_bytes": 121651200,
+        "peak_rss_bytes": 121864192
+      },
+      "iteration": 1
+    },
+    {
+      "label": "frames",
+      "case": "windowFrames",
+      "name": "window",
+      "columns": 113,
+      "rows": 40,
+      "scale_milli": 2000,
+      "bytes": 0,
+      "samples": 57,
+      "ns": 275065000,
+      "p50": 4575000,
+      "p95": 8608000,
+      "p99": 8990000,
+      "interval_p50": 16661000,
+      "interval_p95": 17185000,
+      "interval_p99": 18726000,
+      "delivered": 120,
+      "idle_frames": 0,
+      "runtime": {
+        "allocated_bytes": 11912528,
+        "pause_ns": 15418000,
+        "maximum_pause_ns": 340000,
+        "current_rss_bytes": 122175488,
+        "peak_rss_bytes": 122322944
+      },
+      "iteration": 1
+    }
+  ],
+  "hardware": "Apple M3 Ultra, 512 GiB RAM",
+  "working_tree": "next eligible frame scheduling and accepted-frame blink deadlines"
+}

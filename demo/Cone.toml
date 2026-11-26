@@ -20,8 +20,13 @@ path = "src"
 "scoop:scoop.ui.terminal" = { version = "0.1.0", path = "../terminal-ui" }
 
 [test-dependencies]
+"scoop:scoop.graphics" = "0.1.0"
+"scoop:scoop.surface" = "0.1.0"
 "scoop:scoop.terminal.emulator" = { version = "0.1.0", path = "../emulator" }
 "scoop:scoop.test" = "0.1.0"
+
+[[test.sources]]
+path = "test-window"
 
 [[test.sources]]
 path = "tests"
