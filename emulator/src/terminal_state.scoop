@@ -15,7 +15,8 @@ internal class TerminalState(
     trackingLimits: TerminalTrackingLimits,
     commandLimits: TerminalCommandLimits,
     imageLimits: TerminalImageLimits,
-    val graphics: TerminalGraphicsSupport = TerminalGraphicsSupport()
+    val graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(),
+    val imageDecoder: TerminalImageDecoder? = None
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges(
@@ -29,6 +30,12 @@ internal class TerminalState(
         { message -> emit(TerminalEffect.Diagnostic(message)) }
     )
     val commands = TerminalCommands(tracking, commandLimits)
+    val kitty = TerminalKitty(this)
+    val hasImageDecoder: Boolean
+        get() = when (imageDecoder) {
+            case Some(_) -> true;
+            case None -> false
+        }
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
     init {
@@ -85,6 +92,7 @@ internal class TerminalState(
     fun finishOutput(): TerminalUpdate {
         val before = committed
         parser.finish()
+        kitty.cancel()
         combining = None
         commands.finish(this, main)
         commands.finish(this, alternate)
@@ -399,7 +407,7 @@ internal class TerminalState(
                 sixelString(this, command)
             else
                 queryString(this, command)
-        case Apc -> None
+        case Apc -> kittyString(this)
     }
 
     fun beginGraphics() {
@@ -487,6 +495,7 @@ internal class TerminalState(
 
     fun switchScreen(enabled: Boolean, save: Boolean, clear: Boolean) {
         if (alternateScreen == enabled) return
+        kitty.cancel()
         if (enabled && save) saveCursor()
         alternateScreen = enabled
         if (enabled && clear) {
@@ -530,6 +539,7 @@ internal class TerminalState(
     }
 
     private fun reset() {
+        kitty.cancel()
         setSynchronizedOutput(false)
         colorState.reset()
         progressPercent = None

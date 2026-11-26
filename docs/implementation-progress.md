@@ -36,7 +36,7 @@
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
 | M5 | 图片 store/decoder/cache、预算 | 原生 tile 缓存、帧租约与绘制已接入，新增 9 项及完整 UI 86 项通过；Kitty RGBA 线性／z 层次随协议接入验收 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，真实窗口对照待集中验收 |
-| M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
+| M5 | Kitty 静态 profile、分块、放置/删除/探测 | 核心已实现，18 项协议及完整核心 178 项通过；桌面 RGBA／PNG／z 绘制验收后默认启用 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
 | M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 待实现 |
 | M6 | Linux 本轮完整回归 | 待本机完成后执行 |
@@ -113,6 +113,10 @@ Sixel 协议：`TerminalSixelProtocolTest` 8/8，相关解码 6/6、store 9/9、
 原生图片与视图：`TerminalImageCacheTest` 4/4、`TerminalImagePaintTest` 5/5，随后完整 `terminal-ui` 86/86；`scoop check --release demo --tests` 通过。缓存只准备可见 64×64 块，未变索引块可跨擦除版本复用；共享 palette 或不同会话 namespace 会生成不同上传。实际 CPU 光栅验证最近邻像素、双倍 DPI、窗口裁剪、历史浏览、改色前后两个冻结帧，以及核心和缓存关闭后仍能绘制旧帧。选择、搜索、光标和 OSC 133 分割线在图片上保持可见。预算测试覆盖旧帧固定的资源、LRU 淘汰、配置缩小、重复释放和完整回收；实际 worker 不能使用或关闭窗口 owner 的原生资源。
 
 原生预算默认 128 MiB，保守计入 CPU native copy、可能的 GPU texture、对象和帧引用；另限 4096 缓存条目和 8192 tile／帧。若准备中途失败，该 placement 的临时帧引用全部撤回，避免半幅图片；每帧通过 `onImageError` 报告首次错误。缓存本身可保留已上传的块供重试，旧帧独立存活。此处为光栅与所有权验证，不等同于实际 GPU／RSS 测量；RGBA 邻边采样和 Kitty z 层在 Kitty 协议完成后补像素回归。桌面 `start()` 默认启用 Sixel，核心仍要求显式开启。本轮没有下载或临时文件。
+
+Kitty 静态核心：`TerminalKittyTransferTest` 6/6、`TerminalKittyLayoutTest` 6/6、`TerminalKittyDeleteTest` 4/4、`TerminalKittyQueryTest` 2/2，随后完整 `emulator` 178/178。APC 接入内联 RGB／RGBA／PNG、Base64 分块及 Zlib，普通查询实际验证完整数据且不回收已有图片；特性查询忽略 payload、不扰动待完成传输，只回显实现的非默认键。真实 PNG adapter 在桌面阶段接入，本组核心 PNG 使用确定性 decoder，并验证 CRC／长度错误不会调用它。每个字节边界回放验证图片发布、光标查询和 DA 回复顺序。
+
+布局／生命周期覆盖最后一块到达时的光标、c/r 保持比例、源裁剪、cell 偏移、缩小字体时夹紧偏移、C=1、image number／placement ID、替换、主备屏及同步输出。旧快照保留原像素与 placement；合法删除没有成功回包，大写选择器按剩余引用释放资源。后续块 q=0／省略继承先前 quiet，非零 q 更新 quiet；EOF、RIS 和真正的 buffer 切换取消未完成传输。小预算下连续 80 次上传优先回收无 placement 的资源，失败查询不改现存资源；取消、损坏数据和超限恢复 VT 并退还预算。本轮无下载和临时文件，固定 Kitty 源码参考继续用于绘制／兼容核对。
 
 ## 后续执行约束
 

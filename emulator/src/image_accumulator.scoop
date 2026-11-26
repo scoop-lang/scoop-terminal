@@ -1,10 +1,14 @@
 package scoop.terminal.emulator
 
 /** Model-owned pages; reserves the flattening overlap and drops page storage on every exit. */
-internal class ImageAccumulator(private val memory: ImageMemory, private val limit: Long) :
+internal class ImageAccumulator(
+    private val memory: ImageMemory,
+    private val limit: Long,
+    private val beforeAllocate: (Long) -> Unit = {}
+) :
     Closeable {
     private var pages = ArrayList<ImageBytes>()
-    private val reservation = memory.reserve(512L)
+    private val reservation = reserveImage(memory, 512L, beforeAllocate)
     private var ended = false
     private var length = 0L
     val size: Long get() = length
@@ -19,6 +23,7 @@ internal class ImageAccumulator(private val memory: ImageMemory, private val lim
 
     fun append(size: Long, produce: () -> Array<Byte>) {
         checkAdditional(size)
+        beforeAllocate(size + ImageBytes.overhead)
         appendOwned(ImageBytes.create(memory, size, produce))
     }
 
@@ -52,6 +57,7 @@ internal class ImageAccumulator(private val memory: ImageMemory, private val lim
             if (pages.size == 1L) return pages.removeAt(0L)
             val cursor = ImagePageCursor(pages)
             val count = length
+            beforeAllocate(count + ImageBytes.overhead)
             return ImageBytes.create(memory, count) { Array<Byte>(count) { cursor.next() } }
         } finally {
             close()

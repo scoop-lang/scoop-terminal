@@ -1,0 +1,143 @@
+package scoop.terminal.emulator
+
+import scoop.text.startsWith
+import scoop.test.*
+
+private struct KittyDeleteCase(
+    val selector: Char,
+    val fields: String,
+    val remaining: Array<Long>,
+    val upperResources: Long
+)
+
+@Test
+private class TerminalKittyDeleteTest {
+    @Test fun everyStaticSelectorAndItsCapitalVariantPreservesUnselectedHistoryReferences() {
+        val cases = [
+            KittyDeleteCase('a', "", [11L], 1L),
+            KittyDeleteCase('i', ",i=1", [21L, 31L], 2L),
+            KittyDeleteCase('n', ",I=7", [11L, 12L, 31L], 2L),
+            KittyDeleteCase('c', "", [11L, 21L, 31L], 3L),
+            KittyDeleteCase('p', ",x=4,y=2", [11L, 12L, 31L], 2L),
+            KittyDeleteCase('q', ",x=2,y=1,z=5", [11L, 21L, 31L], 3L),
+            KittyDeleteCase('r', ",x=1,y=2", [31L], 1L),
+            KittyDeleteCase('x', ",x=1", [12L, 21L, 31L], 3L),
+            KittyDeleteCase('y', ",y=1", [11L, 21L, 31L], 3L),
+            KittyDeleteCase('z', ",z=5", [11L, 31L], 2L)
+        ]
+        for (test in cases) {
+            for (upper in [false, true]) {
+                val state = kittyDeleteState()
+                try {
+                    val selector = if (upper) (test.selector.code - 32).toChar() else test.selector
+                    val command = f"a=d,d=${selector}" + test.fields
+                    val result = state.feed(("\u001b[1;2H" + kittyCommand(command)).toByteArray())
+                    assertEquals(0L, kittyTestReplies(result).size)
+                    assertKittyPlacements(state, test.remaining)
+                    assertEquals(
+                        if (upper) test.upperResources else 3L,
+                        state.images.kittyResources(state.screen.bufferEpoch).size
+                    )
+                } finally {
+                    state.close()
+                }
+                assertEquals(0L, state.images.memory.bytes)
+            }
+        }
+    }
+
+    @Test fun placementIdLimitsDeletionAndUppercaseAlsoFreesUnplacedResources() {
+        val state = kittyDeleteState()
+        try {
+            state.feed(kittyCommand("a=d,d=I,i=1,p=12").toByteArray())
+            assertKittyPlacements(state, [11L, 21L, 31L])
+            assertEquals(3L, state.images.kittyResources(state.screen.bufferEpoch).size)
+            state.feed(kittyCommand("a=d,d=I,i=1,p=11").toByteArray())
+            assertKittyPlacements(state, [21L, 31L])
+            assertEquals(2L, state.images.kittyResources(state.screen.bufferEpoch).size)
+            state.feed(kittyCommand("a=t,i=99,f=24,s=1,v=1", "/wAA").toByteArray())
+            state.feed(kittyCommand("a=d,d=I,i=99,p=7").toByteArray())
+            assertEquals(3L, state.images.kittyResources(state.screen.bufferEpoch).size)
+            state.feed(kittyCommand("a=d,d=I,i=99").toByteArray())
+            assertEquals(2L, state.images.kittyResources(state.screen.bufferEpoch).size)
+            state.feed(kittyCommand("a=t,i=99,f=24,s=1,v=1", "/wAA").toByteArray())
+            state.feed(kittyCommand("a=d,d=R,x=1,y=99").toByteArray())
+            assertEquals(0L, state.images.kittyResources(state.screen.bufferEpoch).size)
+            assertEquals(0L, state.reading.images.placementCount)
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun deletionAbortsPendingDataButDoesNotAcknowledgeSuccessfulDeletion() {
+        val state = kittyDeleteState()
+        try {
+            val before = state.images.memory.bytes
+            state.feed(kittyCommand("a=t,i=99,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            assertTrue(state.images.memory.bytes > before)
+            val deleted = state.feed(kittyCommand("a=d,d=i,i=99").toByteArray())
+            assertEquals(0L, deleted.effects.size)
+            assertEquals(before, state.images.memory.bytes)
+            assertKittyPlacements(state, [11L, 12L, 21L, 31L])
+            state.feed(kittyCommand("a=t,i=99,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            val unsupported = state.feed(kittyCommand("a=d,d=F,i=1").toByteArray())
+            assertTrue(kittyTestReplies(unsupported)[0L].startsWith("\u001b_Gi=1;ENOTSUP:"))
+            assertEquals(before, state.images.memory.bytes)
+            val defaultDelete = state.feed(kittyCommand("a=d").toByteArray())
+            assertEquals(0L, kittyTestReplies(defaultDelete).size)
+            assertKittyPlacements(state, [11L])
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun selectorsUseTheRequestedCellRectangleIncludingLetterboxSpace() {
+        val state = kittyTestState()
+        try {
+            state.feed(kittyCommand("a=T,i=1,f=24,s=2,v=1,c=1,r=3,C=1", "/wAAAP8A").toByteArray())
+            assertEquals(1L, state.reading.images.placementCount)
+            state.feed(kittyCommand("a=d,d=p,x=1,y=3").toByteArray())
+            assertEquals(0L, state.reading.images.placementCount)
+            assertEquals(1L, state.images.kittyResources(state.screen.bufferEpoch).size)
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+}
+
+private fun kittyDeleteState(): TerminalState {
+    val state = kittyTestState()
+    for (identity in ["I=7", "I=7", "i=3"])
+        state.feed(kittyCommand("a=t," + identity + ",f=24,s=1,v=1", "/wAA").toByteArray())
+    for (
+        (position, placement) in [
+            ("1;1", "i=1,p=11,z=0"),
+            ("3;2", "i=1,p=12,z=5"),
+            ("4;4", "i=2,p=21,z=5"),
+            ("5;6", "i=3,p=31,z=-1")
+        ]
+    )
+        state
+            .feed(
+                (f"\u001b[${position}H" + kittyCommand("a=p," + placement + ",c=1,r=1,C=1"))
+                    .toByteArray()
+            )
+    state.feed("\u001b[6;1H\n\n".toByteArray())
+    assertEquals(2L, state.reading.historySize)
+    assertKittyPlacements(state, [11L, 12L, 21L, 31L])
+    return state
+}
+
+private fun assertKittyPlacements(state: TerminalState, expected: Array<Long>) {
+    val actual = state.reading.images.placements(0L, state.reading.images.placementCount)
+    assertEquals(expected.size, actual.size)
+    for (id in expected) {
+        var found = false
+        for (placement in actual)
+            if (placement.placementId == id) found = true
+        assertTrue(found)
+    }
+}

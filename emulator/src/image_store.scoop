@@ -79,6 +79,13 @@ internal class TerminalImageStore(
         if (width == cellWidth && height == cellHeight) return
         wide = width
         high = height
+        for (entry in placed.values) {
+            val record = entry.record
+            entry.record = record.{
+                offsetX: clamp(record.offsetX, 0L, width - 1L),
+                offsetY: clamp(record.offsetY, 0L, height - 1L)
+            }
+        }
         changed()
     }
 
@@ -115,6 +122,14 @@ internal class TerminalImageStore(
 
     fun key(): Long = memory.nextVersion()
     fun get(key: Long): TerminalImage? = resources[key]?.image
+
+    fun kittyResources(epoch: Long): Array<TerminalImage> {
+        val result = ArrayList<TerminalImage>()
+        for (entry in resources.values)
+            if (entry.epoch == epoch && entry.image.protocol == TerminalImageProtocol.Kitty)
+                result.add(entry.image)
+        return result.toArray()
+    }
 
     fun kitty(epoch: Long, id: Long, number: Long = 0L): TerminalImage? {
         var candidate: StoredImage? = None

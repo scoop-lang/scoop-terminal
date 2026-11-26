@@ -2,6 +2,15 @@ package scoop.terminal.emulator
 
 private val imageNamespaces = AtomicLong(0L)
 
+internal fun reserveImage(
+    memory: ImageMemory,
+    bytes: Long,
+    beforeAllocate: (Long) -> Unit
+): ImageReservation {
+    beforeAllocate(bytes)
+    return memory.reserve(bytes)
+}
+
 /** Shared by the model, immutable image versions and their cross-thread snapshot leases. */
 internal class ImageMemory(val limits: TerminalImageLimits) {
     val namespace = imageNamespaces

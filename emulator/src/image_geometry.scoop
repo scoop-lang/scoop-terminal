@@ -51,8 +51,11 @@ internal fun imageGeometry(
         throw IllegalArgumentException(Some("invalid image placement dimensions"))
     val rawWidth = placement.source.width.toDouble() * placement.scaleX.toDouble()
     val rawHeight = placement.source.height.toDouble() * placement.scaleY.toDouble()
-    val requestedWidth = placement.columns.toDouble() * cellWidth - placement.offsetX.toDouble()
-    val requestedHeight = placement.rows.toDouble() * cellHeight - placement.offsetY.toDouble()
+    // A pending UI layout can precede the model's accepted pixel-size update.
+    val offsetX = imageCellOffset(placement.offsetX, cellWidth)
+    val offsetY = imageCellOffset(placement.offsetY, cellHeight)
+    val requestedWidth = placement.columns.toDouble() * cellWidth - offsetX
+    val requestedHeight = placement.rows.toDouble() * cellHeight - offsetY
     var scale = 1.0
     if (placement.columns > 0L) scale = requestedWidth / rawWidth
     if (placement.rows > 0L) {
@@ -61,10 +64,8 @@ internal fun imageGeometry(
     }
     val width = rawWidth * scale
     val height = rawHeight * scale
-    val x = (point.column + placement.columnOffset).toDouble() *
-        cellWidth +
-        placement.offsetX.toDouble()
-    val y = (point.row + placement.rowOffset).toDouble() * cellHeight + placement.offsetY.toDouble()
+    val x = (point.column + placement.columnOffset).toDouble() * cellWidth + offsetX
+    val y = (point.row + placement.rowOffset).toDouble() * cellHeight + offsetY
     return TerminalImageGeometry(
         TerminalImageBounds(x, y, width, height),
         TerminalImageBounds(
@@ -73,15 +74,16 @@ internal fun imageGeometry(
             height * (placement.clipBottom - placement.clipTop)
         ),
         placement.source,
-        if (placement.columns > 0L)
-            placement.columns
-        else
-            imageCeil((placement.offsetX.toDouble() + width) / cellWidth),
-        if (placement.rows > 0L)
-            placement.rows
-        else
-            imageCeil((placement.offsetY.toDouble() + height) / cellHeight)
+        if (placement.columns > 0L) placement.columns else imageCeil((offsetX + width) / cellWidth),
+        if (placement.rows > 0L) placement.rows else imageCeil((offsetY + height) / cellHeight)
     )
+}
+
+private fun imageCellOffset(offset: Long, cell: Double): Double {
+    val maximum = if (cell > 1.0) cell - 1.0 else 0.0
+    return if (offset <= 0L)
+        0.0
+    else if (offset.toDouble() > maximum) maximum else offset.toDouble()
 }
 
 internal fun imageCeil(value: Double): Long {

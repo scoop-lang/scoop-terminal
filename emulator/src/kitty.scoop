@@ -1,0 +1,284 @@
+package scoop.terminal.emulator
+
+/** One direct transmission across APC strings. Mutable state is owned by the VT model. */
+internal class TerminalKitty(private val terminal: TerminalState) {
+    private var pending: KittyTransfer? = None
+
+    fun cancel() {
+        pending?.close()
+        pending = None
+    }
+
+    fun execute(control: KittyControl, payload: String) {
+        if (control.feature) {
+            try {
+                control.validateIdentity()
+                kittyReply(terminal, control, "OK", extra = kittyFeatureKeys(terminal, control))
+            } catch (error: KittyException) {
+                reject(control, error.code, error.detail)
+            }
+            return
+        }
+        if (control.action == 'd') cancel()
+        val current = pending
+        val response = current?.control ?: control
+        val quiet = if (control.value('q') > 0L)
+            control.value('q')
+        else
+            current?.quiet ?: control.value('q')
+        try {
+            when (current) {
+                case Some(val transfer) -> {
+                    transfer.quiet = quiet
+                    for (parameter in control.parameters)
+                        if (parameter.key != 'm' && parameter.key != 'q')
+                            kittyFailure("EINVAL", "continuation accepts only m and q")
+                    if (quiet > 2L || control.value('m') > 1L)
+                        kittyFailure("EINVAL", "invalid continuation flags")
+                    if (transfer.control.action != 'q') terminal.beginGraphics()
+                    consume(transfer, payload, control.value('m') == 1L)
+                    return
+                }
+
+                case None -> {}
+            }
+            validateKittyControl(terminal, control)
+            if (control.action != 'q') terminal.beginGraphics()
+            if (control.action == 'p' || control.action == 'd') {
+                if (payload != "") kittyFailure("EINVAL", "this action has no image payload")
+                if (control.action == 'd') {
+                    kittyDelete(terminal, control)
+                    return
+                }
+                val image = terminal
+                    .images
+                    .kitty(terminal.screen.bufferEpoch, control.value('i'), control.value('I')) ?:
+                    kittyFailure("ENOENT", "image is unavailable")
+                kittyDisplay(terminal, control, kittyPlacement(terminal, control, image))
+                kittyReply(terminal, control, "OK", imageId = image.imageId)
+                return
+            }
+            val transfer = KittyTransfer.create(terminal, control)
+            pending = Some(transfer)
+            consume(transfer, payload, control.value('m') == 1L)
+        } catch (error: KittyException) {
+            cancel()
+            fail(response, quiet, error.code, error.detail)
+        } catch (error: TerminalImageException) {
+            cancel()
+            fail(response, quiet, kittyImageError(error.kind), error.message ?: "image rejected")
+        } catch (_: IllegalStateException) {
+            cancel()
+            fail(response, quiet, "ENOSPC", "terminal image anchor is unavailable")
+        }
+    }
+
+    fun reject(control: KittyControl, code: String, message: String) {
+        val current = if (control.feature) None else pending
+        val response = current?.control ?: control
+        val quiet = if (control.value('q') > 0L)
+            control.value('q')
+        else
+            current?.quiet ?: control.value('q')
+        if (!control.feature) cancel()
+        fail(response, quiet, code, message)
+    }
+
+    private fun fail(control: KittyControl, quiet: Long, code: String, message: String) {
+        kittyReply(terminal, control, code + ":" + message, quiet)
+        if (control.value('i') == 0L && control.value('I') == 0L && quiet < 2L)
+            terminal.emit(TerminalEffect.Diagnostic("Kitty image rejected: " + message))
+    }
+
+    private fun consume(transfer: KittyTransfer, payload: String, more: Boolean) {
+        val bytes = transfer.bytes.push(payload, more) ?: return
+        pending = None
+        try {
+            bytes.use { input -> complete(transfer, input) }
+        } finally {
+            transfer.close()
+        }
+    }
+
+    private fun complete(transfer: KittyTransfer, input: ImageBytes) {
+        val control = transfer.control
+        val raster = transfer.decode(input, terminal.imageDecoder)
+        if (control.action == 'q') {
+            raster.close()
+            kittyReply(terminal, control, "OK", transfer.quiet)
+            return
+        }
+        val store = terminal.images
+        val screen = terminal.screen
+        var adopted = false
+        var image: TerminalImage? = None
+        try {
+            val id = if (control.value('I') > 0L)
+                store.allocateKittyId(screen.bufferEpoch)
+            else
+                control.value('i')
+            store.makeRoom(8192L, screen)
+            val key = store.key()
+            adopted = true
+            val created = TerminalImage.raster(key, id, control.value('I'), raster)
+            image = Some(created)
+            val placement = if (control.action == 'T')
+                Some(kittyPlacement(terminal, control, created))
+            else
+                None
+            store.install(screen, created)
+            when (placement) {
+                case Some(val placement) -> kittyDisplay(terminal, control, placement)
+                case None -> {}
+            }
+            kittyReply(terminal, control, "OK", transfer.quiet, id)
+        } catch (error: Throwable) {
+            when (image) {
+                case Some(val value) -> {
+                    store.removeResource(value.key)
+                    value.close()
+                }
+
+                case None -> if (!adopted) raster.close()
+            }
+            throw error
+        }
+    }
+}
+
+private fun kittyImageError(kind: TerminalImageFailure): String = when (kind) {
+    case InvalidData -> "EINVAL"
+    case Unsupported -> "ENOTSUP"
+    case Limit -> "ENOSPC"
+}
+
+private class KittyTransfer private constructor(
+    val control: KittyControl,
+    val bytes: ImageBase64Transfer,
+    private val reservation: ImageReservation,
+    private val expected: Long?,
+    private val beforeAllocate: (Long) -> Unit
+) : Closeable {
+    var quiet = control.value('q')
+    fun decode(input: ImageBytes, decoder: TerminalImageDecoder?): ImageRaster {
+        val raw = if (control.value('o') == 'z'.code.toLong())
+            inflateImage(input, expected, beforeAllocate)
+        else
+            input.retain()
+        return raw
+            .use { data ->
+                if (control.value('f') == 100L) {
+                    if (control.value('S') > 0L && data.bytes.size != control.value('S'))
+                        kittyFailure("EINVAL", "PNG encoded size differs from declaration")
+                    decodeImagePng(data, decoder, beforeAllocate)
+                } else
+                    decodeImageRgb(
+                        data,
+                        control.value('s'),
+                        control.value('v'),
+                        control.value('f') == 32L,
+                        beforeAllocate
+                    )
+            }
+    }
+    public override fun close() {
+        bytes.close();
+        reservation.close()
+    }
+    companion object {
+        fun create(terminal: TerminalState, control: KittyControl): KittyTransfer {
+            val memory = terminal.images.memory
+            val png = control.value('f') == 100L
+            val compressed = control.value('o') == 'z'.code.toLong()
+            val expected = if (png) {
+                if (compressed && control.value('S') == 0L)
+                    kittyFailure("EINVAL", "compressed PNG requires its uncompressed size")
+                if (control.value('S') > 0L) Some(control.value('S')) else None
+            } else {
+                val size = imageSize(control.value('s'), control.value('v'), memory.limits)
+                Some(size.rgbaBytes / 4L * if (control.value('f') == 32L) 4L else 3L)
+            }
+            val beforeAllocate: (Long) -> Unit = { amount ->
+                if (control.action != 'q') terminal.images.makeRoom(amount, terminal.screen)
+            }
+            val reservation = reserveImage(memory, 2048L, beforeAllocate)
+            try {
+                val bytes = ImageBase64Transfer(
+                    memory,
+                    if (!compressed && !png) expected!! else memory.limits.maxEncodedBytes,
+                    beforeAllocate
+                )
+                return KittyTransfer(control, bytes, reservation, expected, beforeAllocate)
+            } catch (error: Throwable) {
+                reservation.close();
+                throw error
+            }
+        }
+    }
+}
+
+internal fun kittyString(terminal: TerminalState): VtStringSink? = if (terminal.graphics.kitty)
+    Some(TerminalKittySink(terminal))
+else
+    None
+
+/** Only a bounded header/chunk is buffered; a feature-query payload is discarded as it arrives. */
+private class TerminalKittySink(private val terminal: TerminalState) : VtStringSink {
+    private var started = false
+    private var graphics = false
+    private var ended = false
+    private var data = false
+    private var buffer: StringBuilder? = Some(StringBuilder())
+    private var count = 0L
+    private val control = KittyControl()
+    public override fun push(byte: Int) {
+        if (ended) return
+        if (!started) {
+            started = true
+            graphics = byte == 'G'.code
+            if (!graphics) end()
+            return
+        }
+        try {
+            if (!data && byte == ';'.code) {
+                readHeader()
+                return
+            }
+            if (data && control.feature) return
+            if (byte < 32 || byte > 126) kittyFailure("EINVAL", "graphics data must be ASCII")
+            val limit = if (data) 4096L else 1024L
+            if (count >= limit) kittyFailure("EINVAL", "graphics header or chunk exceeds limit")
+            buffer!!.append(byte.toChar())
+            count += 1L
+        } catch (error: KittyException) {
+            terminal.kitty.reject(control, error.code, error.detail)
+            end()
+        }
+    }
+    private fun readHeader() {
+        control.parse(buffer!!.toString())
+        buffer = Some(StringBuilder())
+        count = 0L
+        data = true
+    }
+    public override fun finish() {
+        if (ended || !graphics) return
+        try {
+            if (!data) readHeader()
+            terminal.kitty.execute(control, buffer!!.toString())
+        } catch (error: KittyException) {
+            terminal.kitty.reject(control, error.code, error.detail)
+        } finally {
+            end()
+        }
+    }
+    public override fun cancel() {
+        if (ended) return
+        if (graphics && !control.feature) terminal.kitty.cancel()
+        end()
+    }
+    private fun end() {
+        ended = true;
+        buffer = None
+    }
+}

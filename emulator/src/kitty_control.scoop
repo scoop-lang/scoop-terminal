@@ -1,0 +1,219 @@
+package scoop.terminal.emulator
+
+import scoop.text.split
+import scoop.text.substring
+
+internal struct KittyParameter(val key: Char, val value: Long)
+
+/** Bounded ASCII control data; a continuation never mutates its original command. */
+internal class KittyControl {
+    val parameters = ArrayList<KittyParameter>()
+    val action: Char get() = value('a').toInt().toChar()
+    val feature: Boolean get() = action == 'q' && has('e')
+    fun has(key: Char): Boolean {
+        for (parameter in parameters)
+            if (parameter.key == key) return true
+        return false
+    }
+    fun value(key: Char): Long {
+        for (parameter in parameters)
+            if (parameter.key == key) return parameter.value
+        return kittyDefault(key)
+    }
+    fun parse(text: String) {
+        if (text == "") return
+        for (part in text.split(',')) {
+            if (part.charLength <
+                3L ||
+                part.getCharAt(1L) !=
+                '=' ||
+                !kittyLetter(part.getCharAt(0L))
+            )
+                kittyFailure("EINVAL", "malformed graphics control data")
+            val key = part.getCharAt(0L)
+            if (has(key)) kittyFailure("EINVAL", "duplicate graphics key")
+            if (parameters.size >= 64L) kittyFailure("EINVAL", "too many graphics keys")
+            val raw = part.substring(2L)
+            val value = if (kittyFlag(key)) {
+                if (raw.charLength != 1L || !kittyLetter(raw.getCharAt(0L)))
+                    kittyFailure("EINVAL", "graphics flag must be one ASCII letter")
+                raw.getCharAt(0L).code.toLong()
+            } else
+                kittyInteger(raw, key == 'z' || key == 'H' || key == 'V')
+            parameters.add(KittyParameter(key, value))
+        }
+    }
+    fun validateIdentity() {
+        if (has('i') && has('I'))
+            kittyFailure("EINVAL", "image id and number are mutually exclusive")
+        if (value('q') > 2L) kittyFailure("EINVAL", "invalid quiet level")
+        if (action == 'q' && value('i') == 0L)
+            kittyFailure("EINVAL", "query requires a nonzero image id")
+        if (has('e') && action != 'q') kittyFailure("EINVAL", "feature key requires a query action")
+    }
+}
+
+internal class KittyException(val code: String, val detail: String) : Exception(Some(detail))
+
+internal fun kittyFailure(code: String, message: String): Nothing = throw KittyException(
+    code,
+    message
+)
+
+internal fun kittyDefault(key: Char): Long = when (key) {
+    case 'a' -> 't'.code.toLong()
+    case 't' -> 'd'.code.toLong()
+    case 'f' -> 32L
+    case 'd' -> 'a'.code.toLong()
+    case _ -> 0L
+}
+
+internal fun kittyFlag(key: Char): Boolean = key ==
+    'a' ||
+    key ==
+    't' ||
+    key ==
+    'o' ||
+    key ==
+    'd' ||
+    key ==
+    'e'
+
+private fun kittyLetter(value: Char): Boolean = (value >= 'a' && value <= 'z') ||
+    (value >= 'A' && value <= 'Z')
+
+private fun kittyInteger(text: String, signed: Boolean): Long {
+    var value = 0L
+    var index = 0L
+    val negative = text.getCharAt(0L) == '-'
+    if (negative) {
+        if (!signed || text.charLength == 1L)
+            kittyFailure("EINVAL", "invalid signed graphics number")
+        index = 1L
+    }
+    val maximum = if (signed) {
+        if (negative) 2147483648L else 2147483647L
+    } else
+        4294967295L
+    while (index < text.charLength) {
+        val character = text.getCharAt(index)
+        if (character < '0' || character > '9') kittyFailure("EINVAL", "invalid graphics number")
+        val digit = (character.code - '0'.code).toLong()
+        if (value > (maximum - digit) / 10L)
+            kittyFailure("EINVAL", "graphics number exceeds 32 bits")
+        value = value * 10L + digit
+        index += 1L
+    }
+    return if (negative) -value else value
+}
+
+internal fun validateKittyControl(terminal: TerminalState, control: KittyControl) {
+    control.validateIdentity()
+    if (!kittyContains("tTpqd", control.action))
+        kittyFailure("ENOTSUP", "unsupported graphics action")
+    if (control.value('m') > 1L) kittyFailure("EINVAL", "invalid chunk continuation flag")
+    for (parameter in control.parameters) {
+        if (kittyContains("aimIq", parameter.key)) continue
+        if (parameter.value == kittyDefault(parameter.key)) continue
+        if (!kittySupports(terminal, control, control.action, parameter))
+            kittyFailure("ENOTSUP", f"unsupported graphics key or value: ${parameter.key}")
+    }
+    if ((control.action == 'p' || control.action == 'd') && control.value('m') != 0L)
+        kittyFailure("EINVAL", "this action cannot transmit chunks")
+}
+
+internal fun kittyFeatureKeys(terminal: TerminalState, control: KittyControl): String {
+    val action = control.value('e').toInt().toChar()
+    if (!kittyContains("tTpqd", action)) return ""
+    val reply = StringBuilder()
+    reply.append(f",e=${action}")
+    for (parameter in control.parameters) {
+        if (kittyContains("aeiImq", parameter.key) || parameter.value == kittyDefault(parameter.key)
+        )
+            continue
+        if (kittySupports(terminal, control, action, parameter)) {
+            reply.append(f",${parameter.key}=")
+            if (kittyFlag(parameter.key))
+                reply.append(parameter.value.toInt().toChar())
+            else
+                reply.append(parameter.value.toString())
+        }
+    }
+    return reply.toString()
+}
+
+private fun kittySupports(
+    terminal: TerminalState,
+    control: KittyControl,
+    action: Char,
+    parameter: KittyParameter
+): Boolean {
+    val key = parameter.key
+    val value = parameter.value
+    if (kittyContains("tTq", action)) {
+        when (key) {
+            case 't' -> return value == 'd'.code.toLong()
+            case 'o' -> return value == 'z'.code.toLong()
+            case 'f' ->
+                return value == 24L || value == 32L || (value == 100L && terminal.hasImageDecoder)
+            case 's' -> return value > 0L && value <= terminal.images.memory.limits.maxDimension
+            case 'v' -> return value > 0L && value <= terminal.images.memory.limits.maxDimension
+            case 'S' ->
+                return control.value('f') ==
+                    100L &&
+                    value >
+                    0L &&
+                    value <=
+                    terminal.images.memory.limits.maxDecompressedBytes
+            case _ -> {}
+        }
+    }
+    if (action == 'T' || action == 'p') {
+        if (kittyContains("pxywhXYcrz", key)) return true
+        if (key == 'C') return value == 1L
+    }
+    if (action == 'd') {
+        if (key == 'd') return kittyContains("aAiInNcCpPqQrRxXyYzZ", value.toInt().toChar())
+        if (kittyContains("pxyz", key)) return true
+    }
+    return false
+}
+
+internal fun kittyContains(text: String, character: Char): Boolean {
+    for (value in text)
+        if (value == character) return true
+    return false
+}
+
+internal fun kittyReply(
+    terminal: TerminalState,
+    control: KittyControl,
+    message: String,
+    quiet: Long = -1L,
+    imageId: Long = -1L,
+    extra: String = ""
+) {
+    val level = if (quiet < 0L) control.value('q') else quiet
+    if (level >= 2L || (level == 1L && message == "OK")) return
+    val id = if (imageId < 0L) control.value('i') else imageId
+    val number = control.value('I')
+    if (id == 0L && number == 0L) return
+    val reply = StringBuilder()
+    reply.append("\u001b_G")
+    if (id > 0L) reply.append(f"i=${id}")
+    if (number > 0L) {
+        if (id > 0L) reply.append(',')
+        reply.append(f"I=${number}")
+    }
+    if (!control.feature && control.value('p') > 0L) reply.append(f",p=${control.value('p')}")
+    reply.append(extra)
+    reply.append(';')
+    var count = 0L
+    for (character in message) {
+        if (count >= 256L) break
+        reply.append(if (character >= ' ' && character <= '~') character else ' ')
+        count += 1L
+    }
+    reply.append("\u001b\\")
+    terminal.reply(reply.toString())
+}

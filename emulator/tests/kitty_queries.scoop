@@ -1,0 +1,69 @@
+package scoop.terminal.emulator
+
+import scoop.text.startsWith
+import scoop.test.*
+
+@Test
+private class TerminalKittyQueryTest {
+    @Test fun featureQueriesEchoOnlySupportedNondefaultKeysWithoutChangingVtState() {
+        val state = kittyTestState()
+        try {
+            state.feed("x".toByteArray())
+            val before = state.reading
+            val queries = [
+                (
+                    "a=q,i=1,e=T,C=1,U=1,f=32,t=d,o=z,s=10,v=5,P=1",
+                    "\u001b_Gi=1,e=T,C=1,o=z,s=10,v=5;OK\u001b\\"
+                ),
+                ("a=q,i=1,e=f,r=1,X=1", "\u001b_Gi=1;OK\u001b\\"),
+                (
+                    "a=q,i=1,e=p,p=7,x=3,y=2,w=4,h=5,X=1,Y=1,c=2,r=3,z=-1,C=2",
+                    "\u001b_Gi=1,e=p,p=7,x=3,y=2,w=4,h=5,X=1,Y=1,c=2,r=3,z=-1;OK\u001b\\"
+                ),
+                ("a=q,i=1,e=d,d=Z,z=-1,p=9", "\u001b_Gi=1,e=d,d=Z,z=-1,p=9;OK\u001b\\"),
+                ("a=q,i=1,e=t,t=s,f=8,O=9,N=1", "\u001b_Gi=1,e=t;OK\u001b\\"),
+                ("a=q,i=1,e=T,f=100", "\u001b_Gi=1,e=T;OK\u001b\\")
+            ]
+            for ((header, expected) in queries) {
+                val result = state
+                    .feed(
+                        (kittyCommand(header, "arbitrary ignored data") + "\u001b[c").toByteArray()
+                    )
+                assertEquals(expected, kittyTestReplies(result)[0L])
+                assertEquals("\u001b[?1;2c", kittyTestReplies(result)[1L])
+                assertEquals(before.presentationVersion, state.reading.presentationVersion)
+                assertEquals(before.cursor, state.reading.cursor)
+                assertEquals(0L, state.images.memory.bytes)
+            }
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test fun queriesCannotEvictResourcesWhileOrdinaryUploadsReclaimUnplacedImagesFirst() {
+        val state = kittyTestState(limits = TerminalImageLimits(maxCpuBytes = 30000L))
+        try {
+            state.feed(kittyCommand("a=T,i=1,f=24,s=1,v=1,C=1", "/wAA").toByteArray())
+            for (id in 2L..80L) {
+                val result = state
+                    .feed(kittyCommand(f"a=t,i=${id},f=24,s=1,v=1", "AP8A").toByteArray())
+                assertEquals(f"\u001b_Gi=${id};OK\u001b\\", kittyTestReplies(result)[0L])
+                assertTrue(state.images.memory.bytes <= 30000L)
+            }
+            assertEquals(1L, state.images.kitty(state.screen.bufferEpoch, 1L)!!.imageId)
+            val evicted = state.feed(kittyCommand("a=p,i=2").toByteArray())
+            assertTrue(kittyTestReplies(evicted)[0L].startsWith("\u001b_Gi=2;ENOENT:"))
+            val before = state.images.kittyResources(state.screen.bufferEpoch).size
+            val version = state.reading.images.version
+            val input = String.fromUtf8(Array<Byte>(4096L) { 'A'.code.toByte() })
+            val query = state.feed(kittyCommand("a=q,i=1,s=1024,v=2,m=1", input).toByteArray())
+            assertTrue(kittyTestReplies(query)[0L].startsWith("\u001b_Gi=1;ENOSPC:"))
+            assertEquals(before, state.images.kittyResources(state.screen.bufferEpoch).size)
+            assertEquals(version, state.reading.images.version)
+            assertEquals(1L, state.reading.images.imageCount)
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+}

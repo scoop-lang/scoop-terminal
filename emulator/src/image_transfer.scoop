@@ -5,14 +5,16 @@ import scoop.io.encoding.Base64
 /** A single direct Kitty transfer; headers and protocol replies are handled by the APC sink. */
 internal class ImageBase64Transfer(
     private val memory: ImageMemory,
-    payloadLimit: Long = Long.MAX_VALUE
+    payloadLimit: Long = Long.MAX_VALUE,
+    private val beforeAllocate: (Long) -> Unit = {}
 ) : Closeable {
     private val payload = ImageAccumulator(
         memory,
         if (payloadLimit < memory.limits.maxEncodedBytes)
             payloadLimit
         else
-            memory.limits.maxEncodedBytes
+            memory.limits.maxEncodedBytes,
+        beforeAllocate
     )
     private var ended = false
     private var encoded = 0L
@@ -27,7 +29,7 @@ internal class ImageBase64Transfer(
             if (size > memory.limits.maxEncodedBytes - encoded)
                 imageFailure(TerminalImageFailure.Limit, "cumulative encoded image limit exceeded")
             encoded += size
-            payload.appendOwned(decodeImageBase64(memory, chunk, more))
+            payload.appendOwned(decodeImageBase64(memory, chunk, more, beforeAllocate))
             if (more) return None
             ended = true
             return Some(payload.finish())
@@ -43,7 +45,12 @@ internal class ImageBase64Transfer(
     }
 }
 
-private fun decodeImageBase64(memory: ImageMemory, chunk: String, more: Boolean): ImageBytes {
+private fun decodeImageBase64(
+    memory: ImageMemory,
+    chunk: String,
+    more: Boolean,
+    beforeAllocate: (Long) -> Unit
+): ImageBytes {
     val length = chunk.byteLength
     if (length > 4096L)
         imageFailure(TerminalImageFailure.Limit, "image Base64 chunk exceeds 4096 bytes")
@@ -55,7 +62,7 @@ private fun decodeImageBase64(memory: ImageMemory, chunk: String, more: Boolean)
     // The library's builder can grow to twice the decoded size and copies its final array.
     // Also cover the bounded APC byte chunk/String while the decoder borrows it.
     val maximum = (length + 3L) / 4L * 3L
-    val reservation = memory.reserve(maximum * 3L + length * 2L + 1024L)
+    val reservation = reserveImage(memory, maximum * 3L + length * 2L + 1024L, beforeAllocate)
     try {
         val codec = Base64
             .Default

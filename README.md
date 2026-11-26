@@ -30,7 +30,7 @@ OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, coun
 
 `TerminalAppearance.ligatures` 默认为 `TerminalLigatures.Enabled`，也可设为 `Disabled` 或 `AtCursor`。后者将光标所在字素与相邻文字分开排版，其他 run 继续复用。`fontFeatures` 接受 OpenType 特性；Disabled 会覆盖 `liga`、`clig`、`calt`、`dlig` 为 0，其他显式特性仍保留。连字只改变字形，复制、搜索、命中和光标继续使用终端列；不满足逐列 caret 校验的文本退回逐字素绘制。
 
-桌面 session 默认启用 Sixel；可通过 `start(graphics = TerminalGraphicsSupport(sixel = false))` 关闭。无窗口核心默认关闭图形，嵌入方具备图片绘制能力时显式开启，并提供已接受的设备像素尺寸。支持私有／共享调色板、透明背景、像素比例、80／1070／8452 模式和能力查询；图像后的文字与光标查询按同一 VT 流处理。Kitty graphics 仍在实现中，尚不声明支持。
+桌面 session 默认启用 Sixel；可通过 `start(graphics = TerminalGraphicsSupport())` 关闭。无窗口核心默认关闭图形，嵌入方具备图片绘制能力时显式开启，并提供已接受的设备像素尺寸。支持私有／共享调色板、透明背景、像素比例、80／1070／8452 模式和能力查询；图像后的文字与光标查询按同一 VT 流处理。Kitty 静态核心可用 `TerminalGraphicsSupport(kitty = true)` 开启，PNG 另需注入 `TerminalImageDecoder`；桌面绘制验收完成前 session 仍默认关闭 Kitty。
 
 `reading.images` 提供图片和 placement；跨更新使用时保留快照或调用 `images.retain()`，上传区域由 `image.pixels(region)` 返回独立租约。视图仅上传可见的 64×64 块，按 LRU 管理原生图片，默认 128 MiB 估算预算、4096 个缓存条目和每帧 8192 次 tile 准备。`TerminalViewOptions.imageCacheLimits` 调整这些上限，`onImageError` 接收每帧首次准备失败；失败的 placement 整体跳过，文字继续绘制。预算包括仍被旧帧持有的原生图片，缩小预算不会强制关闭它们。自然退出保留图片；显式关闭核心／session 释放其图片所有权，已取得的快照或原生绘制帧仍独立存活。`reading.withoutImages()` 可只保留文本和元数据。
 

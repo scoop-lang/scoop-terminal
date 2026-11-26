@@ -4,7 +4,11 @@ import scoop.compression.*
 import scoop.platform.memory.NativeByteBuffer
 
 /** One Zlib stream; output, trailing bytes, truncation and declared uncompressed length are strict. */
-internal fun inflateImage(input: ImageBytes, expectedBytes: Long? = None): ImageBytes {
+internal fun inflateImage(
+    input: ImageBytes,
+    expectedBytes: Long? = None,
+    beforeAllocate: (Long) -> Unit = {}
+): ImageBytes {
     val memory = input.memory
     val configured = memory.limits.maxDecompressedBytes
     val maximum = when (expectedBytes) {
@@ -20,7 +24,7 @@ internal fun inflateImage(input: ImageBytes, expectedBytes: Long? = None): Image
     }
     // Two 8 KiB native buffers plus a conservative 512 KiB allowance for the bounded Zlib
     // window/tables and codec objects. Pixel pages and their final copy are reserved separately.
-    val working = memory.reserve(540672L)
+    val working = reserveImage(memory, 540672L, beforeAllocate)
     try {
         return CompressionDecoder(
             DecompressionOptions(
@@ -35,7 +39,7 @@ internal fun inflateImage(input: ImageBytes, expectedBytes: Long? = None): Image
                         NativeByteBuffer
                             .allocate(8192L)
                             .use { destination ->
-                                ImageAccumulator(memory, maximum)
+                                ImageAccumulator(memory, maximum, beforeAllocate)
                                     .use { result ->
                                         val bytes = input.bytes
                                         var offset = 0L

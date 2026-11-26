@@ -75,7 +75,8 @@ internal fun decodeImageRgb(
     input: ImageBytes,
     width: Long,
     height: Long,
-    alpha: Boolean
+    alpha: Boolean,
+    beforeAllocate: (Long) -> Unit = {}
 ): ImageRaster {
     val memory = input.memory
     val size = imageSize(width, height, memory.limits)
@@ -87,6 +88,7 @@ internal fun decodeImageRgb(
             "raw image byte count differs from dimensions"
         )
     if (alpha) return ImageRaster(size, input.retain())
+    beforeAllocate(size.rgbaBytes + ImageBytes.overhead)
     val pixels = ImageBytes
         .create(memory, size.rgbaBytes) {
             Array<Byte>(size.rgbaBytes) { offset ->
@@ -96,7 +98,11 @@ internal fun decodeImageRgb(
     return ImageRaster(size, pixels)
 }
 
-internal fun decodeImagePng(input: ImageBytes, decoder: TerminalImageDecoder?): ImageRaster {
+internal fun decodeImagePng(
+    input: ImageBytes,
+    decoder: TerminalImageDecoder?,
+    beforeAllocate: (Long) -> Unit = {}
+): ImageRaster {
     val memory = input.memory
     val encoded = input.bytes
     val size = inspectImagePng(encoded, memory.limits)
@@ -105,7 +111,7 @@ internal fun decodeImagePng(input: ImageBytes, decoder: TerminalImageDecoder?): 
     val peak = codec.peakBytes(size, encoded.size)
     if (peak < size.rgbaBytes)
         throw IllegalArgumentException(Some("PNG decoder peak must include its result pixels"))
-    val reservation = memory.reserve(imageByteSum(peak, ImageBytes.overhead))
+    val reservation = reserveImage(memory, imageByteSum(peak, ImageBytes.overhead), beforeAllocate)
     try {
         val result = codec.decodePng(encoded, size)
         if (result.size != size.rgbaBytes)

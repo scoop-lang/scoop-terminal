@@ -1,0 +1,316 @@
+package scoop.terminal.emulator
+
+import scoop.compiler.includeBytes
+import scoop.compression.*
+import scoop.io.encoding.Base64
+import scoop.text.startsWith
+import scoop.test.*
+
+@Test
+private class TerminalKittyTransferTest {
+    @Test fun everyByteBoundaryDecodesRgbAndPublishesPlacementBeforeDsrAndDa() {
+        val bytes = (kittyCommand("a=T,i=31,p=9,f=24,s=2,v=1", "/wAAAP8A") + "\u001b[6n\u001b[c")
+            .toByteArray()
+        for (boundary in 0L..bytes.size) {
+            val state = kittyTestState()
+            try {
+                val replies = ArrayList<String>()
+                for (
+                    part in [
+                        Array<Byte>(boundary) { index -> bytes[index] },
+                        Array<Byte>(bytes.size - boundary) { index -> bytes[boundary + index] }
+                    ]
+                )
+                    for (reply in kittyTestReplies(state.feed(part)))
+                        replies.add(reply)
+                assertEquals(3L, replies.size)
+                assertEquals("\u001b_Gi=31,p=9;OK\u001b\\", replies[0L])
+                assertEquals("\u001b[2;2R", replies[1L])
+                assertEquals("\u001b[?1;2c", replies[2L])
+                val placement = state.reading.images.placements(0L, 1L)[0L]
+                assertEquals(9L, placement.placementId)
+                assertEquals(
+                    Some(TerminalPosition(0L, 0L)),
+                    state.reading.resolve(placement.anchor)
+                )
+                state
+                    .reading
+                    .images
+                    .image(placement.imageKey)!!
+                    .pixels()
+                    .use { pixels ->
+                        kittyTestPixels([255, 0, 0, 255, 0, 255, 0, 255], pixels.bytes)
+                    }
+            } finally {
+                state.close()
+            }
+            assertEquals(0L, state.images.memory.bytes)
+        }
+        Terminal(8L, 4L)
+            .use { disabled ->
+                val update = disabled
+                    .feed((kittyCommand("a=q,i=1,f=24,s=1,v=1", "AAAA") + "\u001b[c").toByteArray())
+                assertEquals(1L, kittyTestReplies(update).size)
+                assertEquals(0L, disabled.reading.images.imageCount)
+            }
+    }
+
+    @Test fun finalChunkUsesTheLatestCursorAndFeatureQueriesDoNotTouchTheTransfer() {
+        val state = kittyTestState()
+        try {
+            val first = state.feed(kittyCommand("a=T,i=10,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            assertEquals(0L, kittyTestReplies(first).size)
+            assertEquals(0L, state.reading.images.imageCount)
+            val before = state.images.memory.bytes
+            val ignored = String.fromUtf8(Array<Byte>(20000L) { 'X'.code.toByte() })
+            val query = state
+                .feed(
+                    ("\u001b[4;5H" + kittyCommand("a=q,i=55,e=T,U=1,C=1,f=32,t=d", ignored))
+                        .toByteArray()
+                )
+            assertEquals("\u001b_Gi=55,e=T,C=1;OK\u001b\\", kittyTestReplies(query)[0L])
+            assertEquals(before, state.images.memory.bytes)
+            val final = state.feed((kittyCommand("m=0", "AP8A") + "\u001b[6n").toByteArray())
+            val replies = kittyTestReplies(final)
+            assertEquals("\u001b_Gi=10;OK\u001b\\", replies[0L])
+            assertEquals("\u001b[5;6R", replies[1L])
+            val placement = state.reading.images.placements(0L, 1L)[0L]
+            assertEquals(Some(TerminalPosition(3L, 4L)), state.reading.resolve(placement.anchor))
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun canceledAndMalformedContinuationsReleaseAllPartialStorage() {
+        for (ending in ["\u001b_Gm=0;\u0018Q", "\u001b_Gm=0;\u001aQ", "\u001bc", "\u001b[?1049h"]) {
+            val state = kittyTestState()
+            try {
+                state.feed(kittyCommand("a=T,i=10,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+                assertTrue(state.images.memory.bytes > 0L)
+                state.feed(ending.toByteArray())
+                assertEquals(0L, state.images.memory.bytes)
+            } finally {
+                state.close()
+            }
+        }
+        val state = kittyTestState()
+        try {
+            state.feed(kittyCommand("a=T,i=10,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            val rejected = state
+                .feed((kittyCommand("m=0,i=99", "AP8A") + "text\u001b[6n").toByteArray())
+            val replies = kittyTestReplies(rejected)
+            assertTrue(replies[0L].startsWith("\u001b_Gi=10;EINVAL:"))
+            assertEquals("\u001b[1;5R", replies[1L])
+            assertEquals(0L, state.images.memory.bytes)
+            state.feed(kittyCommand("a=t,i=10,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            state.finishOutput()
+            assertEquals(0L, state.images.memory.bytes)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test fun chunkAndCumulativeLimitsAndUnsupportedFormatsReturnRecoverableErrors() {
+        val state = kittyTestState(limits = TerminalImageLimits(maxEncodedBytes = 7L))
+        try {
+            state.feed(kittyCommand("a=T,i=10,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            val final = state.feed(kittyCommand("m=0", "AP8A").toByteArray())
+            assertTrue(kittyTestReplies(final)[0L].startsWith("\u001b_Gi=10;ENOSPC:"))
+            assertEquals(0L, state.images.memory.bytes)
+        } finally {
+            state.close()
+        }
+        val normal = kittyTestState()
+        try {
+            for (
+                header in [
+                    "i=1,f=8,s=1,v=1",
+                    "i=1,t=f,f=24,s=1,v=1",
+                    "a=f,i=1",
+                    "i=1,I=2",
+                    "i=1,i=2",
+                    "i=1,z=2147483648",
+                    "i=1,s=0,v=1",
+                    "i=1,m=2",
+                    "a=T,i=1,U=1,s=1,v=1"
+                ]
+            ) {
+                val result = normal.feed((kittyCommand(header, "AAAA") + "\u001b[c").toByteArray())
+                val replies = kittyTestReplies(result)
+                assertEquals(2L, replies.size)
+                assertTrue(replies[0L].startsWith("\u001b_Gi=1"))
+                assertEquals("\u001b[?1;2c", replies[1L])
+                assertEquals(0L, normal.images.memory.bytes)
+            }
+            val oversized = String.fromUtf8(Array<Byte>(4097L) { 'A'.code.toByte() })
+            val result = normal.feed(kittyCommand("i=1,s=1,v=1", oversized).toByteArray())
+            assertTrue(kittyTestReplies(result)[0L].startsWith("\u001b_Gi=1;EINVAL:"))
+            assertEquals(0L, normal.images.memory.bytes)
+        } finally {
+            normal.close()
+        }
+    }
+
+    @Test fun zlibAndPngQueriesValidateFullyWithoutReplacingExistingImages() {
+        val codec = KittyTestDecoder()
+        val state = kittyTestState(decoder = Some(codec))
+        val png = includeBytes("data/images/rgba.png")
+        try {
+            state.feed(kittyCommand("a=T,i=31,f=24,s=1,v=1,C=1", "/wAA").toByteArray())
+            val version = state.reading.images.version
+            val raw = [0.toByte(), 255.toByte(), 0.toByte(), 128.toByte()]
+            val zipped = compress(raw, CompressionOptions.Zlib(DeflateOptions()))
+            val query = state
+                .feed(
+                    (
+                        kittyCommand("a=q,i=31,f=32,s=1,v=1,o=z", Base64.Default.encode(zipped)) +
+                            "\u001b[c"
+                    )
+                        .toByteArray()
+                )
+            assertEquals("\u001b_Gi=31;OK\u001b\\", kittyTestReplies(query)[0L])
+            assertEquals("\u001b[?1;2c", kittyTestReplies(query)[1L])
+            assertEquals(version, state.reading.images.version)
+            val compressed = compress(png, CompressionOptions.Zlib(DeflateOptions()))
+            for (size in [png.size - 1L, png.size, png.size + 1L]) {
+                val result = state
+                    .feed(
+                        kittyCommand(
+                            f"a=q,i=31,f=100,o=z,S=${size}",
+                            Base64.Default.encode(compressed)
+                        )
+                            .toByteArray()
+                    )
+                if (size == png.size)
+                    assertEquals("\u001b_Gi=31;OK\u001b\\", kittyTestReplies(result)[0L])
+                else
+                    assertTrue(kittyTestReplies(result)[0L].startsWith("\u001b_Gi=31;EINVAL:"))
+                assertEquals(version, state.reading.images.version)
+            }
+            assertEquals(1L, codec.calls)
+            val corrupt = state
+                .feed(
+                    kittyCommand(
+                        "a=q,i=31,f=100",
+                        Base64.Default.encode(includeBytes("data/images/bad-crc.png"))
+                    )
+                        .toByteArray()
+                )
+            assertTrue(kittyTestReplies(corrupt)[0L].startsWith("\u001b_Gi=31;EINVAL:"))
+            assertEquals(1L, codec.calls)
+            val placement = state.reading.images.placements(0L, 1L)[0L]
+            state
+                .reading
+                .images
+                .image(placement.imageKey)!!
+                .pixels()
+                .use { pixels -> kittyTestPixels([255, 0, 0, 255], pixels.bytes) }
+            val missingSize = state
+                .feed(
+                    kittyCommand("a=q,i=31,f=100,o=z", Base64.Default.encode(compressed))
+                        .toByteArray()
+                )
+            assertTrue(kittyTestReplies(missingSize)[0L].startsWith("\u001b_Gi=31;EINVAL:"))
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun quietModesAndAnonymousTransfersFollowTheReplyContract() {
+        val state = kittyTestState()
+        try {
+            assertEquals(
+                0L,
+                kittyTestReplies(
+                    state.feed(kittyCommand("a=T,p=99,f=24,s=1,v=1,C=1", "/wAA").toByteArray())
+                )
+                    .size
+            )
+            assertEquals(0L, state.reading.images.placements(0L, 1L)[0L].placementId)
+            assertEquals(
+                0L,
+                kittyTestReplies(
+                    state.feed(kittyCommand("a=t,i=1,q=1,f=24,s=1,v=1", "/wAA").toByteArray())
+                )
+                    .size
+            )
+            assertTrue(
+                kittyTestReplies(
+                    state.feed(kittyCommand("a=t,i=1,q=1,f=24,s=1,v=1", "AA").toByteArray())
+                )[0L]
+                    .startsWith("\u001b_Gi=1;EINVAL:")
+            )
+            assertEquals(
+                0L,
+                kittyTestReplies(
+                    state.feed(kittyCommand("a=t,i=1,q=2,f=24,s=1,v=1", "AA").toByteArray())
+                )
+                    .size
+            )
+            state.feed(kittyCommand("a=t,i=2,q=1,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            assertEquals(
+                0L,
+                kittyTestReplies(state.feed(kittyCommand("m=0,q=0", "AP8A").toByteArray())).size
+            )
+            state.feed(kittyCommand("a=t,i=3,q=1,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            assertEquals(
+                0L,
+                kittyTestReplies(state.feed(kittyCommand("m=0", "AP8A").toByteArray())).size
+            )
+            state.feed(kittyCommand("a=t,i=4,q=2,f=24,s=2,v=1,m=1", "/wAA").toByteArray())
+            assertTrue(
+                kittyTestReplies(state.feed(kittyCommand("m=0,q=1", "AA").toByteArray()))[0L]
+                    .startsWith("\u001b_Gi=4;EINVAL:")
+            )
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+}
+
+internal fun kittyTestState(
+    limits: TerminalImageLimits = TerminalImageLimits(),
+    decoder: TerminalImageDecoder? = None
+): TerminalState {
+    val state = TerminalState(
+        12L, 6L, 20L, TerminalParserLimits(), TerminalAmbiguousWidth.Narrow,
+        TerminalColors(), TerminalClipboardPolicy(), TerminalLinkLimits(), TerminalTrackingLimits(),
+        TerminalCommandLimits(), limits, TerminalGraphicsSupport(kitty = true), decoder
+    )
+    state.resize(12L, 6L, true, Some(TerminalPixelSize(120L, 60L, 10L, 10L)))
+    return state
+}
+
+internal fun kittyCommand(header: String, payload: String = ""): String = f"\u001b_G${header};${
+    payload
+}\u001b\\"
+
+internal fun kittyTestReplies(update: TerminalUpdate): Array<String> {
+    val replies = ArrayList<String>()
+    for (effect in update.effects) {
+        when (effect) {
+            case Reply(val bytes) -> replies.add(String.fromUtf8(bytes))
+            case _ -> {}
+        }
+    }
+    return replies.toArray()
+}
+
+internal fun kittyTestPixels(expected: Array<Int>, actual: Array<Byte>) {
+    assertEquals(expected.size, actual.size)
+    for (index in 0L..<expected.size)
+        assertEquals(expected[index], actual[index].toInt() and 255)
+}
+
+private class KittyTestDecoder : TerminalImageDecoder {
+    var calls = 0L
+    public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long = size
+        .rgbaBytes
+    public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
+        calls += 1L
+        return Array<Byte>(size.rgbaBytes) { offset -> (offset % 251L).toByte() }
+    }
+}

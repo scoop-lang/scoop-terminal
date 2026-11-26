@@ -1,0 +1,216 @@
+package scoop.terminal.emulator
+
+import scoop.io.encoding.Base64
+import scoop.text.startsWith
+import scoop.test.*
+
+@Test
+private class TerminalKittyLayoutTest {
+    @Test fun cropOffsetsAndCellExtentsPreserveAspectAndCursorPolicy() {
+        val state = kittyTestState()
+        try {
+            val raw = Array<Byte>(10L * 5L * 4L) { 255.toByte() }
+            state.feed(kittyCommand("a=t,i=7,s=10,v=5", Base64.Default.encode(raw)).toByteArray())
+            assertEquals(0L, state.reading.images.imageCount)
+            val update = state
+                .feed(
+                    (
+                        "\u001b[2;3H" +
+                            kittyCommand("a=p,i=7,p=1,x=3,y=1,w=99,h=2,X=2,Y=3,c=3,r=2,C=1,z=-1") +
+                            "\u001b[6n"
+                    )
+                        .toByteArray()
+                )
+            assertEquals("\u001b_Gi=7,p=1;OK\u001b\\", kittyTestReplies(update)[0L])
+            assertEquals("\u001b[2;3R", kittyTestReplies(update)[1L])
+            val placement = state.reading.images.placements(0L, 1L)[0L]
+            assertEquals(7L, placement.source.width)
+            assertEquals(2L, placement.source.height)
+            val area = placement.geometry(state.reading, 10.0, 10.0)!!
+            assertEquals(22.0, area.destination.x)
+            assertEquals(13.0, area.destination.y)
+            assertEquals(28.0, area.destination.width)
+            assertEquals(8.0, area.destination.height)
+            assertEquals(3L, area.occupiedColumns)
+            assertEquals(2L, area.occupiedRows)
+            state.feed("\u001b[12Gx".toByteArray())
+            assertTrue(state.screen.pendingWrap)
+            state.feed(kittyCommand("a=p,i=7,p=2,C=1").toByteArray())
+            assertTrue(state.screen.pendingWrap)
+            val moved = state.feed((kittyCommand("a=p,i=7,p=2") + "\u001b[6n").toByteArray())
+            assertFalse(state.screen.pendingWrap)
+            assertEquals("\u001b[3;12R", kittyTestReplies(moved)[1L])
+            assertEquals(2L, state.reading.images.placementCount)
+            for (suffix in ["X=10", "Y=10", "x=10", "y=5", "C=2", "P=1", "U=1"]) {
+                val failed = state.feed(kittyCommand("a=p,i=7,p=3," + suffix).toByteArray())
+                assertTrue(kittyTestReplies(failed)[0L].startsWith("\u001b_Gi=7,p=3;E"))
+                assertEquals(2L, state.reading.images.placementCount)
+            }
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun replacementWaitsForValidatedPixelsAndOldSnapshotsRemainUsable() {
+        val state = kittyTestState()
+        try {
+            state.feed(kittyCommand("a=T,i=7,p=1,f=24,s=1,v=1,C=1", "/wAA").toByteArray())
+            state.feed(("\u001b[2;1H" + kittyCommand("a=p,i=7,p=2,C=1")).toByteArray())
+            val frozen = TerminalSnapshotPool().acquire(state.reading)
+            try {
+                val key = state.reading.images.placements(0L, 1L)[0L].imageKey
+                val failure = state.feed(kittyCommand("a=T,i=7,f=24,s=1,v=1", "AA").toByteArray())
+                assertTrue(kittyTestReplies(failure)[0L].startsWith("\u001b_Gi=7;EINVAL:"))
+                assertEquals(2L, state.reading.images.placementCount)
+                assertEquals(key, state.reading.images.placements(0L, 1L)[0L].imageKey)
+                state.feed(kittyCommand("a=t,i=7,f=24,s=1,v=1", "AP8A").toByteArray())
+                assertEquals(0L, state.reading.images.placementCount)
+                for (_ in 0L..<2L)
+                    state.feed(kittyCommand("a=p,i=7,C=1").toByteArray())
+                assertEquals(2L, state.reading.images.placementCount)
+                val next = state.reading.images.placements(0L, 2L)
+                assertNotEquals(next[0L].key, next[1L].key)
+                state
+                    .reading
+                    .images
+                    .image(next[0L].imageKey)!!
+                    .pixels()
+                    .use { pixels -> kittyTestPixels([0, 255, 0, 255], pixels.bytes) }
+                state.close()
+                frozen
+                    .images
+                    .image(key)!!
+                    .pixels()
+                    .use { pixels -> kittyTestPixels([255, 0, 0, 255], pixels.bytes) }
+            } finally {
+                frozen.close()
+            }
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun imageNumbersChooseTheLatestUploadAndPlacementIdsReplaceOnlyTheirOwnPair() {
+        val state = kittyTestState()
+        try {
+            val first = state.feed(kittyCommand("a=t,I=7,f=24,s=1,v=1", "/wAA").toByteArray())
+            val firstId = state.images.kitty(state.screen.bufferEpoch, 0L, 7L)!!.imageId
+            assertEquals(f"\u001b_Gi=${firstId},I=7;OK\u001b\\", kittyTestReplies(first)[0L])
+            state.feed(kittyCommand("a=t,I=7,f=24,s=1,v=1", "AP8A").toByteArray())
+            val newest = state.images.kitty(state.screen.bufferEpoch, 0L, 7L)!!.imageId
+            assertNotEquals(firstId, newest)
+            state.feed(kittyCommand(f"a=p,i=${firstId},p=1,C=1").toByteArray())
+            val placed = state.feed(("\u001b[2;3H" + kittyCommand("a=p,I=7,p=1,C=1")).toByteArray())
+            assertEquals(f"\u001b_Gi=${newest},I=7,p=1;OK\u001b\\", kittyTestReplies(placed)[0L])
+            state.feed(("\u001b[3;4H" + kittyCommand("a=p,I=7,p=1,C=1")).toByteArray())
+            assertEquals(2L, state.reading.images.placementCount)
+            for (placement in state.reading.images.placements(0L, 2L)) {
+                val image = state.reading.images.image(placement.imageKey)!!
+                assertEquals(
+                    Some(
+                        if (image.imageId == newest)
+                            TerminalPosition(2L, 3L)
+                        else
+                            TerminalPosition(0L, 0L)
+                    ),
+                    state.reading.resolve(placement.anchor)
+                )
+            }
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun buffersKeepSeparateIdsAndAlternateInitializationRetiresOnlyItsImages() {
+        val state = kittyTestState()
+        try {
+            state.feed(kittyCommand("a=T,i=1,f=24,s=1,v=1,C=1", "/wAA").toByteArray())
+            val primary = state.reading.images.placements(0L, 1L)[0L].imageKey
+            val alternate = state.feed(("\u001b[?1049h" + kittyCommand("a=p,i=1")).toByteArray())
+            assertTrue(kittyTestReplies(alternate)[0L].startsWith("\u001b_Gi=1;ENOENT:"))
+            state.feed(kittyCommand("a=T,i=1,f=24,s=1,v=1,C=1", "AP8A").toByteArray())
+            assertNotEquals(primary, state.reading.images.placements(0L, 1L)[0L].imageKey)
+            state.feed("\u001b[?1049l".toByteArray())
+            assertEquals(primary, state.reading.images.placements(0L, 1L)[0L].imageKey)
+            state.feed("\u001b[?1049h".toByteArray())
+            assertEquals(0L, state.reading.images.imageCount)
+            state.feed("\u001b[?1049l".toByteArray())
+            assertEquals(1L, state.reading.images.imageCount)
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun synchronizedImagesKeepLiveCursorRepliesAndResizeRecomputesCellPlacements() {
+        val state = kittyTestState()
+        try {
+            state.feed("\u001b[?2026h".toByteArray())
+            val update = state
+                .feed(
+                    (kittyCommand("a=T,i=1,f=24,s=1,v=1,c=2,r=2", "/wAA") + "\u001b[6n")
+                        .toByteArray()
+                )
+            assertEquals(0L, state.reading.images.imageCount)
+            assertEquals("\u001b[3;3R", kittyTestReplies(update)[1L])
+            state.setSynchronizedOutput(false)
+            state.feed([])
+            val placement = state.reading.images.placements(0L, 1L)[0L]
+            val before = placement.geometry(state.reading, 10.0, 10.0)!!
+            state.resize(12L, 6L, true, Some(TerminalPixelSize(240L, 120L, 20L, 20L)))
+            val next = state.reading.images.placements(0L, 1L)[0L]
+            val after = next.geometry(state.reading, 20.0, 20.0)!!
+            assertEquals(before.destination.width * 2.0, after.destination.width)
+            assertEquals(before.destination.height * 2.0, after.destination.height)
+            assertEquals(Some(TerminalPosition(0L, 0L)), state.reading.resolve(next.anchor))
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+
+    @Test fun shrinkingCellsClampOffsetsWithoutChangingAnOwnedOldPlacement() {
+        val state = kittyTestState()
+        try {
+            state
+                .feed(
+                    kittyCommand("a=T,i=1,f=24,s=1,v=1,c=1,r=1,X=9,Y=9,C=1", "/wAA").toByteArray()
+                )
+            val frozen = TerminalSnapshotPool().acquire(state.reading)
+            try {
+                val old = frozen.images.placements(0L, 1L)[0L]
+                state.resize(12L, 6L, true, Some(TerminalPixelSize(60L, 30L, 5L, 5L)))
+                val next = state.reading.images.placements(0L, 1L)[0L]
+                assertEquals(4L, next.offsetX)
+                assertEquals(4L, next.offsetY)
+                assertEquals(9L, old.offsetX)
+                assertEquals(9L, old.offsetY)
+                for (
+                    area in [
+                        next.geometry(state.reading, 5.0, 5.0)!!,
+                        old.geometry(frozen, 5.0, 5.0)!!
+                    ]
+                ) {
+                    assertEquals(4.0, area.destination.x)
+                    assertEquals(4.0, area.destination.y)
+                    assertEquals(1.0, area.destination.width)
+                    assertEquals(1.0, area.destination.height)
+                    assertEquals(1L, area.occupiedColumns)
+                    assertEquals(1L, area.occupiedRows)
+                }
+                state.resize(12L, 6L, true, Some(TerminalPixelSize(120L, 60L, 10L, 10L)))
+                val grown = state.reading.images.placements(0L, 1L)[0L]
+                assertEquals(4L, grown.offsetX)
+                assertEquals(6.0, grown.geometry(state.reading, 10.0, 10.0)!!.destination.width)
+            } finally {
+                frozen.close()
+            }
+        } finally {
+            state.close()
+        }
+        assertEquals(0L, state.images.memory.bytes)
+    }
+}
