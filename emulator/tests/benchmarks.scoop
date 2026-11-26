@@ -1,0 +1,147 @@
+package scoop.terminal.emulator
+
+import scoop.collections.sorted
+import scoop.platform.time.MonotonicTimeSource
+import scoop.test.*
+
+/** Manual release measurements; ordinary test runs do not execute these workloads. */
+@Test
+private class TerminalCoreBenchmark {
+    @Test
+    @Ignore("manual performance measurement")
+    fun ascii120() {
+        coreFeedBenchmark("ascii", 120L, 40L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun ascii240() {
+        coreFeedBenchmark("ascii", 240L, 80L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun sgr120() {
+        coreFeedBenchmark("sgr", 120L, 40L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun sgr240() {
+        coreFeedBenchmark("sgr", 240L, 80L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun unicode120() {
+        coreFeedBenchmark("unicode", 120L, 40L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun unicode240() {
+        coreFeedBenchmark("unicode", 240L, 80L)
+    }
+
+    @Test
+    @Ignore("manual performance measurement")
+    fun history100k() {
+        val terminal = Terminal(120L, 40L, 100000L)
+        try {
+            val batch = StringBuilder()
+            for (_ in 0L..<1000L)
+                batch.append("log\r\n")
+            val bytes = batch.toString().toByteArray()
+            for (_ in 0L..<101L)
+                terminal.feed(bytes)
+            assertEquals(100000L, terminal.historySize)
+            val ids = Array<Long>(32L) { index -> terminal.lines(index * 3000L, 1L)[0L].id }
+            val times = ArrayList<Long>()
+            var checksum = 0L
+            for (index in 0L..<2048L) {
+                val at = index * 37L % 32L
+                val started = MonotonicTimeSource.now()
+                val found = terminal.findLine(ids[at])!!
+                times.add((MonotonicTimeSource.now() - started).inWholeNanoseconds)
+                assertEquals(at * 3000L, found)
+                checksum += found
+            }
+            assertTrue(checksum > 0L)
+            coreBenchmarkReport("history100k", 120L, 40L, 0L, times)
+        } finally {
+            closeCoreBenchmark(terminal)
+        }
+    }
+
+    @Test
+    @Ignore("manual performance measurement")
+    fun reflow10k() {
+        val terminal = Terminal(120L, 40L, 100000L)
+        try {
+            val batch = StringBuilder()
+            for (_ in 0L..<100L)
+                batch.append("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n")
+            val bytes = batch.toString().toByteArray()
+            for (_ in 0L..<100L)
+                terminal.feed(bytes)
+            val times = ArrayList<Long>()
+            for (_ in 0L..<12L) {
+                for (columns in [40L, 240L]) {
+                    val started = MonotonicTimeSource.now()
+                    terminal.resize(columns, 40L)
+                    times.add((MonotonicTimeSource.now() - started).inWholeNanoseconds)
+                }
+            }
+            coreBenchmarkReport("reflow10k", 120L, 40L, 0L, times)
+        } finally {
+            closeCoreBenchmark(terminal)
+        }
+    }
+}
+
+private fun coreFeedBenchmark(kind: String, columns: Long, rows: Long) {
+    val line = when (kind) {
+        case "sgr" ->
+            "\u001b[31mERROR\u001b[0m file=terminal.scoop \u001b[1;34mstatus\u001b[0m=1234567890\r\n"
+        case "unicode" -> "中文日志 Ελληνικά e\u0301 👩🏽‍💻 🇨🇳 中英文混合 0123456789\r\n"
+        case _ -> "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789\r\n"
+    }
+    val batch = StringBuilder()
+    for (_ in 0L..<8192L / line.byteLength)
+        batch.append(line)
+    val bytes = batch.toString().toByteArray()
+    val terminal = Terminal(columns, rows, 10000L)
+    try {
+        val times = ArrayList<Long>()
+        for (_ in 0L..<256L) {
+            val started = MonotonicTimeSource.now()
+            terminal.feed(bytes)
+            times.add((MonotonicTimeSource.now() - started).inWholeNanoseconds)
+        }
+        terminal.finishOutput()
+        assertEquals(10000L, terminal.historySize)
+        coreBenchmarkReport(kind, columns, rows, bytes.size * 256L, times)
+    } finally {
+        closeCoreBenchmark(terminal)
+    }
+}
+
+private fun coreBenchmarkReport(
+    name: String,
+    columns: Long,
+    rows: Long,
+    bytes: Long,
+    times: ArrayList<Long>
+) {
+    val samples = times.sorted()
+    var total = 0L
+    for (time in samples)
+        total += time
+    val last = samples.size - 1L
+    println(
+        f"BENCH name=${name} columns=${columns} rows=${rows} bytes=${bytes} samples=${
+            samples.size
+        } ns=${total} p50=${samples[last / 2L]} p95=${samples[last * 95L / 100L]} p99=${
+            samples[last * 99L / 100L]
+        }"
+    )
+}
+
+private fun closeCoreBenchmark(terminal: Terminal) {
+    terminal.close()
+}

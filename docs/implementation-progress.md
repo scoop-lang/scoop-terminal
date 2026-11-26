@@ -37,7 +37,7 @@
 | M5 | 图片 store/decoder/cache、预算 | 已实现；Sixel 9 项、Kitty 绘制 4 项及 PNG 辅助数据 3 项通过；真实 RSS／GPU 峰值随 M6 测量 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，真实窗口对照待集中验收 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 已实现且桌面默认启用；18 项协议、4 项绘制、完整 UI 90 项及 macOS 真实窗口 PNG／PTY 用例通过 |
-| M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
+| M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 已记录固定基线与 M5 核心数据；存储、帧调度及视图测量继续推进 |
 | M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 待实现 |
 | M6 | Linux 本轮完整回归 | 待本机完成后执行 |
 | M6 | Windows 本轮完整回归 | 待本机完成后执行 |
@@ -125,6 +125,8 @@ Kitty 原生绘制：`TerminalKittyPaintTest` 4/4。真实 RGBA 光栅覆盖透�
 PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty 绘制 4/4，随后完整 `terminal-ui` 90/90。只把像素、透明度和颜色 chunks 送入 codec；按原编码跳过压缩文字、EXIF 与未知辅助数据，不先解压再丢弃。ICC 严格检查 Zlib 结束与长度，默认独立展开上限 1 MiB，验证临时空间和四份原生 profile 的保守成本分别计费；超限、损坏及规范化分配失败释放新资源且不调用 codec。生成的 RGB matrix ICC 保持颜色输出；含八段 7 MiB 文字的 PNG 在 4 MiB 图片预算内保持原像素。规范化采用两次线性扫描和常量工作状态，不按辅助 chunk 数量积累列表。生成 fixture 的一致性检查通过，无外部图片或依赖下载。
 
 桌面 `start()` 现在默认启用 Sixel／Kitty，并在 model worker 中配置 `TerminalCpuImageDecoder`。macOS `scoop test --release demo` 的真实窗口用例通过：子进程收到 CPR，再发送实际 PNG、收到 Kitty OK，窗口接受两次尺寸，PTY 最后尺寸与模型相同，子进程以 17 退出，中文最终画面保留；另验证等待输入的子进程显式关闭。PNG 的预算测试不等同于进程 RSS 硬上限，实测峰值及综合应用 smoke 仍列入 M6。本轮没有自建临时文件遗留。
+
+性能测量第一轮：新增 8 个仅手动执行的 release 场景与 `tools/benchmark_terminal.py`。基线 `d990f72`、M5 `89cdabb` 共 16 个独立测试进程完成；同一测量循环采集 feed／历史定位／reflow 耗时，以及运行时累计托管分配和实际峰值 RSS。结果和限制见 [性能测量](performance.md)。历史索引避免全表扫描，但短行空格存储和 reflow 分配明显偏高，作为 M6 优先优化项。基线没有正文 reflow，不将其 resize 耗时宣传为同功能对比；窗口和图形指标仍待后续测量。基线导出目录已自动删除，原始报告暂留供优化对照。
 
 ## 后续执行约束
 
