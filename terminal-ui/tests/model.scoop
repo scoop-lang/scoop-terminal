@@ -1,0 +1,338 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.concurrent.Channel
+import scoop.platform.concurrent.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalBackgroundModelTest {
+    @Test fun parsingInputAndResizeKeepStreamOrderAndPublishOnlyOnTheWindowOwner() {
+        val owner = currentThreadId()
+        val created = Channel<ThreadId>(1L)
+        eventLoop()
+            .run {
+                val model = TerminalModel
+                    .create {
+                        created.trySend(currentThreadId())
+                        Terminal(8L, 2L)
+                    }
+                assertNotEquals(owner, created.receive())
+                val outputs = ArrayList<String>()
+                val resizes = ArrayList<TerminalModelSize>()
+                model
+                    .start(
+                        this,
+                        { publication ->
+                            assertEquals(owner, currentThreadId())
+                            for (effect in publication.update.effects) {
+                                when (effect) {
+                                    case Reply(val bytes) -> outputs.add(String.fromUtf8(bytes));
+                                    case _ -> {}
+                                }
+                            }
+                            if (publication.input.size > 0L)
+                                outputs.add(String.fromUtf8(publication.input))
+                            if (publication.resizePty) resizes.add(publication.size)
+                            Unit
+                        }
+                    )
+                val old = model.current.reading
+                try {
+                    model.post(TerminalModelCommand.Feed("ab\u001b[?1h\u001b[6n".toByteArray()))
+                    model
+                        .post(
+                            TerminalModelCommand
+                                .Input(TerminalInput.Key(TerminalKey.Up, TerminalModifiers()))
+                        )
+                    model
+                        .post(
+                            TerminalModelCommand
+                                .Resize(
+                                    TerminalModelSize(
+                                        10L,
+                                        3L,
+                                        Some(TerminalPixelSize(100L, 48L, 10L, 16L))
+                                    ),
+                                    true
+                                )
+                        )
+                    model.post(TerminalModelCommand.Feed("yz\u001b[6n".toByteArray()))
+                    val result = model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(3L, outputs.size)
+                    assertEquals("\u001b[1;3R", outputs[0L])
+                    assertEquals("\u001bOA", outputs[1L])
+                    assertEquals("\u001b[1;5R", outputs[2L])
+                    assertEquals(1L, resizes.size)
+                    assertEquals(10L, result.reading.columns)
+                    assertEquals(3L, result.reading.rows)
+                    assertEquals(
+                        Some(TerminalPixelSize(100L, 48L, 10L, 16L)),
+                        result.reading.pixelSize
+                    )
+                    assertEquals("", old.lines(0L, 1L)[0L].cells[0L].text)
+                } finally {
+                    model.close()
+                }
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+
+    @Test fun aBusyModelBackpressuresPtyWorkWithoutBlockingOrdinaryUiCalls() {
+        val gate = ModelWorkerGate()
+        val entered = Channel<Unit>(1L)
+        val completed = AtomicBoolean(false)
+        eventLoop()
+            .run {
+                val model = TerminalModel
+                    .create(maxOperations = 1L, maxBytes = 256L) { Terminal(8L, 2L) }
+                model.start(this)
+                try {
+                    val busy = async(model.executor) {
+                        entered.send(Unit);
+                        gate.await()
+                    }
+                    entered.receive()
+                    model.post(TerminalModelCommand.Feed("a".toByteArray()))
+                    assertFailsWith<IllegalStateException> {
+                        model.post(TerminalModelCommand.Input(TerminalInput.Text("x")))
+                    }
+                    val next = async {
+                        val result = model.submit(TerminalModelCommand.Feed("b".toByteArray()))
+                        completed.store(true)
+                        result
+                    }
+                    for (turn in 0L..<5L)
+                        yieldCoroutine()
+                    assertFalse(completed.load())
+                    gate.open()
+                    busy.await()
+                    val result = next.await()
+                    assertEquals("a", result.reading.lines(0L, 1L)[0L].cells[0L].text)
+                    assertEquals("b", result.reading.lines(0L, 1L)[0L].cells[1L].text)
+                    try {
+                        model.submit(TerminalModelCommand.Feed(Array<Byte>(257L) { 120.toByte() }))
+                        fail(Some("oversized model request was accepted"))
+                    } catch (_: IllegalArgumentException) {
+                        Unit
+                    }
+                } finally {
+                    gate.open();
+                    model.close()
+                }
+            }
+        gate.close()
+    }
+
+    @Test fun queuedSelectionTracksEditsReflowAndOverwritesWithoutSharingMutableHandles() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(10L, 3L) }
+                val viewport = TerminalViewport(
+                    { model.current.reading },
+                    { range, kind, reading -> model.track(range, kind, reading) }
+                )
+                val controller = TerminalViewController(viewport)
+                model
+                    .start(
+                        this,
+                        { _ ->
+                            controller.synchronize();
+                            Unit
+                        }
+                    )
+                try {
+                    model.submit(TerminalModelCommand.Feed("abcDEF".toByteArray()))
+                    val reading = model.current.reading
+                    val range = TerminalRange(
+                        reading.anchorAt(0L, 3L)!!,
+                        reading.anchorAt(0L, 6L, TerminalAffinity.Before)!!
+                    )
+                    controller.select(range)
+                    assertEquals(Some("DEF"), controller.copySelection())
+                    model.post(TerminalModelCommand.Feed("\u001b[H\u001b[2@".toByteArray()))
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(Some("DEF"), controller.copySelection())
+                    model.post(TerminalModelCommand.Resize(TerminalModelSize(4L, 3L, None), true))
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(Some("DEF"), controller.copySelection())
+                    model.submit(TerminalModelCommand.Feed("\u001b[2;3Hx".toByteArray()))
+                    assertEquals(None, controller.copySelection())
+                    assertEquals(Some("DEF"), reading.text(range))
+                } finally {
+                    controller.close();
+                    model.close()
+                }
+            }
+    }
+
+    @Test fun closingPendingRegistrationsAndRejectingCoreLimitsDoNotLeakSlots() {
+        eventLoop()
+            .run {
+                val model = TerminalModel
+                    .create { Terminal(8L, 2L, trackingLimits = TerminalTrackingLimits(1L)) }
+                model.start(this)
+                try {
+                    model.submit(TerminalModelCommand.Feed("abc".toByteArray()))
+                    val reading = model.current.reading
+                    val range = TerminalRange(
+                        reading.anchorAt(0L, 0L)!!,
+                        reading.anchorAt(0L, 3L, TerminalAffinity.Before)!!
+                    )
+                    val abandoned = model.track(range, TerminalTrackingKind.Content, reading)
+                    abandoned.close()
+                    val active = model.track(range, TerminalTrackingKind.Content, reading)
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(
+                        TerminalTrackingState.Available(range),
+                        active.state(model.current.reading)
+                    )
+                    val rejected = model
+                        .track(range, TerminalTrackingKind.Content, model.current.reading)
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(
+                        TerminalTrackingState.Invalidated(TerminalInvalidation.Rejected),
+                        rejected.state(model.current.reading)
+                    )
+                    rejected.close()
+                    active.close()
+                    val next = model
+                        .track(range, TerminalTrackingKind.Content, model.current.reading)
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(
+                        TerminalTrackingState.Available(range),
+                        next.state(model.current.reading)
+                    )
+                    next.close()
+                } finally {
+                    model.close()
+                }
+            }
+    }
+
+    @Test fun synchronizationUsesOneStartTimeAndOnlyItsOwnExpiryCanCommit() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(8L, 2L) }
+                model.start(this)
+                val first = model.submit(TerminalModelCommand.Feed("a\u001b[?2026hb".toByteArray()))
+                try {
+                    assertTrue(first.synchronizedSince != None)
+                    assertEquals("", first.reading.lines(0L, 1L)[0L].cells[1L].text)
+                    val repeated = model
+                        .submit(TerminalModelCommand.Feed("c\u001b[?2026h\u001b[6n".toByteArray()))
+                    assertEquals(first.synchronizedSince, repeated.synchronizedSince)
+                    assertEquals(
+                        first.synchronizationGeneration,
+                        repeated.synchronizationGeneration
+                    )
+                    assertEquals("\u001b[1;4R", modelReply(repeated.update.effects[0L]))
+                    val stale = model
+                        .submit(
+                            TerminalModelCommand
+                                .ReleaseSynchronization(first.synchronizationGeneration - 1L)
+                        )
+                    assertSame(first.reading, stale.reading)
+                    val committed = model
+                        .submit(
+                            TerminalModelCommand
+                                .ReleaseSynchronization(first.synchronizationGeneration)
+                        )
+                    assertEquals(None, committed.synchronizedSince)
+                    assertEquals("c", committed.reading.lines(0L, 1L)[0L].cells[2L].text)
+                    model.submit(TerminalModelCommand.Feed("\u001b[?2026hd".toByteArray()))
+                } finally {
+                    model.close()
+                }
+                assertEquals(None, model.current.synchronizedSince)
+                assertEquals("d", model.current.reading.lines(0L, 1L)[0L].cells[3L].text)
+                model.close()
+            }
+    }
+
+    @Test fun cancellationBeforeTheDriverStartsStillReleasesItsWorkerAndPendingHandles() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(4L, 2L) }
+                val reading = model.current.reading
+                val anchor = reading.anchorAt(0L, 0L)!!
+                val handle = model
+                    .track(TerminalRange(anchor, anchor), TerminalTrackingKind.Position, reading)
+                val published = AtomicBoolean(false)
+                try {
+                    coroutineScope<Unit> {
+                        model.start(this, { _ -> published.store(true) })
+                        currentJobOrNone()!!.cancel()
+                    }
+                } catch (_: CancellationException) {
+                    Unit
+                }
+                model.close()
+                assertTrue(model.executor.isTerminated)
+                assertTrue(handle.isClosed)
+                assertFalse(published.load())
+                model.close()
+            }
+    }
+
+    @Test fun publicationFailureRejectsQueuedWaitersAndRetiresWorkersAndRegistrations() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(8L, 2L) }
+                val errors = ArrayList<Throwable>()
+                val failure = IllegalStateException(Some("test host failure"))
+                model
+                    .start(
+                        this,
+                        { result -> if (result.input.size > 0L) throw failure },
+                        { error -> errors.add(error) }
+                    )
+                model.post(TerminalModelCommand.Input(TerminalInput.Text("x")))
+                try {
+                    model.submit(TerminalModelCommand.Barrier)
+                    fail(Some("failed model delivered a later request"))
+                } catch (error: Throwable) {
+                    assertSame(failure, error)
+                }
+                model.close()
+                assertTrue(model.executor.isTerminated)
+                assertEquals(1L, errors.size)
+                assertSame(failure, errors[0L])
+                assertFailsWith<IllegalStateException> { model.post(TerminalModelCommand.Barrier) }
+                val unused = TerminalModel.create { Terminal(2L, 2L) }
+                unused.close()
+                unused.close()
+                assertTrue(unused.executor.isTerminated)
+            }
+    }
+}
+
+private fun modelReply(effect: TerminalEffect): String = when (effect) {
+    case Reply(val bytes) -> String.fromUtf8(bytes)
+    case _ -> fail(Some("expected a model reply"))
+}
+
+private class ModelWorkerGate : Closeable {
+    private val lock = Mutex()
+    private val changed = ConditionVariable(lock)
+    private var released = false
+    fun await() {
+        lock
+            .withLock {
+                while (!released)
+                    changed.await()
+            }
+    }
+    fun open() {
+        lock
+            .withLock {
+                released = true;
+                changed.broadcast()
+            }
+    }
+    public override fun close() {
+        changed.dispose();
+        lock.dispose()
+    }
+}

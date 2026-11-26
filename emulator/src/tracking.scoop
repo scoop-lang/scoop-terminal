@@ -8,7 +8,7 @@ public enum TerminalTrackingKind {
 }
 
 public enum TerminalInvalidation {
-    Overwritten, Deleted, Evicted, Stale, Closed
+    Overwritten, Deleted, Evicted, Stale, Closed, Rejected
 }
 
 public enum TerminalTrackingState {
@@ -20,16 +20,24 @@ public struct TerminalTrackingLimits(
     val maxRowReferences: Long = 262144L
 )
 
-/** An owned, bounded registration. Its visible state always belongs to the supplied committed reading. */
-public class TerminalTrackedRange internal constructor(
-    public val id: Long,
-    private val owner: TerminalTracking,
+/** An owned registration; adapters may queue registration and closure on the terminal owner. */
+public interface TerminalTrackedRange : Closeable {
+    public val id: Long
+    public val isClosed: Boolean
+    public fun state(reading: TerminalReading): TerminalTrackingState
+}
+
+/** Its visible state always belongs to the supplied committed reading. */
+internal class CoreTrackedRange(
+    public override val id: Long,
+    owner: TerminalTracking,
     private val initial: TerminalTrackingState,
     private val presentation: Long
-) : Closeable {
+) : TerminalTrackedRange {
+    private var owner: TerminalTracking? = Some(owner)
     private var closed = false
-    public val isClosed: Boolean get() = closed
-    public fun state(reading: TerminalReading): TerminalTrackingState {
+    public override val isClosed: Boolean get() = closed
+    public override fun state(reading: TerminalReading): TerminalTrackingState {
         if (closed) return TerminalTrackingState.Invalidated(TerminalInvalidation.Closed)
         return when (val value = reading.trackedRange(id)) {
             case Some(val state) -> state
@@ -43,7 +51,9 @@ public class TerminalTrackedRange internal constructor(
     public override fun close() {
         if (closed) return
         closed = true
-        owner.remove(id)
+        val tracking = owner
+        owner = None
+        tracking?.remove(id)
     }
 }
 
@@ -224,7 +234,7 @@ internal class TerminalTracking(
         attach(entry)
         mark(entry)
         val initial = if (valid) TerminalTrackingState.Available(range) else entry.state()
-        return TerminalTrackedRange(id, this, initial, presentation)
+        return CoreTrackedRange(id, this, initial, presentation)
     }
 
     fun remove(id: Long) {
