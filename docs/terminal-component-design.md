@@ -376,6 +376,8 @@ Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使�
 
 索引平面采用 64×64 的不可变块和稀疏背景，局部擦除只复制相交块；颜色表另行版本化。快照共享未变块，冻结、复制和上传时同时存活的新旧分配均计入预算，最后一个租约关闭时清掉数组引用并退还配额。
 
+已实现的图片读接口为 `reading.images`，资源通过 `image(key)` 查找，placement 分页读取；该视图借用当前 reading 的生命周期。`TerminalSnapshot` 自动取得图片租约，model 交付和 UI 帧可单独调用 `images.retain()` 获得 `TerminalImageLease`。`image.pixels()` 返回必须关闭的 straight-alpha RGBA8 上传租约，不传 native 对象。搜索从独立文本投影读取，共享不可变行数据而不引用图片帧。
+
 PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 `terminal-ui`，复用 `scoop.graphics.Image.decode` 与 CPU `RasterSurface.readPixels()`，创建、使用、关闭 codec/native 资源后只返回不可变 RGBA8。先验证 PNG signature、IHDR 尺寸和乘法溢出，再交给 codec；不用 GPU framebuffer 读回来解码 PNG。核心不依赖 Skia；无窗口测试可注入确定性 decoder 或在 CPU 上单独测试该 adapter。
 
 **图片尺寸、放置导致的光标移动和查询回复属于 VT 流顺序。** 解析到图形结束时，必须完成决定这些行为所需的校验/解码，再处理后续文字和查询；不能先绘制后续文字，等异步图片回调回来再补光标。生产 session 在第 10 节的串行后台 model 队列执行这一过程，UI 继续显示已提交快照。GPU 资源准备只影响是否能绘制该帧，不反向改变 VT 状态。

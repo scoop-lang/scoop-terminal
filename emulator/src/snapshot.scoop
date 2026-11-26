@@ -26,7 +26,8 @@ private class SnapshotRetention(val reading: TerminalReadingData?)
 /** An owned immutable reading. close releases its lease; reading after close is an error. */
 public class TerminalSnapshot internal constructor(
     reading: TerminalReadingData,
-    private val budget: SnapshotBudget
+    private val budget: SnapshotBudget,
+    private val imageLease: TerminalImageLease
 ) : TerminalReading, Closeable {
     private val retained = AtomicRef<SnapshotRetention>(SnapshotRetention(Some(reading)))
     public val isClosed: Boolean
@@ -43,7 +44,7 @@ public class TerminalSnapshot internal constructor(
         options: TerminalSearchOptions = TerminalSearchOptions()
     ): TerminalSearch {
         val pattern = searchPattern(query, options)
-        val lease = budget.acquire(available())
+        val lease = budget.acquire(available().textProjection())
         val working = pattern.size * 256L + 4096L
         var reserved = false
         try {
@@ -78,6 +79,11 @@ public class TerminalSnapshot internal constructor(
     public override val mouseReporting: Boolean get() = available().mouseReporting
     public override val pixelSize: TerminalPixelSize? get() = available().pixelSize
     public override val colors: TerminalColors get() = available().colors
+    public override val images: TerminalImages
+        get() {
+            available()
+            return imageLease.images
+        }
     public override val metadata: TerminalMetadata get() = available().metadata
     public override val linkCount: Long get() = available().linkCount
     public override val trackingVersion: Long get() = available().trackingVersion
@@ -103,7 +109,11 @@ public class TerminalSnapshot internal constructor(
         .logicalLineRange(id)
     public override fun close() {
         val value = retained.exchange(SnapshotRetention(None)).reading ?: return
-        budget.release(value)
+        try {
+            budget.release(value)
+        } finally {
+            imageLease.close()
+        }
     }
 }
 
@@ -125,34 +135,40 @@ internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
     }
 
     fun acquire(reading: TerminalReadingData): TerminalSnapshot {
-        usage
-            .updateAndGet { current ->
-                if (current.handles >= limits.maxHandles)
-                    throw IllegalStateException(Some("terminal snapshot handle limit exceeded"))
-                val found = leaseIndex(current, reading)
-                val additional = if (found < 0L) reading.retainedBytes else 0L
-                if (additional > limits.maxRetainedBytes - current.bytes - current.working)
-                    throw IllegalStateException(
-                        Some("terminal snapshot retained-content limit exceeded")
+        val images = reading.images.retain()
+        try {
+            usage
+                .updateAndGet { current ->
+                    if (current.handles >= limits.maxHandles)
+                        throw IllegalStateException(Some("terminal snapshot handle limit exceeded"))
+                    val found = leaseIndex(current, reading)
+                    val additional = if (found < 0L) reading.retainedBytes else 0L
+                    if (additional > limits.maxRetainedBytes - current.bytes - current.working)
+                        throw IllegalStateException(
+                            Some("terminal snapshot retained-content limit exceeded")
+                        )
+                    val leases = Array<SnapshotLease>(
+                        current.leases.size + if (found < 0L) 1L else 0L
+                    ) { index ->
+                        if (index == current.leases.size)
+                            SnapshotLease(reading)
+                        else if (index == found)
+                            SnapshotLease(reading, current.leases[index].references + 1L)
+                        else
+                            current.leases[index]
+                    }
+                    SnapshotUsage(
+                        leases,
+                        current.handles + 1L,
+                        current.bytes + additional,
+                        current.working
                     )
-                val leases = Array<SnapshotLease>(
-                    current.leases.size + if (found < 0L) 1L else 0L
-                ) { index ->
-                    if (index == current.leases.size)
-                        SnapshotLease(reading)
-                    else if (index == found)
-                        SnapshotLease(reading, current.leases[index].references + 1L)
-                    else
-                        current.leases[index]
                 }
-                SnapshotUsage(
-                    leases,
-                    current.handles + 1L,
-                    current.bytes + additional,
-                    current.working
-                )
-            }
-        return TerminalSnapshot(reading, this)
+            return TerminalSnapshot(reading, this, images)
+        } catch (error: Throwable) {
+            images.close()
+            throw error
+        }
     }
 
     fun release(reading: TerminalReadingData) {

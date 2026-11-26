@@ -58,6 +58,10 @@ internal class ImageIndexedPlane private constructor(storage: IndexedImageStorag
     val version: Long get() = available().version
     val memory: ImageMemory get() = available().memory
     val background: Int get() = available().background
+    val retainedBytes: Long
+        get() = indexedMapBytes(available().tiles.size) +
+            tileCount *
+            (imageTileBytes + ImageBytes.overhead)
     val tileCount: Long
         get() {
             var count = 0L

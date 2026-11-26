@@ -1,0 +1,280 @@
+package scoop.terminal.emulator
+
+public enum TerminalImageProtocol {
+    Sixel, Kitty
+}
+
+/** Source pixels, independent of the terminal's cell size and UI scale factor. */
+public struct TerminalImageRect(val x: Long, val y: Long, val width: Long, val height: Long)
+
+/** Immutable buffer-relative placement. Zero columns/rows retain the image's pixel dimensions. */
+public struct TerminalImagePlacement(
+    val key: Long,
+    val imageKey: Long,
+    val placementId: Long,
+    val anchor: TerminalAnchor,
+    val source: TerminalImageRect,
+    val offsetX: Long = 0L,
+    val offsetY: Long = 0L,
+    val columns: Long = 0L,
+    val rows: Long = 0L,
+    val scaleX: Long = 1L,
+    val scaleY: Long = 1L,
+    val z: Long = 0L,
+    val columnOffset: Long = 0L,
+    val rowOffset: Long = 0L,
+    val clipLeft: Double = 0.0,
+    val clipTop: Double = 0.0,
+    val clipRight: Double = 1.0,
+    val clipBottom: Double = 1.0
+)
+
+/** An owned CPU upload result. bytes is borrowed for this lease's lifetime. */
+public class TerminalImagePixels internal constructor(private val raster: ImageRaster) : Closeable {
+    public val size: TerminalImageSize get() = raster.size
+    public val bytes: Array<Byte> get() = raster.pixels.bytes
+    public override fun close() {
+        raster.close()
+    }
+}
+
+private enum ImageContent {
+    Raster(ImageRaster), Indexed(ImageIndexedPlane, ImageBytes)
+}
+
+private class ImageContentReference(val value: ImageContent?)
+
+/** A borrowed immutable image version. Retain its reading or acquire pixels before handing it off. */
+public class TerminalImage private constructor(
+    public val key: Long,
+    public val imageId: Long,
+    public val imageNumber: Long,
+    public val protocol: TerminalImageProtocol,
+    public val version: Long,
+    public val paletteVersion: Long,
+    public val size: TerminalImageSize,
+    internal val memory: ImageMemory,
+    private val reservation: ImageReservation,
+    content: ImageContent,
+    internal val retainedBytes: Long
+) {
+    private val retained = AtomicRef<ImageContentReference>(ImageContentReference(Some(content)))
+    private fun available(): ImageContent = retained.load().value ?:
+        throw IllegalStateException(Some("terminal image version is released"))
+
+    /** Returns straight-alpha RGBA8. Indexed conversion is charged to the session CPU budget. */
+    public fun pixels(): TerminalImagePixels = TerminalImagePixels(
+        when (val content = available()) {
+            case Raster(val raster) -> raster.retain()
+            case Indexed(val plane, val palette) -> plane.rgba(palette)
+        }
+    )
+
+    internal fun retain(): TerminalImage = when (val content = available()) {
+        case Raster(val raster) -> TerminalImage.raster(key, imageId, imageNumber, raster.retain())
+
+        case Indexed(val plane, val palette) -> {
+            val held = plane.retain()
+            val colors = try {
+                palette.retain()
+            } catch (error: Throwable) {
+                held.close()
+                throw error
+            }
+            TerminalImage.indexed(key, held, colors)
+        }
+    }
+
+    internal fun recolored(palette: ImageBytes): TerminalImage = when (val content = available()) {
+        case Indexed(val plane, _) -> {
+            val held = plane.retain()
+            val colors = try {
+                palette.retain()
+            } catch (error: Throwable) {
+                held.close()
+                throw error
+            }
+            TerminalImage.indexed(key, held, colors)
+        }
+
+        case _ -> throw IllegalStateException(Some("RGBA images have no color registers"))
+    }
+
+    internal fun erased(left: Long, top: Long, right: Long, bottom: Long): TerminalImage =
+        when (val content = available()) {
+            case Indexed(val plane, val palette) -> {
+                val changed = plane.erased(left, top, right, bottom)
+                val colors = try {
+                    palette.retain()
+                } catch (error: Throwable) {
+                    changed.close()
+                    throw error
+                }
+                TerminalImage.indexed(key, changed, colors)
+            }
+
+            case _ -> throw IllegalStateException(Some("text erasure applies only to Sixel"))
+        }
+
+    internal fun close() {
+        val content = retained.exchange(ImageContentReference(None)).value ?: return
+        when (content) {
+            case Raster(val raster) -> raster.close()
+
+            case Indexed(val plane, val palette) -> {
+                plane.close()
+                palette.close()
+            }
+        }
+        reservation.close()
+    }
+
+    internal companion object {
+        /** Consumes the raster on both success and failure. */
+        fun raster(key: Long, id: Long, number: Long, raster: ImageRaster): TerminalImage {
+            val memory = raster.pixels.memory
+            try {
+                val reservation = memory.reserve(512L)
+                return TerminalImage(
+                    key, id, number, TerminalImageProtocol.Kitty, raster.pixels.version, 0L,
+                    raster.size, memory, reservation, ImageContent.Raster(raster),
+                    imageByteSum(raster.size.rgbaBytes, 768L)
+                )
+            } catch (error: Throwable) {
+                raster.close()
+                throw error
+            }
+        }
+
+        /** Consumes both the index plane and palette, including failure paths. */
+        fun indexed(key: Long, plane: ImageIndexedPlane, palette: ImageBytes): TerminalImage {
+            try {
+                if (plane.memory !== palette.memory)
+                    throw IllegalArgumentException(Some("palette belongs to another image budget"))
+                val memory = plane.memory
+                val reservation = memory.reserve(512L)
+                return TerminalImage(
+                    key, 0L, 0L, TerminalImageProtocol.Sixel, plane.version, palette.version,
+                    plane.size, memory, reservation, ImageContent.Indexed(plane, palette),
+                    imageByteSum(plane.retainedBytes, palette.bytes.size + 768L)
+                )
+            } catch (error: Throwable) {
+                plane.close()
+                palette.close()
+                throw error
+            }
+        }
+    }
+}
+
+private class ImageFrameData(
+    val images: Array<TerminalImage>,
+    val placements: Array<TerminalImagePlacement>,
+    val reservation: ImageReservation?
+)
+
+private class ImageFrameReference(val value: ImageFrameData?)
+
+/** Borrowed committed image content. A lease keeps it available across output and threads. */
+public class TerminalImages private constructor(
+    public val version: Long,
+    private val empty: Boolean,
+    data: ImageFrameData,
+    internal val retainedBytes: Long
+) {
+    private val references = AtomicLong(1L)
+    private val retained = AtomicRef<ImageFrameReference>(ImageFrameReference(Some(data)))
+    private fun available(): ImageFrameData = retained.load().value ?:
+        throw IllegalStateException(Some("terminal image reading is released"))
+    public val imageCount: Long get() = available().images.size
+    public val placementCount: Long get() = available().placements.size
+
+    public fun image(key: Long): TerminalImage? {
+        for (image in available().images)
+            if (image.key == key) return Some(image)
+        return None
+    }
+
+    public fun placements(start: Long, count: Long): Array<TerminalImagePlacement> {
+        val values = available().placements
+        if (start < 0L || count < 0L || start > values.size || count > values.size - start)
+            throw IndexOutOfBoundsException()
+        return Array<TerminalImagePlacement>(count) { offset -> values[start + offset] }
+    }
+
+    public fun retain(): TerminalImageLease {
+        if (!empty)
+            references
+                .updateAndGet { count ->
+                    if (count == 0L || count == Long.MAX_VALUE)
+                        throw IllegalStateException(
+                            Some("terminal image reading cannot be retained")
+                        )
+                    count + 1L
+                }
+        return TerminalImageLease(this)
+    }
+
+    internal fun release() {
+        if (empty) return
+        val remaining = references
+            .updateAndGet { count ->
+                if (count <= 0L)
+                    throw IllegalStateException(Some("image reading reference underflow"))
+                count - 1L
+            }
+        if (remaining != 0L) return
+        val data = retained.exchange(ImageFrameReference(None)).value!!
+        for (image in data.images)
+            image.close()
+        data.reservation?.close()
+    }
+
+    internal companion object {
+        val Empty = TerminalImages(0L, true, ImageFrameData([], [], None), 0L)
+
+        /** Creates one owner reference; adopts images on success and closes them on failure. */
+        fun adopt(
+            memory: ImageMemory,
+            version: Long,
+            images: Array<TerminalImage>,
+            placements: Array<TerminalImagePlacement>
+        ): TerminalImages {
+            var reservation: ImageReservation? = None
+            try {
+                if (placements.size > memory.limits.maxPlacements)
+                    imageFailure(TerminalImageFailure.Limit, "image placement limit exceeded")
+                val metadata = imageByteSum(512L, images.size * 128L + placements.size * 512L)
+                reservation = Some(memory.reserve(metadata))
+                var bytes = metadata
+                for (image in images) {
+                    if (image.memory !== memory)
+                        throw IllegalArgumentException(Some("image belongs to another budget"))
+                    bytes = imageByteSum(bytes, image.retainedBytes)
+                }
+                return TerminalImages(
+                    version, false, ImageFrameData(images, placements, reservation), bytes
+                )
+            } catch (error: Throwable) {
+                for (image in images)
+                    image.close()
+                reservation?.close()
+                throw error
+            }
+        }
+    }
+}
+
+private class ImageLeaseReference(val value: TerminalImages?)
+
+/** Independent image-only ownership for model delivery and accepted/pending UI frames. */
+public class TerminalImageLease internal constructor(images: TerminalImages) : Closeable {
+    private val retained = AtomicRef<ImageLeaseReference>(ImageLeaseReference(Some(images)))
+    public val images: TerminalImages
+        get() = retained.load().value ?:
+            throw IllegalStateException(Some("terminal image lease is closed"))
+    public override fun close() {
+        val images = retained.exchange(ImageLeaseReference(None)).value ?: return
+        images.release()
+    }
+}

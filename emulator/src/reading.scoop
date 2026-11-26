@@ -16,6 +16,7 @@ public interface TerminalReading {
     public val mouseReporting: Boolean
     public val pixelSize: TerminalPixelSize?
     public val colors: TerminalColors
+    public val images: TerminalImages
     public val metadata: TerminalMetadata
     public val linkCount: Long
     public fun link(key: Long): TerminalLink?
@@ -55,8 +56,34 @@ internal class TerminalReadingData(
     private val links: LinkReading,
     private val tracking: TrackingReading,
     private val commandData: CommandReading,
-    public override val ambiguousWidth: TerminalAmbiguousWidth
+    public override val ambiguousWidth: TerminalAmbiguousWidth,
+    public override val images: TerminalImages = TerminalImages.Empty
 ) : TerminalReading {
+    private val textual = AtomicRef<TextReadingReference>(TextReadingReference(None))
+
+    /** Sharing text never retains a parent reading or its image data. */
+    internal fun textProjection(): TerminalReadingData {
+        if (images === TerminalImages.Empty) return this
+        when (val previous = textual.load().value) {
+            case Some(val reading) -> return reading
+            case None -> {}
+        }
+        val next = TextReadingReference(Some(withImages(TerminalImages.Empty)))
+        while (true) {
+            val previous = textual.load()
+            when (val reading = previous.value) {
+                case Some(val reading) -> return reading
+                case None -> {}
+            }
+            if (textual.compareAndSet(previous, next)) return next.value!!
+        }
+    }
+
+    internal fun withImages(value: TerminalImages): TerminalReadingData = TerminalReadingData(
+        columns, bufferEpoch, alternateScreen, revision, screenRevision, textRevision,
+        presentationVersion, cursor, mouseReporting, history, screenLines, pixelSize, colors,
+        metadata, links, tracking, commandData, ambiguousWidth, value
+    )
     public override val rows: Long get() = screenLines.size
     public override val historySize: Long get() = history.size
     public override val linkCount: Long get() = links.count
@@ -77,7 +104,8 @@ internal class TerminalReadingData(
         links.bytes +
         tracking.count *
         256L +
-        commandData.bytes
+        commandData.bytes +
+        images.retainedBytes
 
     private fun line(index: Long): TerminalLine = if (index < historySize)
         history[index]
@@ -141,6 +169,8 @@ internal class TerminalReadingData(
         return Some(LogicalSpan(first, last))
     }
 }
+
+private class TextReadingReference(val value: TerminalReadingData?)
 
 private fun readingBytes(history: HistoryReading, rows: Array<TerminalLine>): Long {
     var bytes = history.retainedBytes
