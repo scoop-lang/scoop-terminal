@@ -70,7 +70,8 @@ internal class TrackedEntry(
     val kind: TerminalTrackingKind,
     start: TrackedPoint,
     end: TrackedPoint,
-    var rows: Array<ScreenRow>
+    var rows: Array<ScreenRow>,
+    val followTextEdits: Boolean = true
 ) {
     private var firstPoint: TrackedPoint? = Some(start)
     private var lastPoint: TrackedPoint? = Some(end)
@@ -188,11 +189,21 @@ internal class TerminalTracking(
         screen: Screen,
         range: TerminalRange,
         kind: TerminalTrackingKind,
-        presentation: Long
+        presentation: Long,
+        followTextEdits: Boolean = true
     ): TerminalTrackedRange {
         val first = screen.resolve(range.start)
         val last = screen.resolve(range.end)
-        return create(screen, range, kind, first, last, first != None && last != None, presentation)
+        return create(
+            screen,
+            range,
+            kind,
+            first,
+            last,
+            first != None && last != None,
+            presentation,
+            followTextEdits
+        )
     }
 
     fun current(id: Long): TerminalTrackingState? = entries[id]?.state()
@@ -207,7 +218,8 @@ internal class TerminalTracking(
         first: TerminalPosition?,
         last: TerminalPosition?,
         valid: Boolean,
-        presentation: Long
+        presentation: Long,
+        followTextEdits: Boolean = true
     ): TerminalTrackedRange {
         if (entries.size >= limits.maxHandles)
             throw IllegalStateException(Some("terminal tracking handle limit exceeded"))
@@ -224,7 +236,8 @@ internal class TerminalTracking(
         val entry = TrackedEntry(
             id, screen.bufferEpoch, kind,
             TrackedPoint(screen.rowAt(start.row), start.column, range.start.affinity),
-            TrackedPoint(screen.rowAt(end.row), end.column, range.end.affinity), rows
+            TrackedPoint(screen.rowAt(end.row), end.column, range.end.affinity), rows,
+            followTextEdits
         )
         if (!valid) {
             entry.invalid = Some(TerminalInvalidation.Stale);
@@ -293,6 +306,7 @@ internal class TerminalTracking(
     fun takeWrap(row: ScreenRow): Array<TrackedEntry> {
         val followers = ArrayList<TrackedEntry>()
         for (entry in row.tracked.toArray()) {
+            if (!entry.followTextEdits) continue
             if (entry.kind !=
                 TerminalTrackingKind.Content &&
                 entry.start.row ===
@@ -343,6 +357,7 @@ internal class TerminalTracking(
         val deletedStart = if (insert) end - count else start
         val deletedEnd = if (insert) end else start + count
         for (entry in row.tracked.toArray()) {
+            if (!entry.followTextEdits) continue
             val left = if (entry.start.row === row) entry.start.column else 0L
             val right = if (entry.end.row === row) entry.end.column else row.columns
             if (entry.kind ==

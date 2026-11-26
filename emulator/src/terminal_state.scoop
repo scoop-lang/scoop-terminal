@@ -13,7 +13,8 @@ internal class TerminalState(
     val clipboardPolicy: TerminalClipboardPolicy,
     linkLimits: TerminalLinkLimits,
     trackingLimits: TerminalTrackingLimits,
-    commandLimits: TerminalCommandLimits
+    commandLimits: TerminalCommandLimits,
+    imageLimits: TerminalImageLimits
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges(
@@ -22,9 +23,17 @@ internal class TerminalState(
     )
     val links: TerminalLinkStore get() = screenChanges.links
     val tracking: TerminalTracking get() = screenChanges.tracking
+    val images = TerminalImageStore(
+        ImageMemory(imageLimits), tracking,
+        { message -> emit(TerminalEffect.Diagnostic(message)) }
+    )
     val commands = TerminalCommands(tracking, commandLimits)
     val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
+    init {
+        screenChanges.images = Some(images)
+        images.attach([main, alternate])
+    }
     var alternateScreen = false
     val screen: Screen get() = if (alternateScreen) alternate else main
     var style = TerminalStyle()
@@ -49,6 +58,7 @@ internal class TerminalState(
     private var textRevision = 0L
     private var presentationVersion = 0L
     private var presentationPending = false
+    private var imageRevision = 0L
     var synchronizedOutput = false
     var synchronizationGeneration = 0L
     val revision: Long get() = modelRevision
@@ -62,7 +72,7 @@ internal class TerminalState(
             modelRevision, gridRevision, textRevision, presentationVersion,
             alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
                 .cursorBlink, pixelSize, colorState.current, metadata, commands.snapshot(screen),
-            ambiguousWidth
+            ambiguousWidth, images.snapshot(screen)
         )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
@@ -86,9 +96,12 @@ internal class TerminalState(
     private fun flush(publish: Boolean) {
         screen.reconcileLogicalLines()
         commands.prune()
+        images.prune()
+        images.refreshPalette()
         val screenChanged = updateScreenRevision()
         val trackedChanged = tracking.takeChanged()
-        val modified = changed || screenChanged || trackedChanged
+        val modified = changed || screenChanged || trackedChanged || imageRevision != images.version
+        imageRevision = images.version
         if (screenChanges.textPending) {
             textRevision += 1L
             screenChanges.textPending = false
@@ -100,7 +113,10 @@ internal class TerminalState(
         changed = false
         if (publish && presentationPending) {
             presentationVersion += 1L
+            val previous = committed
             committed = captureReading()
+            previous.images.release()
+            imageRevision = images.version
             presentationPending = false
         }
     }
@@ -177,6 +193,7 @@ internal class TerminalState(
         val before = committed
         setSynchronizedOutput(false)
         pixelSize = pixels
+        images.setPixels(pixels)
         if (columns == main.columns && rows == main.rows) {
             changed = true
             return update(before)
@@ -514,6 +531,7 @@ internal class TerminalState(
         commands.reset(alternate.bufferEpoch)
         main.reset(style)
         alternate.reset(style)
+        images.resetPalette()
         alternateScreen = false
         tabs = defaultTabs(main.columns)
         charset = 0
@@ -528,6 +546,17 @@ internal class TerminalState(
         }
         lastPrinted = TerminalCell()
         changed = true
+    }
+
+    fun close() {
+        try {
+            finishOutput()
+        } finally {
+            images.close()
+            val previous = committed
+            committed = previous.textProjection()
+            previous.images.release()
+        }
     }
 }
 

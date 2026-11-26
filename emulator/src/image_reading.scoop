@@ -203,6 +203,10 @@ public class TerminalImages private constructor(
     }
 
     public fun retain(): TerminalImageLease {
+        return TerminalImageLease(retainOwner())
+    }
+
+    internal fun retainOwner(): TerminalImages {
         if (!empty)
             references
                 .updateAndGet { count ->
@@ -212,7 +216,7 @@ public class TerminalImages private constructor(
                         )
                     count + 1L
                 }
-        return TerminalImageLease(this)
+        return this
     }
 
     internal fun release() {

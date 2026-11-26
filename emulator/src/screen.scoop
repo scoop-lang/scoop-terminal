@@ -8,6 +8,7 @@ internal class ScreenChanges(
 ) {
     var pending = false
     var textPending = false
+    var images: TerminalImageStore? = None
 }
 
 internal class RowIds {
@@ -137,14 +138,15 @@ internal class Screen(
         colors: TerminalColors,
         metadata: TerminalMetadata,
         commands: CommandReading,
-        ambiguousWidth: TerminalAmbiguousWidth
+        ambiguousWidth: TerminalAmbiguousWidth,
+        images: TerminalImages = TerminalImages.Empty
     ): TerminalReadingData = TerminalReadingData(
         columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
         presentationVersion,
         TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
             .snapshot(),
         Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
-        changes.links.snapshot(), changes.tracking.snapshot(), commands, ambiguousWidth
+        changes.links.snapshot(), changes.tracking.snapshot(), commands, ambiguousWidth, images
     )
 
     fun reconcileLogicalLines() {
@@ -273,6 +275,7 @@ internal class Screen(
 
     fun eraseDisplay(mode: Int, style: TerminalStyle) {
         pendingWrap = false
+        changes.images?.eraseDisplay(this, mode)
         when (mode) {
             case 0 -> {
                 current.erase(column, columns, style)
@@ -316,6 +319,31 @@ internal class Screen(
         style: TerminalStyle,
         record: Boolean = true
     ) {
+        val images = if ((changes.images?.placementCount ?: 0L) == 0L) None else changes.images
+        val moved = images
+            ?.beforeScroll(
+                this, first, last, count, true,
+                record && first == 0L && last == rows - 1L && left == 0L && right == columns - 1L
+            )
+        images?.suspendCells()
+        try {
+            scrollUpGrid(first, last, count, style, record)
+        } finally {
+            images?.resumeCells()
+        }
+        when (moved) {
+            case Some(val value) -> images!!.afterScroll(this, value)
+            case None -> {}
+        }
+    }
+
+    private fun scrollUpGrid(
+        first: Long,
+        last: Long,
+        count: Long,
+        style: TerminalStyle,
+        record: Boolean
+    ) {
         pendingWrap = false
         if (left != 0L || right != columns - 1L) {
             scrollRectangle(first, last, count, true, style)
@@ -332,6 +360,21 @@ internal class Screen(
     }
 
     fun scrollDown(first: Long, last: Long, count: Long, style: TerminalStyle) {
+        val images = if ((changes.images?.placementCount ?: 0L) == 0L) None else changes.images
+        val moved = images?.beforeScroll(this, first, last, count, false, false)
+        images?.suspendCells()
+        try {
+            scrollDownGrid(first, last, count, style)
+        } finally {
+            images?.resumeCells()
+        }
+        when (moved) {
+            case Some(val value) -> images!!.afterScroll(this, value)
+            case None -> {}
+        }
+    }
+
+    private fun scrollDownGrid(first: Long, last: Long, count: Long, style: TerminalStyle) {
         pendingWrap = false
         if (left != 0L || right != columns - 1L) {
             scrollRectangle(first, last, count, false, style)
@@ -383,6 +426,21 @@ internal class Screen(
     }
 
     fun resize(width: Long, height: Long, restoreHistory: Boolean, style: TerminalStyle) {
+        changes.images?.suspendCells()
+        try {
+            resizeGrid(width, height, restoreHistory, style)
+        } finally {
+            changes.images?.resumeCells()
+        }
+        changes.images?.afterResize(this)
+    }
+
+    private fun resizeGrid(
+        width: Long,
+        height: Long,
+        restoreHistory: Boolean,
+        style: TerminalStyle
+    ) {
         val previousWidth = columns
         if (reflow && previousWidth != width) {
             reflowResize(width, height, restoreHistory, style)
@@ -433,7 +491,13 @@ internal class Screen(
     }
 
     fun remeasure(ambiguous: TerminalAmbiguousWidth, style: TerminalStyle) {
-        reflowResize(columns, rows, true, style, Some(ambiguous))
+        changes.images?.suspendCells()
+        try {
+            reflowResize(columns, rows, true, style, Some(ambiguous))
+        } finally {
+            changes.images?.resumeCells()
+        }
+        changes.images?.afterResize(this)
     }
 
     private fun reflowResize(
@@ -543,6 +607,7 @@ internal class Screen(
     }
 
     fun reset(style: TerminalStyle) {
+        changes.images?.reset(epoch)
         epoch = ids.take()
         changes.textPending = true
         for (index in 0L..<rows) {

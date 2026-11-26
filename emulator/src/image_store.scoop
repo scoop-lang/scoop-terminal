@@ -1,0 +1,661 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+
+internal class StoredImage(
+    val epoch: Long,
+    var image: TerminalImage,
+    val sharedPalette: Boolean,
+    val created: Long,
+    var age: Long
+)
+
+internal class StoredImagePlacement(
+    val screen: Screen,
+    var record: TerminalImagePlacement,
+    var point: TerminalTrackedRange,
+    val reservation: ImageReservation
+) : Closeable {
+    var tail: TerminalTrackedRange? = None
+    var tailRows = 0L
+    var tailColumns = 0L
+    public override fun close() {
+        point.close()
+        tail?.close()
+        tail = None
+        reservation.close()
+    }
+}
+
+internal struct ImageScrollPlacement(
+    val key: Long,
+    val row: Long,
+    val column: Long,
+    val moving: Boolean
+)
+
+internal struct ImageScroll(
+    val history: Long,
+    val count: Long,
+    val up: Boolean,
+    val recordsHistory: Boolean,
+    val region: TerminalImageBounds,
+    val placements: Array<ImageScrollPlacement>
+)
+
+/** Single-model-owner image identities and placements. The published data owns separate leases. */
+internal class TerminalImageStore(
+    val memory: ImageMemory,
+    private val tracking: TerminalTracking,
+    private val diagnostic: (String) -> Unit = {}
+) : Closeable {
+    private val resources = HashMap<Long, StoredImage>()
+    private val placed = HashMap<Long, StoredImagePlacement>()
+    private var screens: Array<Screen> = []
+    private var shared: SixelRegisters? = None
+    private var clock = 0L
+    private var nextKitty = 1L
+    private var cached = TerminalImages.Empty
+    private var cachedVersion = -1L
+    private var cachedEpoch = -1L
+    private var suppressed = 0L
+    private var sixelCount = 0L
+    private var revision = 0L
+    private var wide = 8L
+    private var high = 16L
+    val version: Long get() = revision
+    val cellWidth: Long get() = wide
+    val cellHeight: Long get() = high
+    val resourceCount: Long get() = resources.size
+    val placementCount: Long get() = placed.size
+
+    fun attach(values: Array<Screen>) {
+        screens = values
+    }
+
+    fun setPixels(pixels: TerminalPixelSize?) {
+        val width = pixels?.cellWidth ?: 8L
+        val height = pixels?.cellHeight ?: 16L
+        if (width == cellWidth && height == cellHeight) return
+        wide = width
+        high = height
+        changed()
+    }
+
+    fun suspendCells() {
+        suppressed += 1L
+    }
+    fun resumeCells() {
+        if (suppressed == 0L) throw IllegalStateException(Some("image edit suppression underflow"))
+        suppressed -= 1L
+    }
+
+    private fun changed() {
+        revision += 1L
+        cached.release()
+        cached = TerminalImages.Empty
+        cachedVersion = -1L
+    }
+
+    private fun age(): Long {
+        clock += 1L
+        return clock
+    }
+
+    fun palette(): SixelRegisters = when (val palette = shared) {
+        case Some(val palette) -> palette
+
+        case None -> {
+            val palette = SixelRegisters(memory)
+            shared = Some(palette)
+            palette
+        }
+    }
+
+    fun key(): Long = memory.nextVersion()
+    fun get(key: Long): TerminalImage? = resources[key]?.image
+
+    fun kitty(epoch: Long, id: Long, number: Long = 0L): TerminalImage? {
+        var candidate: StoredImage? = None
+        for (entry in resources.values) {
+            if (entry.epoch != epoch || entry.image.protocol != TerminalImageProtocol.Kitty)
+                continue
+            if (id > 0L && entry.image.imageId == id) return Some(entry.image)
+            if (number >
+                0L &&
+                entry.image.imageNumber ==
+                number &&
+                entry.created >
+                (candidate?.created ?: -1L)
+            )
+                candidate = Some(entry)
+        }
+        return candidate?.image
+    }
+
+    fun allocateKittyId(epoch: Long): Long {
+        // Each candidate either succeeds or skips a currently stored identity.
+        for (attempt in 0L..resources.size) {
+            val id = nextKitty
+            nextKitty = if (id == 4294967295L) 1L else id + 1L
+            when (kitty(epoch, id)) {
+                case None -> return id
+                case Some(_) -> {}
+            }
+        }
+        imageFailure(TerminalImageFailure.Limit, "Kitty image ID space exhausted")
+    }
+
+    /** Takes ownership only after the new image has passed all transfer and codec checks. */
+    fun install(screen: Screen, image: TerminalImage, sharedPalette: Boolean = false) {
+        when (resources[image.key]) {
+            case Some(_) -> throw IllegalArgumentException(Some("image key is already installed"))
+            case None -> {}
+        }
+        if (image.protocol == TerminalImageProtocol.Kitty && image.imageId != 0L) {
+            when (val previous = kitty(screen.bufferEpoch, image.imageId)) {
+                case Some(val previous) -> removeResource(previous.key)
+                case None -> {}
+            }
+        }
+        if (image.protocol == TerminalImageProtocol.Sixel) sixelCount += 1L
+        val generation = age()
+        resources[image.key] = StoredImage(
+            screen.bufferEpoch,
+            image,
+            sharedPalette,
+            generation,
+            generation
+        )
+        changed()
+    }
+
+    fun entries(screen: Screen): Array<StoredImagePlacement> {
+        val values = ArrayList<StoredImagePlacement>()
+        for (entry in placed.values)
+            if (entry.screen === screen) values.add(entry)
+        return values.toArray()
+    }
+
+    private fun anchor(point: TerminalTrackedRange): TerminalAnchor? = when (val state = tracking
+        .current(point.id)
+    ) {
+        case Some(Available(val range)) -> Some(range.start)
+        case _ -> None
+    }
+
+    fun position(entry: StoredImagePlacement): TerminalPosition? {
+        val point = anchor(entry.point) ?: return None
+        return entry.screen.resolve(point)
+    }
+
+    fun geometry(entry: StoredImagePlacement): TerminalImageGeometry? {
+        val point = position(entry) ?: return None
+        return Some(imageGeometry(entry.record, point, cellWidth.toDouble(), cellHeight.toDouble()))
+    }
+
+    fun place(screen: Screen, record: TerminalImagePlacement): StoredImagePlacement {
+        val image = resources[record.imageKey] ?:
+            imageFailure(TerminalImageFailure.InvalidData, "image resource is unavailable")
+        if (image.epoch != screen.bufferEpoch)
+            imageFailure(TerminalImageFailure.InvalidData, "image belongs to another buffer")
+        var replaced: StoredImagePlacement? = None
+        if (record.placementId != 0L && image.image.imageId != 0L) {
+            for (entry in placed.values)
+                if (entry.record.imageKey ==
+                    record.imageKey &&
+                    entry.record.placementId ==
+                    record.placementId
+                )
+                    replaced = Some(entry)
+        }
+        val allowance = when (replaced) {
+            case Some(_) -> 1L;
+            case None -> 0L
+        }
+        if (placed.size - allowance >= memory.limits.maxPlacements)
+            imageFailure(TerminalImageFailure.Limit, "image placement limit exceeded")
+        val reservation = memory.reserve(2048L)
+        var handle: TerminalTrackedRange? = None
+        var created: StoredImagePlacement? = None
+        try {
+            handle = Some(track(screen, record.anchor))
+            val entry = StoredImagePlacement(screen, record, handle!!, reservation)
+            created = Some(entry)
+            refreshTail(entry)
+            tracking.watch(entry.point.id) { changed() }
+            placed[record.key] = entry
+            when (replaced) {
+                case Some(val previous) -> removePlacement(previous.record.key, keepResource = true)
+                case None -> {}
+            }
+            image.age = age()
+            changed()
+            return entry
+        } catch (error: Throwable) {
+            when (created) {
+                case Some(val entry) -> entry.close()
+
+                case None -> {
+                    handle?.close();
+                    reservation.close()
+                }
+            }
+            throw error
+        }
+    }
+
+    private fun track(screen: Screen, point: TerminalAnchor): TerminalTrackedRange = tracking
+        .registerLive(
+            screen, TerminalRange(point, point), TerminalTrackingKind.Position, 0L,
+            followTextEdits = false
+        )
+
+    private fun refreshTail(entry: StoredImagePlacement) {
+        entry.tail?.close()
+        entry.tail = None
+        val point = position(entry) ?: return
+        val area = geometry(entry) ?: return
+        val row = clamp(
+            imageCeil((area.visible.y + area.visible.height) / cellHeight.toDouble()) - 1L,
+            0L, entry.screen.historySize + entry.screen.rows - 1L
+        )
+        entry.tailRows = row - point.row - entry.record.rowOffset
+        if (row <= point.row) return
+        val boundary = entry.screen.anchorAt(row, point.column, TerminalAffinity.Before)!!
+        val tailPosition = entry.screen.resolve(boundary)!!
+        entry.tailColumns = tailPosition.column - point.column - entry.record.columnOffset
+        val tail = track(entry.screen, boundary)
+        entry.tail = Some(tail)
+        tracking.watch(tail.id) { changed() }
+    }
+
+    /** Tail tracking preserves a surviving fragment if its leading history row is evicted. */
+    fun prune() {
+        val values = ArrayList<StoredImagePlacement>()
+        for (entry in placed.values)
+            values.add(entry)
+        for (entry in values) {
+            if (position(entry) != None) continue
+            val evicted = when (tracking.current(entry.point.id)) {
+                case Some(Invalidated(TerminalInvalidation.Evicted)) -> true
+                case _ -> false
+            }
+            val tail = entry.tail
+            val at = when (tail) {
+                case Some(val tail) -> {
+                    val boundary = anchor(tail)
+                    when (boundary) {
+                        case Some(val boundary) -> entry.screen.resolve(boundary)
+                        case None -> None
+                    }
+                }
+
+                case None -> None
+            }
+            if (evicted && at != None) {
+                relocate(entry, at!!.row - entry.tailRows, at!!.column - entry.tailColumns)
+                clip(
+                    entry,
+                    TerminalImageBounds(
+                        0.0, 0.0,
+                        entry.screen.columns.toDouble() * cellWidth.toDouble(), Double.MAX_VALUE
+                    )
+                )
+            } else
+                removePlacement(entry.record.key)
+        }
+    }
+
+    fun afterResize(screen: Screen) {
+        prune()
+        for (entry in entries(screen))
+            refreshTail(entry)
+        changed()
+    }
+
+    private fun relocate(entry: StoredImagePlacement, row: Long, column: Long) {
+        val keptRow = clamp(row, 0L, entry.screen.historySize + entry.screen.rows - 1L)
+        val keptColumn = clamp(column, 0L, entry.screen.columns - 1L)
+        val point = entry.screen.anchorAt(keptRow, keptColumn, TerminalAffinity.Before)!!
+        val position = entry.screen.resolve(point)!!
+        entry.point.close()
+        entry.tail?.close()
+        entry.tail = None
+        val handle = track(entry.screen, point)
+        entry.point = handle
+        entry.record = entry
+            .record.{
+                anchor: point,
+                rowOffset: row - position.row,
+                columnOffset: column - position.column
+            }
+        tracking.watch(handle.id) { changed() }
+        refreshTail(entry)
+        changed()
+    }
+
+    private fun clip(entry: StoredImagePlacement, region: TerminalImageBounds) {
+        val area = geometry(entry) ?: return
+        if (!imageIntersects(area.visible, region)) {
+            removePlacement(entry.record.key);
+            return
+        }
+        val target = area.destination
+        val previous = entry.record
+        entry.record = previous.{
+            clipLeft: imageMaximum(previous.clipLeft, (region.x - target.x) / target.width),
+            clipTop: imageMaximum(previous.clipTop, (region.y - target.y) / target.height),
+            clipRight: imageMinimum(
+                previous.clipRight,
+                (region.x + region.width - target.x) / target.width
+            ),
+            clipBottom: imageMinimum(
+                previous.clipBottom,
+                (region.y + region.height - target.y) / target.height
+            )
+        }
+        changed()
+    }
+
+    fun beforeScroll(
+        screen: Screen,
+        first: Long,
+        last: Long,
+        count: Long,
+        up: Boolean,
+        history: Boolean
+    ): ImageScroll {
+        val amount = clamp(count, 0L, last - first + 1L)
+        val region = TerminalImageBounds(
+            screen.left.toDouble() * cellWidth.toDouble(),
+            (screen.historySize + first).toDouble() * cellHeight.toDouble(),
+            (screen.right - screen.left + 1L).toDouble() * cellWidth.toDouble(),
+            (last - first + 1L).toDouble() * cellHeight.toDouble()
+        )
+        val values = ArrayList<ImageScrollPlacement>()
+        for (entry in entries(screen)) {
+            val point = position(entry) ?: continue
+            val area = geometry(entry) ?: continue
+            values
+                .add(
+                    ImageScrollPlacement(
+                        entry.record.key, point.row + entry.record.rowOffset,
+                        point.column + entry.record.columnOffset, history ||
+                            imageInside(area.visible, region)
+                    )
+                )
+        }
+        return ImageScroll(screen.historySize, amount, up, history, region, values.toArray())
+    }
+
+    fun afterScroll(screen: Screen, scroll: ImageScroll) {
+        if (scroll.count == 0L) return
+        val removed = if (scroll.recordsHistory)
+            scroll.history + scroll.count - screen.historySize
+        else
+            0L
+        for (moved in scroll.placements) {
+            val entry = placed[moved.key] ?: continue
+            val delta = if (scroll.recordsHistory)
+                -removed
+            else if (moved.moving) (if (scroll.up) -scroll.count else scroll.count) else 0L
+            relocate(entry, moved.row + delta, moved.column)
+            if (scroll.recordsHistory) {
+                clip(
+                    entry,
+                    TerminalImageBounds(
+                        0.0, 0.0,
+                        screen.columns.toDouble() * cellWidth.toDouble(), Double.MAX_VALUE
+                    )
+                )
+            } else if (moved.moving) clip(entry, scroll.region)
+        }
+    }
+
+    /** Called for actual text writes, including writes of the same text or an already blank cell. */
+    fun erase(row: ScreenRow, start: Long, end: Long) {
+        if (suppressed != 0L || sixelCount == 0L || end <= start) return
+        for (screen in screens) {
+            val index = screen.findLine(row.id) ?: continue
+            val region = TerminalImageBounds(
+                start.toDouble() * cellWidth.toDouble(),
+                index.toDouble() * cellHeight.toDouble(), (end - start).toDouble() *
+                    cellWidth.toDouble(), cellHeight.toDouble()
+            )
+            for (entry in entries(screen)) {
+                val resource = resources[entry.record.imageKey] ?: continue
+                if (resource.image.protocol != TerminalImageProtocol.Sixel) continue
+                val area = geometry(entry) ?: continue
+                if (!imageIntersects(area.visible, region)) continue
+                if (imageInside(area.visible, region)) {
+                    removePlacement(entry.record.key)
+                    continue
+                }
+                val source = area.source
+                val target = area.destination
+                val x1 = ((region.x - target.x) / target.width * source.width.toDouble()).toLong() +
+                    source.x
+                val y1 = ((region.y - target.y) / target.height * source.height.toDouble())
+                    .toLong() +
+                    source.y
+                val x2 = imageCeil(
+                    (region.x + region.width - target.x) / target.width * source.width.toDouble()
+                ) +
+                    source.x
+                val y2 = imageCeil(
+                    (region.y + region.height - target.y) / target.height * source.height.toDouble()
+                ) +
+                    source.y
+                try {
+                    val next = resource.image.erased(x1, y1, x2, y2)
+                    val old = resource.image
+                    resource.image = next
+                    old.close()
+                    changed()
+                } catch (error: TerminalImageException) {
+                    removePlacement(entry.record.key)
+                    diagnostic("Sixel image retired after text erasure exceeded the image budget")
+                }
+            }
+            return
+        }
+    }
+
+    fun eraseDisplay(screen: Screen, mode: Int) {
+        if (mode != 2) return
+        val visible = viewport(screen)
+        for (entry in entries(screen)) {
+            val area = geometry(entry) ?: continue
+            val image = resources[entry.record.imageKey]?.image ?: continue
+            if (image.protocol ==
+                TerminalImageProtocol.Kitty &&
+                imageIntersects(area.visible, visible)
+            )
+                removePlacement(entry.record.key, freeData = true)
+            else if (image.protocol ==
+                TerminalImageProtocol.Sixel &&
+                imageInside(area.visible, visible)
+            )
+                removePlacement(entry.record.key)
+        }
+    }
+
+    fun refreshPalette() {
+        val palette = shared ?: return
+        val targets = ArrayList<StoredImage>()
+        for (entry in resources.values)
+            if (entry.sharedPalette && entry.image.paletteVersion != palette.version)
+                targets.add(entry)
+        if (targets.size == 0L) return
+        palette
+            .snapshot()
+            .use { colors ->
+                for (entry in targets) {
+                    try {
+                        val next = entry.image.recolored(colors)
+                        val old = entry.image
+                        entry.image = next
+                        old.close()
+                        changed()
+                    } catch (_: TerminalImageException) {
+                        removeResource(entry.image.key)
+                        diagnostic(
+                            "Sixel image retired after shared palette update exceeded the image budget"
+                        )
+                    }
+                }
+            }
+    }
+
+    fun removePlacement(key: Long, freeData: Boolean = false, keepResource: Boolean = false) {
+        val entry = placed[key] ?: return
+        placed.remove(key)
+        entry.close()
+        changed()
+        val image = resources[entry.record.imageKey]?.image ?: return
+        if (!keepResource &&
+            !hasPlacements(image.key) &&
+            (freeData || image.protocol == TerminalImageProtocol.Sixel || image.imageId == 0L)
+        )
+            removeResource(image.key)
+    }
+
+    fun hasPlacements(key: Long): Boolean {
+        for (entry in placed.values)
+            if (entry.record.imageKey == key) return true
+        return false
+    }
+
+    fun removeResource(key: Long) {
+        val image = resources[key] ?: return
+        val ids = ArrayList<Long>()
+        for (entry in placed.values)
+            if (entry.record.imageKey == key) ids.add(entry.record.key)
+        for (id in ids)
+            removePlacement(id, keepResource = true)
+        resources.remove(key)
+        if (image.image.protocol == TerminalImageProtocol.Sixel) sixelCount -= 1L
+        image.image.close()
+        changed()
+    }
+
+    fun reset(epoch: Long) {
+        val keys = ArrayList<Long>()
+        for (entry in resources.values)
+            if (entry.epoch == epoch) keys.add(entry.image.key)
+        for (key in keys)
+            removeResource(key)
+    }
+
+    fun resetPalette() {
+        shared?.close()
+        shared = None
+    }
+
+    fun viewport(screen: Screen): TerminalImageBounds = TerminalImageBounds(
+        0.0, screen.historySize.toDouble() * cellHeight.toDouble(),
+        screen.columns.toDouble() * cellWidth.toDouble(), screen.rows.toDouble() *
+            cellHeight.toDouble()
+    )
+
+    /** Evicts unplaced resources first, then the oldest resource with no currently visible placement. */
+    fun makeRoom(bytes: Long, active: Screen, protectedKey: Long = 0L) {
+        if (bytes < 0L || bytes > memory.limits.maxCpuBytes)
+            imageFailure(TerminalImageFailure.Limit, "image request exceeds CPU budget")
+        while (bytes > memory.limits.maxCpuBytes - memory.bytes) {
+            var candidate: StoredImage? = None
+            var unplaced = false
+            for (entry in resources.values) {
+                if (entry.image.key == protectedKey) continue
+                val empty = !hasPlacements(entry.image.key)
+                if (!empty && visible(entry.image.key, active)) continue
+                if (candidate?.age ==
+                    None ||
+                    (empty && !unplaced) ||
+                    (empty == unplaced && entry.age < candidate!!.age)
+                ) {
+                    candidate = Some(entry)
+                    unplaced = empty
+                }
+            }
+            val selected = candidate ?:
+                imageFailure(
+                    TerminalImageFailure.Limit,
+                    "retained image versions fill the CPU budget"
+                )
+            removeResource(selected.image.key)
+        }
+    }
+
+    private fun visible(key: Long, active: Screen): Boolean {
+        val area = viewport(active)
+        for (entry in placed.values) {
+            if (entry.screen !== active || entry.record.imageKey != key) continue
+            val location = geometry(entry) ?: continue
+            if (imageIntersects(location.visible, area)) return true
+        }
+        return false
+    }
+
+    /** The caller owns the returned initial reference and releases it on committed-reading replacement. */
+    fun snapshot(screen: Screen): TerminalImages {
+        if (cachedVersion == version && cachedEpoch == screen.bufferEpoch)
+            return cached.retainOwner()
+        val visible = entries(screen)
+        if (visible.size == 0L) return TerminalImages.Empty
+        val images = ArrayList<TerminalImage>()
+        val used = HashMap<Long, Boolean>()
+        val records = ArrayList<TerminalImagePlacement>()
+        var adopted = false
+        try {
+            for (entry in visible) {
+                val point = anchor(entry.point) ?: continue
+                val resource = resources[entry.record.imageKey] ?: continue
+                records.add(entry.record.{anchor: point})
+                if (used[resource.image.key] == None) {
+                    images.add(resource.image.retain())
+                    used[resource.image.key] = true
+                }
+            }
+            adopted = true
+            val value = TerminalImages.adopt(memory, version, images.toArray(), records.toArray())
+            cached.release()
+            cached = value
+            cachedVersion = version
+            cachedEpoch = screen.bufferEpoch
+            return value.retainOwner()
+        } catch (error: TerminalImageException) {
+            if (!adopted)
+                for (image in images)
+                    image.close()
+            // Text and VT replies must still advance when frozen snapshots occupy all image memory.
+            for (entry in visible)
+                removePlacement(entry.record.key, freeData = true)
+            diagnostic("image presentation retired because frozen versions fill the CPU budget")
+            return TerminalImages.Empty
+        } catch (error: Throwable) {
+            if (!adopted)
+                for (image in images)
+                    image.close()
+            throw error
+        }
+    }
+
+    public override fun close() {
+        val keys = ArrayList<Long>()
+        for (key in resources.keys)
+            keys.add(key)
+        for (key in keys)
+            removeResource(key)
+        shared?.close()
+        shared = None
+        cached.release()
+        cached = TerminalImages.Empty
+        screens = []
+    }
+}
+
+private fun imageMaximum(a: Double, b: Double): Double = if (a > b) a else b
+
+private fun imageMinimum(a: Double, b: Double): Double = if (a < b) a else b
