@@ -1,0 +1,104 @@
+package scoop.terminal.emulator
+
+import scoop.compression.*
+import scoop.platform.memory.NativeByteBuffer
+
+/** One Zlib stream; output, trailing bytes, truncation and declared uncompressed length are strict. */
+internal fun inflateImage(input: ImageBytes, expectedBytes: Long? = None): ImageBytes {
+    val memory = input.memory
+    val configured = memory.limits.maxDecompressedBytes
+    val maximum = when (expectedBytes) {
+        case Some(val expected) -> {
+            if (expected < 0L)
+                imageFailure(TerminalImageFailure.InvalidData, "negative uncompressed image size")
+            if (expected > configured)
+                imageFailure(TerminalImageFailure.Limit, "uncompressed image size exceeds limit")
+            expected
+        }
+
+        case None -> configured
+    }
+    // Two 8 KiB native buffers plus a conservative 512 KiB allowance for the bounded Zlib
+    // window/tables and codec objects. Pixel pages and their final copy are reserved separately.
+    val working = memory.reserve(540672L)
+    try {
+        return CompressionDecoder(
+            DecompressionOptions(
+                format = CompressionFormat.Zlib,
+                mode = DecompressionMode.Single, maxOutputBytes = Some(maximum)
+            )
+        )
+            .use { codec ->
+                NativeByteBuffer
+                    .allocate(8192L)
+                    .use { source ->
+                        NativeByteBuffer
+                            .allocate(8192L)
+                            .use { destination ->
+                                ImageAccumulator(memory, maximum)
+                                    .use { result ->
+                                        val bytes = input.bytes
+                                        var offset = 0L
+                                        while (true) {
+                                            if (source.readableBytes == 0L && offset < bytes.size) {
+                                                source.clear()
+                                                val count = if (bytes.size - offset > 8192L)
+                                                    8192L
+                                                else
+                                                    bytes.size - offset
+                                                source.writeBytes(bytes, offset, count)
+                                                offset += count
+                                            }
+                                            destination.clear()
+                                            val step = codec
+                                                .process(
+                                                    source,
+                                                    destination,
+                                                    endInput = offset == bytes.size
+                                                )
+                                            if (step.produced > 0L)
+                                                result
+                                                    .append(step.produced) {
+                                                        destination.readBytes(step.produced)
+                                                    }
+                                            if (step.state == CompressionState.Finished) {
+                                                if (source.readableBytes !=
+                                                    0L ||
+                                                    offset !=
+                                                    bytes.size
+                                                )
+                                                    imageFailure(
+                                                        TerminalImageFailure.InvalidData,
+                                                        "trailing image Zlib data"
+                                                    )
+                                                if (expectedBytes !=
+                                                    None &&
+                                                    result.size !=
+                                                    expectedBytes!!
+                                                )
+                                                    imageFailure(
+                                                        TerminalImageFailure.InvalidData,
+                                                        "uncompressed image size differs from declaration"
+                                                    )
+                                                return@use result.finish()
+                                            }
+                                            if (step.consumed == 0L && step.produced == 0L)
+                                                imageFailure(
+                                                    TerminalImageFailure.InvalidData,
+                                                    "image Zlib decoder made no progress"
+                                                )
+                                        }
+                                    }
+                            }
+                    }
+            }
+    } catch (error: CompressionException) {
+        val kind = if (error.kind == CompressionFailureKind.OutputLimit && expectedBytes == None)
+            TerminalImageFailure.Limit
+        else
+            TerminalImageFailure.InvalidData
+        throw TerminalImageException(kind, "invalid compressed image: " + error.detail, Some(error))
+    } finally {
+        working.close()
+    }
+}

@@ -34,7 +34,7 @@
 | M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
 | M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片接入时另验证文本投影不保留图片资源 |
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
-| M5 | 图片 store/decoder/cache、预算 | 已实现显式像素租约、CPU 预算及 PNG/RGB 解码基础（核心 5 项／UI 3 项通过）；传输、store、快照和绘制接入待完成 |
+| M5 | 图片 store/decoder/cache、预算 | 已实现显式像素租约、CPU 预算、PNG/RGB 解码、分块 Base64 与 Zlib（核心 11 项／UI 3 项通过）；store、快照和绘制接入待完成 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 待实现 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
@@ -91,6 +91,8 @@
 图片解码基础：`TerminalImageDecodeTest` 5/5、`TerminalCpuImageDecoderTest` 3/3 通过。先检查尺寸与乘法上限、PNG 分块／CRC／结束边界，RGB 补 alpha，RGBA 复用不可变像素；显式租约最后关闭时同时清掉数组引用并退还预算。PNG adapter 在后台调用内创建、使用和关闭原生对象，预留 encoded copy、codec 像素、raster surface、可变 readback 与返回数组的保守峰值；解码失败和大小不一致释放工作预算。固定本地生成的 RGBA／索引透明色／16-bit／Adam7 样本验证实际像素，多 worker 验证原生对象不跨 owner；fixture 生成一致性检查通过。此时尚未向 PTY 声明图形协议支持，store、帧寿命、压缩与绘制预算仍需后续集成验证。
 
 实际测试发现 `scoop.graphics.Image.decode()` 接受不完整 PNG 像素。已在独立分支 `codex/strict-image-decode` 修复并合并 [Scoop PR #226](https://github.com/scoop-lang/scoop/pull/226)：只接受 `SkCodec::kSuccess`，保留颜色／alpha 和 EXIF 方向。上游新增解码 3 项及原绘图 7 项通过，本地 main 已更新并回合并修复分支推送；开发 sysroot 完整更新后，组件的同组坏图回归通过。未下载外部依赖；PR 临时文件已清理。
+
+分块／压缩：`TerminalImageTransferTest` 6/6，连同前述核心解码 5 项共 11/11 通过。Base64 复用工具链库，逐块限制 4096 字节及非末块对齐／padding，并累计整次编码长度；空块不积累元数据，取消或任一块失败回收全部页。Zlib 复用工具链增量 decoder，固定 8 KiB 输入／输出缓冲，配置解压上限，严格拒绝截断、尾随字节、串联流和声明长度不符。测试覆盖跨输入和输出页、空流、小输入膨胀、工作预算以及最终合并时新旧数组共存的峰值，失败后已有像素租约保留。没有下载或临时文件；此变更提供传输原语，APC 协议接入仍在后续步骤。
 
 ## 后续执行约束
 
