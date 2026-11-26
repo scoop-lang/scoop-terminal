@@ -1,0 +1,218 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.platform.env.environmentVariable
+import scoop.platform.fs.Path
+import scoop.platform.process.*
+import scoop.platform.system.OsString
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.text.contains
+import scoop.time.Duration
+
+/** tools/smoke_terminal.py supplies isolated launchers and records exact external tool versions. */
+@Test
+private class TerminalApplicationSmoke {
+    @Test
+    @Ignore("manual external application compatibility")
+    fun realProgram() {
+        val kind = environmentVariable("SCOOP_TERMINAL_SMOKE_CASE")!!.decodeUtf8()
+        val launcher = environmentVariable("SCOOP_TERMINAL_SMOKE_LAUNCHER")!!
+        val child = command(Path.fromOsString(launcher))
+        eventLoop()
+            .run {
+                val diagnostics = ArrayList<String>()
+                val progress = ArrayList<TerminalProgress>()
+                val model = TerminalModel
+                    .create {
+                        val terminal = Terminal(
+                            80L,
+                            24L,
+                            graphics = TerminalGraphicsSupport(sixel = true, kitty = true),
+                            imageDecoder = Some(TerminalCpuImageDecoder())
+                        )
+                        terminal
+                            .resize(80L, 24L, pixels = Some(TerminalPixelSize(640L, 384L, 8L, 16L)))
+                        terminal
+                    }
+                val pty = try {
+                    currentEventLoop().spawnPty(child, 80L, 24L)
+                } catch (error: Throwable) {
+                    model.close();
+                    throw error
+                }
+                val session = TerminalEmulatorSession(
+                    model,
+                    pty,
+                    onDiagnostic = { text ->
+                        diagnostics.add(text);
+                        Unit
+                    },
+                    onProgress = { value ->
+                        progress.add(value);
+                        Unit
+                    }
+                )
+                session.launch(this)
+                try {
+                    if (kind == "shell" || kind == "tmux") {
+                        awaitSmoke(session, "shell prompt") {
+                            smokeScreen(session.reading).contains("SMOKE_PROMPT>")
+                        }
+                        session.send(TerminalInput.Text("printf 'shell-result:%s\\n' ac"))
+                        smokeKey(session, TerminalKey.Left)
+                        session.send(TerminalInput.Text("b"))
+                        smokeKey(session, TerminalKey.End)
+                        smokeKey(session, TerminalKey.Enter)
+                        awaitSmoke(session, "readline editing") {
+                            smokeScreen(session.reading).contains("shell-result:abc")
+                        }
+                        session.requestSize(100L, 30L, Some(TerminalPixelSize(800L, 480L, 8L, 16L)))
+                        awaitSmoke(session, "model resize") { session.reading.columns == 100L }
+                        session.send(TerminalInput.Text("printf 'size:'; stty size\r"))
+                        awaitSmoke(session, "child resize") {
+                            smokeScreen(session.reading)
+                                .contains(if (kind == "tmux") "size:29 100" else "size:30 100")
+                        }
+                        if (kind == "tmux") {
+                            session
+                                .send(TerminalInput.Text("cat \"$SCOOP_TERMINAL_IMAGE_STREAM\"\r"))
+                            awaitSmoke(session, "tmux explicit direct-graphics passthrough") {
+                                session.reading.images.placementCount > 0L
+                            }
+                        }
+                        session.send(TerminalInput.Text("exit\r"))
+                    } else if (kind == "vim" || kind == "nvim" || kind == "less") {
+                        awaitSmoke(session, "initial file") {
+                            smokeScreen(session.reading).contains("SMOKE_TOP")
+                        }
+                        session.send(TerminalInput.Text("/SMOKE_TARGET"))
+                        smokeKey(session, TerminalKey.Enter)
+                        awaitSmoke(session, "application search") {
+                            smokeScreen(session.reading).contains("SMOKE_TARGET 中 é")
+                        }
+                        session.requestSize(100L, 30L, Some(TerminalPixelSize(800L, 480L, 8L, 16L)))
+                        awaitSmoke(session, "resized application") {
+                            session.reading.columns ==
+                                100L &&
+                                smokeScreen(session.reading).contains("SMOKE_TARGET 中 é")
+                        }
+                        smokeGrid(session.reading)
+                        if (kind == "less") {
+                            session.send(TerminalInput.Text("G"))
+                            awaitSmoke(session, "pager bottom") {
+                                smokeScreen(session.reading).contains("SMOKE_BOTTOM")
+                            }
+                            session.send(TerminalInput.Text("q"))
+                        } else {
+                            session.send(TerminalInput.Text(":qa!"));
+                            smokeKey(session, TerminalKey.Enter)
+                        }
+                    }
+                    awaitSmoke(session, "program exit") {
+                        when (session.state) {
+                            case Exited(val status) -> {
+                                assertEquals(ExitStatus.Exited(0), status);
+                                true
+                            }
+
+                            case Failed(val error) -> throw error
+                            case _ -> false
+                        }
+                    }
+                    smokeGrid(session.reading)
+                    if (kind == "kitty" || kind == "sixel") {
+                        val reading = session.reading
+                        assertEquals(1L, reading.images.imageCount)
+                        assertEquals(1L, reading.images.placementCount)
+                        val image = reading
+                            .images
+                            .image(reading.images.placements(0L, 1L)[0L].imageKey)!!
+                        image
+                            .pixels(TerminalImageRect(0L, 0L, 1L, 1L))
+                            .use { pixels ->
+                                // Palette quantization by img2sixel may reduce a full red channel.
+                                val red = pixels.bytes[0L].toInt() and 255
+                                if (kind == "sixel")
+                                    assertTrue(red >= 240)
+                                else
+                                    assertEquals(255, red)
+                                assertEquals(0, pixels.bytes[1L].toInt() and 255)
+                                assertEquals(255, pixels.bytes[3L].toInt() and 255)
+                            }
+                    }
+                    if (kind == "progress") {
+                        assertTrue(smokeScreen(session.reading).contains("progress:100%"))
+                        assertTrue(progress.size > 1L)
+                        assertEquals(TerminalProgress.Inactive, progress[progress.size - 1L])
+                    }
+                    assertEquals(
+                        0L,
+                        diagnostics.size,
+                        Some(if (diagnostics.size == 0L) "" else diagnostics[0L])
+                    )
+                    println(
+                        f"SMOKE case=${kind} columns=${session.reading.columns} rows=${
+                            session.reading.rows
+                        } images=${session.reading.images.imageCount} diagnostics=${
+                            diagnostics.size
+                        }"
+                    )
+                } finally {
+                    session.close()
+                }
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+}
+
+private fun smokeKey(session: TerminalEmulatorSession, key: TerminalKey) {
+    session.send(TerminalInput.Key(key, TerminalModifiers()))
+}
+
+private fun smokeScreen(reading: TerminalReading): String {
+    val text = StringBuilder()
+    for (line in reading.lines(reading.historySize, reading.rows)) {
+        for (cell in line.cells)
+            if (cell.width != 0L) text.append(if (cell.text == "") " " else cell.text)
+        if (!line.softWrapped) text.append('\n')
+    }
+    return text.toString()
+}
+
+private fun smokeGrid(reading: TerminalReading) {
+    for (line in reading.lines(reading.historySize, reading.rows)) {
+        assertEquals(reading.columns, line.cells.size)
+        for (column in 0L..<line.cells.size) {
+            val cell = line.cells[column]
+            if (cell.width == 0L) {
+                assertTrue(column > 0L);
+                assertEquals(2L, line.cells[column - 1L].width)
+            }
+            if (cell.width == 2L) {
+                assertTrue(column + 1L < line.cells.size);
+                assertEquals(0L, line.cells[column + 1L].width)
+            }
+        }
+    }
+}
+
+private suspend fun awaitSmoke(
+    session: TerminalEmulatorSession,
+    label: String,
+    ready: () -> Boolean
+) {
+    var attempts = 0L
+    while (!ready()) {
+        when (session.state) {
+            case Failed(val error) -> throw error;
+            case _ -> {}
+        }
+        assertTrue(
+            attempts < 1000L,
+            Some("timed out waiting for " + label + "\n" + smokeScreen(session.reading))
+        )
+        attempts += 1L
+        currentEventLoop().sleep(Duration.milliseconds(10L))
+    }
+}

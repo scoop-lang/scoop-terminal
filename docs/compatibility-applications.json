@@ -1,0 +1,180 @@
+{
+  "scope": "macOS actual external programs in the production PTY/model session; each run records its own TERM and versions",
+  "runs": [
+    {
+      "timestamp": "2026-11-26T10:33:41.112746+00:00",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "commit": "ae4be57f3b45f7e8a0826c19c67dca1990564d7a",
+      "working_tree_changes": true,
+      "term": "scoop-terminal",
+      "results": [
+        {
+          "case": "shell",
+          "version": "GNU bash, version 5.3.20(1)-release (aarch64-apple-darwin25.6.0)",
+          "command": [
+            "/opt/homebrew/bin/bash",
+            "--noprofile",
+            "--rcfile",
+            "/var/folders/0s/mcfxhz813ps4mky0c1sr7rz00000gn/T/scoop-terminal-smoke-9rlhih4_/bashrc",
+            "-i"
+          ],
+          "result": "SMOKE case=shell columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "vim",
+          "version": "VIM - Vi IMproved 9.1 (2024 Jan 02, compiled Oct  3 2026 17:07:02)",
+          "command": [
+            "/usr/bin/vim",
+            "-N",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "/var/folders/0s/mcfxhz813ps4mky0c1sr7rz00000gn/T/scoop-terminal-smoke-9rlhih4_/input.txt"
+          ],
+          "result": "SMOKE case=vim columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "nvim",
+          "version": "NVIM v0.12.6",
+          "command": [
+            "/opt/homebrew/bin/nvim",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "/var/folders/0s/mcfxhz813ps4mky0c1sr7rz00000gn/T/scoop-terminal-smoke-9rlhih4_/input.txt"
+          ],
+          "result": "SMOKE case=nvim columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "less",
+          "version": "less 668 (POSIX regular expressions)",
+          "command": [
+            "/usr/bin/less",
+            "-R",
+            "-X",
+            "/var/folders/0s/mcfxhz813ps4mky0c1sr7rz00000gn/T/scoop-terminal-smoke-9rlhih4_/input.txt"
+          ],
+          "result": "SMOKE case=less columns=100 rows=30 images=0 diagnostics=0"
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-26T10:34:26.053680+00:00",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "commit": "ae4be57f3b45f7e8a0826c19c67dca1990564d7a",
+      "working_tree_changes": true,
+      "term": "scoop-terminal",
+      "results": [
+        {
+          "case": "tmux",
+          "version": "tmux 3.8",
+          "command": [
+            "/opt/homebrew/bin/tmux",
+            "-L",
+            "terminal-component-smoke",
+            "-f",
+            "<temporary>/tmux.conf",
+            "new-session",
+            "-s",
+            "smoke",
+            "/opt/homebrew/bin/bash --noprofile --rcfile <temporary>/bashrc -i"
+          ],
+          "result": "SMOKE case=tmux columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "kitty",
+          "version": "kitty 0.51.0 created by Kovid Goyal",
+          "command": [
+            "/opt/homebrew/bin/kitty",
+            "+kitten",
+            "icat",
+            "--transfer-mode",
+            "stream",
+            "--use-window-size",
+            "80,24,640,384",
+            "--stdin",
+            "no",
+            "--align",
+            "left",
+            "--passthrough",
+            "none",
+            "/Volumes/Data/home/chenxu/repos/scoop-terminal/terminal-ui/tests/data/images/rgba.png"
+          ],
+          "result": "SMOKE case=kitty columns=80 rows=24 images=1 diagnostics=0"
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-26T10:35:46.563087+00:00",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "commit": "ae4be57f3b45f7e8a0826c19c67dca1990564d7a",
+      "working_tree_changes": true,
+      "term": "scoop-terminal",
+      "results": [
+        {
+          "case": "sixel",
+          "version": "img2sixel 1.10.5",
+          "command": [
+            "/Users/chenxu/repos/scoop-dep/terminal-smoke-libsixel-1.10.5/install/bin/img2sixel",
+            "/Volumes/Data/home/chenxu/repos/scoop-terminal/terminal-ui/tests/data/images/rgba.png"
+          ],
+          "result": "SMOKE case=sixel columns=80 rows=24 images=1 diagnostics=0"
+        },
+        {
+          "case": "progress",
+          "version": "GNU bash, version 5.3.20(1)-release (aarch64-apple-darwin25.6.0)",
+          "command": [
+            "/opt/homebrew/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "for i in 0 10 50 100; do printf '\\r\\033[Kprogress:%s%%\\033]9;4;1;%s\\007' \"$i\" \"$i\"; sleep .02; done; printf '\\033]9;4;0\\007\\n'"
+          ],
+          "result": "SMOKE case=progress columns=80 rows=24 images=0 diagnostics=0"
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-26T10:40:47.487513+00:00",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "commit": "ae4be57f3b45f7e8a0826c19c67dca1990564d7a",
+      "working_tree_changes": true,
+      "term": "xterm-256color",
+      "results": [
+        {
+          "case": "shell",
+          "version": "GNU bash, version 5.3.20(1)-release (aarch64-apple-darwin25.6.0)",
+          "command": [
+            "/opt/homebrew/bin/bash",
+            "--noprofile",
+            "--rcfile",
+            "<temporary>/bashrc",
+            "-i"
+          ],
+          "result": "SMOKE case=shell columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "nvim",
+          "version": "NVIM v0.12.6",
+          "command": [
+            "/opt/homebrew/bin/nvim",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "<temporary>/input.txt"
+          ],
+          "result": "SMOKE case=nvim columns=100 rows=30 images=0 diagnostics=0"
+        }
+      ]
+    }
+  ]
+}
