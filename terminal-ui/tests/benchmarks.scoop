@@ -1,0 +1,144 @@
+package scoop.ui.terminal
+
+import scoop.collections.sorted
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.platform.time.MonotonicTimeSource
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+/** CPU raster measurements; no claim about compositor/GPU presentation latency. */
+@Test
+private class TerminalViewBenchmark {
+    @Test
+    @Ignore("manual performance measurement")
+    fun paint120x1() {
+        viewBenchmark(120L, 40L, 1L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun paint120x2() {
+        viewBenchmark(120L, 40L, 2L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun paint240x1() {
+        viewBenchmark(240L, 80L, 1L)
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun paint240x2() {
+        viewBenchmark(240L, 80L, 2L)
+    }
+}
+
+private fun benchmarkOutput(index: Long): Array<Byte> = f"\u001b[32mINFO\u001b[0m ${
+    index
+}: if (left != right) return left -> right; value === 0123456789\r\n"
+    .toByteArray()
+
+private fun viewBenchmark(columns: Long, rows: Long, scale: Long) {
+    FontCollection(false)
+        .use { fonts ->
+            fonts.register(includeBytes("data/FiraCode-Regular.ttf"), "Terminal Benchmark Mono")
+            val appearance = TerminalAppearance(
+                families = ["Terminal Benchmark Mono"], fontSize = 14.0,
+                foreground = Color.White, background = Color.Black
+            )
+            val terminal = Terminal(columns, rows, 10000L)
+            prepareViewBenchmark(terminal, appearance)
+            val cache = TerminalGlyphCache(fonts, appearance)
+            try {
+                for (index in 0L..<rows)
+                    terminal.feed(benchmarkOutput(index))
+                val size = Size(
+                    columns.toDouble() * cache.metrics.width,
+                    rows.toDouble() * cache.metrics.height
+                )
+                val width = (size.width * scale.toDouble() + 1.0).toInt()
+                val height = (size.height * scale.toDouble() + 1.0).toInt()
+                val times = ArrayList<Long>()
+                var bytes = 0L
+                var initialShapes = 0L
+                val surface = RasterSurface(width, height)
+                try {
+                    for (index in 0L..<208L) {
+                        val payload = benchmarkOutput(rows + index)
+                        val started = MonotonicTimeSource.now()
+                        terminal.feed(payload)
+                        viewBenchmarkFrame(
+                            terminal,
+                            appearance,
+                            cache,
+                            size,
+                            columns,
+                            rows,
+                            scale,
+                            index
+                        )
+                            .use { frame ->
+                                frame.shape([], "")
+                                surface
+                                    .draw { canvas ->
+                                        canvas.scale(scale.toDouble(), scale.toDouble())
+                                        frame.drawScreen(canvas)
+                                    }
+                            }
+                        val elapsed = (MonotonicTimeSource.now() - started).inWholeNanoseconds
+                        if (index < 16L)
+                            initialShapes = cache.shapeCount
+                        else {
+                            times.add(elapsed)
+                            bytes += payload.size
+                        }
+                    }
+                } finally {
+                    surface.close()
+                }
+                val samples = times.sorted()
+                var total = 0L
+                for (sample in samples)
+                    total += sample
+                val last = samples.size - 1L
+                println(
+                    f"BENCH name=paint columns=${columns} rows=${rows} scale=${scale} bytes=${
+                        bytes
+                    } samples=${samples.size} ns=${total} p50=${samples[last / 2L]} p95=${
+                        samples[last * 95L / 100L]
+                    } p99=${samples[last * 99L / 100L]} shapes=${
+                        cache.shapeCount - initialShapes
+                    } uploads=0"
+                )
+            } finally {
+                cache.release()
+                closeViewBenchmark(terminal)
+            }
+        }
+}
+
+private fun prepareViewBenchmark(terminal: Terminal, appearance: TerminalAppearance) {
+    terminal.setColors(appearance.colorTheme())
+}
+
+private fun closeViewBenchmark(terminal: Terminal) {
+    terminal.close()
+}
+
+private fun viewBenchmarkFrame(
+    terminal: Terminal,
+    appearance: TerminalAppearance,
+    cache: TerminalGlyphCache,
+    size: Size,
+    columns: Long,
+    rows: Long,
+    scale: Long,
+    revision: Long
+): TerminalFrame {
+    val reading = terminal.reading
+    val geometry = GridGeometry(
+        size, cache.metrics, reading.historySize, reading.lines(reading.historySize, rows),
+        columns, rows, reading.screenRevision, true, reading, scale.toDouble()
+    )
+    return TerminalFrame(geometry, revision, reading.cursor, 0L, appearance, cache)
+}

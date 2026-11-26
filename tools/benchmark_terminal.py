@@ -8,18 +8,21 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ("ascii120", "ascii240", "sgr120", "sgr240", "unicode120", "unicode240", "history100k", "reflow10k")
+VIEWS = ("paint120x1", "paint120x2", "paint240x1", "paint240x2")
 
 
 def run_case(root: Path, args, label: str, case: str) -> dict:
     environment = dict(os.environ, SCOOP_GC_STATS="1")
+    cone = "terminal-ui" if case in VIEWS else "emulator"
     command = [str(args.scoop), "--sysroot", str(args.sysroot), "test", "--release",
-               str(root / "emulator"), "--ignored", "--nocapture", "--filter", case]
+               str(root / cone), "--ignored", "--nocapture", "--filter", case]
     process = subprocess.run(command, cwd=root, env=environment, text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
     text = process.stdout + "\n" + process.stderr
@@ -57,6 +60,31 @@ def export_baseline(destination: Path, reference: str) -> None:
     if '"scoop:scoop.platform"' not in text:
         text = text.replace("[test-dependencies]", '[test-dependencies]\n"scoop:scoop.platform" = "0.1.0"')
     manifest.write_text(text)
+    view = (ROOT / "terminal-ui/tests/benchmarks.scoop").read_text()
+    view = view.replace('frame.shape([], "")', 'frame.shape(None, "")')
+    view = view[:view.index("private fun prepareViewBenchmark")] + """private fun prepareViewBenchmark(terminal: Terminal, appearance: TerminalAppearance) {}
+private fun closeViewBenchmark(terminal: Terminal) {}
+private fun viewBenchmarkFrame(
+    terminal: Terminal, appearance: TerminalAppearance, cache: TerminalGlyphCache,
+    size: Size, columns: Long, rows: Long, scale: Long, revision: Long
+): TerminalFrame {
+    val geometry = GridGeometry(
+        size, cache.metrics, terminal.historySize, terminal.lines(terminal.historySize, rows),
+        columns, rows, terminal.screenRevision, true
+    )
+    return TerminalFrame(geometry, revision, terminal.cursor, 0L, appearance, cache)
+}
+"""
+    (destination / "terminal-ui/tests/benchmarks.scoop").write_text(view)
+    fonts = destination / "terminal-ui/tests/data"
+    fonts.mkdir(exist_ok=True)
+    for name in ("FiraCode-Regular.ttf", "FiraCode-LICENSE.txt"):
+        shutil.copyfile(ROOT / "terminal-ui/tests/data" / name, fonts / name)
+    # The old cache lacks a counter. Instrument cache misses without changing lookup/shaping.
+    glyphs = destination / "terminal-ui/src/glyphs.scoop"
+    text = glyphs.read_text().replace("    private var references = 1L", "    private var references = 1L\n    var shapeCount = 0L")
+    text = text.replace("        layouts[key] = value", "        shapeCount += 1L\n        layouts[key] = value")
+    glyphs.write_text(text)
 
 
 def main() -> None:
@@ -65,8 +93,8 @@ def main() -> None:
     parser.add_argument("--sysroot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="raw JSON report outside the repository")
     parser.add_argument("--label", default="working")
-    parser.add_argument("--baseline", help="local reference; d990f72 uses the documented close-only adapter")
-    parser.add_argument("--cases", nargs="+", choices=CORE, default=list(CORE))
+    parser.add_argument("--baseline", choices=("d990f72",), help="fixed design baseline with documented API-only adapters")
+    parser.add_argument("--cases", nargs="+", choices=CORE + VIEWS, default=list(CORE + VIEWS))
     parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
     # The installed launcher selects its command by executable name; preserve its symlink path.
