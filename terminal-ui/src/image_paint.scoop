@@ -145,12 +145,25 @@ internal class TerminalImagePaint : Closeable {
                                     TerminalImagePaintTile(
                                         lease,
                                         Rect(
-                                            (tile.x - lease.source.x).toDouble(), (
-                                                tile.y - lease.source.y
-                                            )
-                                                .toDouble(),
-                                            tile.width.toDouble(), tile.height.toDouble()
-                                        ), rect, clipped,
+                                            0.0, 0.0,
+                                            lease.source.width.toDouble(), lease
+                                                .source
+                                                .height
+                                                .toDouble()
+                                        ),
+                                        // Draw through the gutter before clipping to the core tile.
+                                        // The hard core clip partitions device pixels; sampling
+                                        // can still read both neighboring source pixels.
+                                        Rect(
+                                            destination.x +
+                                                (lease.source.x - source.x).toDouble() *
+                                                scaleX,
+                                            destination.y +
+                                                (lease.source.y - source.y).toDouble() *
+                                                scaleY,
+                                            lease.source.width.toDouble() * scaleX,
+                                            lease.source.height.toDouble() * scaleY
+                                        ), clipped,
                                         if (image.image.protocol == TerminalImageProtocol.Sixel)
                                             ImageSampling.Nearest
                                         else
@@ -178,7 +191,7 @@ internal class TerminalImagePaint : Closeable {
             if (tile.layer != layer) continue
             canvas.save()
             try {
-                canvas.clipRect(tile.clip)
+                canvas.clipRect(tile.clip, antiAlias = false)
                 canvas
                     .drawImageRegion(tile.lease.image, tile.source, tile.destination, tile.sampling)
             } finally {

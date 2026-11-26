@@ -1,0 +1,355 @@
+package scoop.ui.terminal
+
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.io.encoding.Base64
+import scoop.terminal.emulator.*
+import scoop.text.endsWith
+import scoop.text.substring
+import scoop.test.*
+
+@Test
+private class TerminalKittyPaintTest {
+    @Test fun tiledLinearSamplingMatchesTheWholeImageAcrossSeamsCropAndViewportEdges() {
+        val width = 130L
+        val height = 70L
+        val raw = Array<Byte>(width * height * 4L) { offset ->
+            val pixel = offset / 4L
+            val x = pixel % width
+            val y = pixel / width
+            when (offset % 4L) {
+                case 0L -> ((x * 13L + y * 7L) % 256L).toByte()
+                case 1L -> ((x * 3L + y * 17L) % 256L).toByte()
+                case 2L -> ((x * 19L + y * 5L) % 256L).toByte()
+                case _ -> 255.toByte()
+            }
+        }
+        Image
+            .fromRgba(width.toInt(), height.toInt(), raw)
+            .use { image ->
+                for (cropped in [false, true]) {
+                    for (columns in [13L, 25L]) {
+                        val terminal = kittyPaintTerminal()
+                        val images = TerminalImageCache()
+                        FontCollection()
+                            .use { fonts ->
+                                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                                try {
+                                    val crop = if (cropped) ",x=7,y=3,w=117,h=65" else ""
+                                    kittyPaintTransmit(
+                                        terminal,
+                                        f"a=T,i=1,s=130,v=70,c=${columns},X=3,Y=2,C=1${crop}",
+                                        raw
+                                    )
+                                    val source = if (cropped)
+                                        Rect(7.0, 3.0, 117.0, 65.0)
+                                    else
+                                        Rect(0.0, 0.0, 130.0, 70.0)
+                                    val targetWidth = columns.toDouble() * 8.0 - 3.0
+                                    val target = Rect(
+                                        3.0,
+                                        2.0,
+                                        targetWidth,
+                                        targetWidth * source.height / source.width
+                                    )
+                                    val expected = RasterSurface(128, 64)
+                                        .use { surface ->
+                                            surface
+                                                .draw { canvas ->
+                                                    canvas.clear(Color.Black)
+                                                    canvas
+                                                        .drawImageRegion(
+                                                            image,
+                                                            source,
+                                                            target,
+                                                            ImageSampling.Linear
+                                                        )
+                                                }
+                                            surface.readPixels()
+                                        }
+                                    for (_ in 0L..<3L) {
+                                        val actual = kittyPaintPixels(
+                                            terminal.reading,
+                                            images,
+                                            glyphs
+                                        )
+                                        assertKittyPixelsNear(expected, actual, 2)
+                                    }
+                                    assertTrue(images.uploadCount > 1L)
+                                    assertEquals(images.uploadCount, images.cachedCount)
+                                } finally {
+                                    glyphs.release();
+                                    images.close();
+                                    terminal.close()
+                                }
+                            }
+                        assertEquals(0L, images.retainedBytes)
+                    }
+                }
+            }
+    }
+
+    @Test fun negativeLayersRespectCellBackgroundsAndTextWhileNonnegativeLayersCoverBoth() {
+        for (z in [-1073741825L, -1073741824L, -1L, 0L, 1L]) {
+            val terminal = kittyPaintTerminal()
+            val images = TerminalImageCache()
+            FontCollection()
+                .use { fonts ->
+                    val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                    try {
+                        terminal.feed("\u001b[48;2;0;255;0mXX \u001b[0m \u001b[H".toByteArray())
+                        val base = kittyPaintPixels(terminal.reading, images, glyphs)
+                        kittyPaintTransmit(
+                            terminal,
+                            f"a=T,i=1,f=24,s=2,v=1,c=4,r=1,C=1,z=${z}",
+                            [
+                                255.toByte(),
+                                0.toByte(),
+                                0.toByte(),
+                                255.toByte(),
+                                0.toByte(),
+                                0.toByte()
+                            ]
+                        )
+                        val pixels = kittyPaintPixels(terminal.reading, images, glyphs)
+                        assertImageTestPixel(pixels, 128L, 27L, 8L, 255, 0, 0)
+                        if (z < -1073741824L) {
+                            assertImageTestPixel(pixels, 128L, 20L, 8L, 0, 255, 0)
+                        } else {
+                            assertImageTestPixel(pixels, 128L, 20L, 8L, 255, 0, 0)
+                        }
+                        var ink = 0L
+                        for (y in 0L..<16L) {
+                            for (x in 0L..<16L) {
+                                val offset = (y * 128L + x) * 4L
+                                if ((base[offset].toInt() and 255) >=
+                                    250 &&
+                                    (base[offset + 2L].toInt() and 255) >=
+                                    250
+                                ) {
+                                    ink += 1L
+                                    if (z < 0L) {
+                                        assertTrue((pixels[offset + 1L].toInt() and 255) >= 250)
+                                        assertTrue((pixels[offset + 2L].toInt() and 255) >= 250)
+                                    } else {
+                                        assertImageTestPixel(pixels, 128L, x, y, 255, 0, 0)
+                                    }
+                                }
+                            }
+                        }
+                        assertTrue(ink > 0L)
+                    } finally {
+                        glyphs.release();
+                        images.close();
+                        terminal.close()
+                    }
+                }
+        }
+    }
+
+    @Test fun straightAlphaBlendsOverCellsAndEqualZUsesImageIdentityOrder() {
+        val terminal = kittyPaintTerminal()
+        val images = TerminalImageCache()
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    terminal.feed("\u001b[48;2;0;0;255m  \u001b[0m\u001b[H".toByteArray())
+                    kittyPaintTransmit(
+                        terminal,
+                        "a=T,i=1,s=1,v=1,c=2,r=1,C=1",
+                        [0.toByte(), 255.toByte(), 0.toByte(), 128.toByte()]
+                    )
+                    assertImageTestPixel(
+                        kittyPaintPixels(terminal.reading, images, glyphs),
+                        128L,
+                        8L,
+                        8L,
+                        0,
+                        128,
+                        127
+                    )
+                    kittyPaintTransmit(
+                        terminal,
+                        "a=T,i=9,f=24,s=1,v=1,c=2,r=1,C=1,z=1",
+                        [255.toByte(), 0.toByte(), 0.toByte()]
+                    )
+                    kittyPaintTransmit(
+                        terminal,
+                        "a=T,i=2,f=24,s=1,v=1,c=2,r=1,C=1,z=1",
+                        [0.toByte(), 0.toByte(), 255.toByte()]
+                    )
+                    assertImageTestPixel(
+                        kittyPaintPixels(terminal.reading, images, glyphs),
+                        128L,
+                        8L,
+                        8L,
+                        255,
+                        0,
+                        0
+                    )
+                } finally {
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+        assertEquals(0L, images.retainedBytes)
+    }
+
+    @Test fun pngTransmissionsUseTheRealCpuDecoderAndOldFramesRetainNativePixels() {
+        val terminal = kittyPaintTerminal()
+        val images = TerminalImageCache()
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    for (
+                        (name, png, expected) in [
+                            (
+                                "rgba",
+                                includeBytes("data/images/rgba.png"),
+                                includeBytes("data/images/rgba.pixels")
+                            ),
+                            (
+                                "palette",
+                                includeBytes("data/images/palette.png"),
+                                includeBytes("data/images/palette.pixels")
+                            ),
+                            (
+                                "gray16",
+                                includeBytes("data/images/gray16.png"),
+                                includeBytes("data/images/gray16.pixels")
+                            ),
+                            (
+                                "adam7",
+                                includeBytes("data/images/adam7.png"),
+                                includeBytes("data/images/adam7.pixels")
+                            )
+                        ]
+                    ) {
+                        kittyPaintTransmit(terminal, "a=T,i=1,f=100,C=1", png)
+                        val reading = terminal.reading
+                        assertEquals(1L, reading.images.placementCount, Some(name))
+                        val image = reading
+                            .images
+                            .image(reading.images.placements(0L, 1L)[0L].imageKey)!!
+                        image
+                            .pixels()
+                            .use { pixels -> assertKittyPixelsNear(expected, pixels.bytes, 0) }
+                        imageTestFrame(reading, images, glyphs)
+                            .use { frame ->
+                                frame.shape([], "")
+                                terminal.feed("\u001b_Ga=d,d=I,i=1;\u001b\\".toByteArray())
+                                assertEquals(0L, terminal.reading.images.imageCount)
+                                images.clear()
+                                RasterSurface(128, 64)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val actual = surface.readPixels()
+                                        for (y in 0L..<image.size.height.toLong()) {
+                                            for (x in 0L..<image.size.width.toLong()) {
+                                                val offset = (y * image.size.width.toLong() + x) *
+                                                    4L
+                                                val alpha = expected[offset + 3L].toInt() and 255
+                                                for (component in 0L..<3L) {
+                                                    val wanted = (
+                                                        (
+                                                            expected[offset + component].toInt() and
+                                                                255
+                                                        ) *
+                                                            alpha +
+                                                            127
+                                                    ) /
+                                                        255
+                                                    val value = actual[
+                                                        (y * 128L + x) * 4L + component
+                                                    ]
+                                                        .toInt() and
+                                                        255
+                                                    assertTrue(
+                                                        value >= wanted - 1 && value <= wanted + 1,
+                                                        Some(name)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                            }
+                        assertEquals(0L, images.retainedBytes)
+                    }
+                } finally {
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+    }
+}
+
+private fun kittyPaintTerminal(): Terminal {
+    val terminal = Terminal(
+        16L, 4L,
+        colors = TerminalColors(
+            foreground = TerminalRgb(65535, 65535, 65535),
+            background = TerminalRgb(0, 0, 0)
+        ),
+        graphics = TerminalGraphicsSupport(kitty = true), imageDecoder = Some(
+            TerminalCpuImageDecoder()
+        )
+    )
+    terminal.resize(16L, 4L, pixels = Some(TerminalPixelSize(128L, 64L, 8L, 16L)))
+    return terminal
+}
+
+private fun kittyPaintTransmit(terminal: Terminal, control: String, data: Array<Byte>) {
+    val encoded = Base64.Default.encode(data)
+    var offset = 0L
+    while (offset < encoded.charLength) {
+        val end = clamp(offset + 4096L, 0L, encoded.charLength)
+        val header = if (offset == 0L) control + "," else ""
+        val more = if (end < encoded.charLength) "1" else "0"
+        val payload = encoded.substring(offset, end)
+        val update = terminal
+            .feed(("\u001b_G" + header + "m=" + more + ";" + payload + "\u001b\\").toByteArray())
+        for (effect in update.effects) {
+            when (effect) {
+                case TerminalEffect.Reply(val bytes) -> {
+                    val text = String.fromUtf8(bytes)
+                    assertTrue(text.endsWith(";OK\u001b\\"), Some(text))
+                }
+
+                case TerminalEffect.Diagnostic(val text) -> fail(Some(text))
+                case _ -> {}
+            }
+        }
+        offset = end
+    }
+}
+
+private fun kittyPaintPixels(
+    reading: TerminalReading,
+    images: TerminalImageCache,
+    glyphs: TerminalGlyphCache
+): Array<Byte> = imageTestFrame(reading, images, glyphs)
+    .use { frame ->
+        frame.shape([], "")
+        RasterSurface(128, 64)
+            .use { surface ->
+                surface.draw { canvas -> frame.drawScreen(canvas) }
+                surface.readPixels()
+            }
+    }
+
+private fun assertKittyPixelsNear(expected: Array<Byte>, actual: Array<Byte>, tolerance: Int) {
+    assertEquals(expected.size, actual.size)
+    for (offset in 0L..<expected.size) {
+        val a = actual[offset].toInt() and 255
+        val e = expected[offset].toInt() and 255
+        assertTrue(
+            a >= e - tolerance && a <= e + tolerance,
+            Some(f"pixel byte ${offset}: expected ${e}, got ${a}")
+        )
+    }
+}

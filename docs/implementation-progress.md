@@ -34,7 +34,7 @@
 | M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
 | M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片文本投影已验证不保留图片资源 |
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
-| M5 | 图片 store/decoder/cache、预算 | 原生 tile 缓存、帧租约与绘制已接入，新增 9 项及完整 UI 86 项通过；Kitty RGBA 线性／z 层次随协议接入验收 |
+| M5 | 图片 store/decoder/cache、预算 | 原生 tile 缓存、帧租约与绘制已接入；Sixel 9 项、Kitty RGBA／PNG／线性采样／z 4 项通过，PNG 辅助数据的解码峰值继续核对 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，真实窗口对照待集中验收 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 核心已实现，18 项协议及完整核心 178 项通过；桌面 RGBA／PNG／z 绘制验收后默认启用 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
@@ -117,6 +117,10 @@ Sixel 协议：`TerminalSixelProtocolTest` 8/8，相关解码 6/6、store 9/9、
 Kitty 静态核心：`TerminalKittyTransferTest` 6/6、`TerminalKittyLayoutTest` 6/6、`TerminalKittyDeleteTest` 4/4、`TerminalKittyQueryTest` 2/2，随后完整 `emulator` 178/178。APC 接入内联 RGB／RGBA／PNG、Base64 分块及 Zlib，普通查询实际验证完整数据且不回收已有图片；特性查询忽略 payload、不扰动待完成传输，只回显实现的非默认键。真实 PNG adapter 在桌面阶段接入，本组核心 PNG 使用确定性 decoder，并验证 CRC／长度错误不会调用它。每个字节边界回放验证图片发布、光标查询和 DA 回复顺序。
 
 布局／生命周期覆盖最后一块到达时的光标、c/r 保持比例、源裁剪、cell 偏移、缩小字体时夹紧偏移、C=1、image number／placement ID、替换、主备屏及同步输出。旧快照保留原像素与 placement；合法删除没有成功回包，大写选择器按剩余引用释放资源。后续块 q=0／省略继承先前 quiet，非零 q 更新 quiet；EOF、RIS 和真正的 buffer 切换取消未完成传输。小预算下连续 80 次上传优先回收无 placement 的资源，失败查询不改现存资源；取消、损坏数据和超限恢复 VT 并退还预算。本轮无下载和临时文件，固定 Kitty 源码参考继续用于绘制／兼容核对。
+
+Kitty 原生绘制：`TerminalKittyPaintTest` 4/4。真实 RGBA 光栅覆盖透明度、三个 z 区间及阈值、同 z 按 image ID 排序；四类 PNG 通过协议和生产 CPU decoder，删除协议资源／清空缓存后已准备帧仍能绘制。多块图像在缩小、放大、源裁剪和窗口裁剪下逐像素对比整幅线性绘制，允许至多 2/255 的插值舍入误差；重复帧没有新增上传。
+
+测试实际发现 `Canvas.clipRect` 固定的抗锯齿覆盖使非整数缩放的 tile 边界变暗。已在独立分支 `codex/graphics-hard-clip` 修复并合并 [Scoop PR #228](https://github.com/scoop-lang/scoop/pull/228)，增加 `antiAlias = false`，同步规范／声明／README／skill 导航。上游 14 项定向回归通过，main 已更新并回合并修复分支推送，开发 sysroot 完整增量更新。组件从扩展采样边缘绘制，再以硬裁剪分配 tile 的设备像素；上述接缝回归通过。没有新依赖，PR 临时文件已删除。
 
 ## 后续执行约束
 

@@ -462,7 +462,7 @@ private fun imageTestSixel(width: Long, height: Long, color: String = "100;0;0")
     return text.toString().toByteArray()
 }
 
-private fun imageTestFrame(
+internal fun imageTestFrame(
     reading: TerminalReading,
     images: TerminalImageCache,
     glyphs: TerminalGlyphCache,
@@ -491,7 +491,7 @@ private fun imageTestFrame(
     )
 }
 
-private fun assertImageTestPixel(
+internal fun assertImageTestPixel(
     pixels: Array<Byte>,
     width: Long,
     x: Long,
