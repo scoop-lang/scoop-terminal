@@ -79,6 +79,22 @@ internal class ImageIndexedPlane private constructor(storage: IndexedImageStorag
         return ImageIndexedPlane(storage)
     }
 
+    fun tileVersion(column: Long, row: Long): Long {
+        val storage = available()
+        val columns = imageTileColumns(storage.size.width.toLong())
+        if (column <
+            0L ||
+            row <
+            0L ||
+            column >=
+            columns ||
+            row >=
+            imageTileColumns(storage.size.height.toLong())
+        )
+            throw IndexOutOfBoundsException()
+        return storage.tiles[row * columns + column]?.version ?: 0L
+    }
+
     fun index(column: Long, row: Long): Int {
         val storage = available()
         if (column <
@@ -98,19 +114,26 @@ internal class ImageIndexedPlane private constructor(storage: IndexedImageStorag
     }
 
     /** Used for CPU upload; the returned RGBA reservation includes its immutable result array. */
-    fun rgba(palette: ImageBytes): ImageRaster {
+    fun rgba(palette: ImageBytes): ImageRaster = rgba(
+        palette,
+        TerminalImageRect(0L, 0L, size.width.toLong(), size.height.toLong())
+    )
+
+    fun rgba(palette: ImageBytes, region: TerminalImageRect): ImageRaster {
         val storage = available()
+        checkImageRegion(storage.size, region)
         if (palette.memory !== storage.memory)
             throw IllegalArgumentException(Some("indexed image palette belongs to another budget"))
         val colors = palette.bytes
-        val width = storage.size.width.toLong()
+        val width = region.width
+        val result = TerminalImageSize(region.width.toInt(), region.height.toInt())
         val slots = storage.tiles
-        val stride = imageTileColumns(width)
+        val stride = imageTileColumns(storage.size.width.toLong())
         val pixels = ImageBytes
-            .create(storage.memory, storage.size.rgbaBytes) {
-                Array<Byte>(storage.size.rgbaBytes) { offset ->
-                    val x = offset / 4L % width
-                    val y = offset / 4L / width
+            .create(storage.memory, result.rgbaBytes) {
+                Array<Byte>(result.rgbaBytes) { offset ->
+                    val x = region.x + offset / 4L % width
+                    val y = region.y + offset / 4L / width
                     val tile = slots[y / imageTileSide * stride + x / imageTileSide]
                     val index = when (tile) {
                         case Some(val value) ->
@@ -120,7 +143,7 @@ internal class ImageIndexedPlane private constructor(storage: IndexedImageStorag
                     if (index < 0) 0.toByte() else colors[index.toLong() * 4L + offset % 4L]
                 }
             }
-        return ImageRaster(storage.size, pixels)
+        return ImageRaster(result, pixels)
     }
 
     /** Copy only intersecting 64x64 tiles; a text-cell erasure never copies an entire large image. */

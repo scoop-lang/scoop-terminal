@@ -13,9 +13,62 @@ public interface TerminalImageDecoder {
 
 internal class ImageRaster(val size: TerminalImageSize, val pixels: ImageBytes) : Closeable {
     fun retain(): ImageRaster = ImageRaster(size, pixels.retain())
+    fun region(region: TerminalImageRect): ImageRaster {
+        checkImageRegion(size, region)
+        if (region.x ==
+            0L &&
+            region.y ==
+            0L &&
+            region.width ==
+            size.width.toLong() &&
+            region.height ==
+            size.height.toLong()
+        )
+            return retain()
+        val result = TerminalImageSize(region.width.toInt(), region.height.toInt())
+        val source = pixels.bytes
+        val stride = size.width.toLong() * 4L
+        val bytes = ImageBytes
+            .create(pixels.memory, result.rgbaBytes) {
+                Array<Byte>(result.rgbaBytes) { offset ->
+                    source[
+                        (region.y + offset / 4L / region.width) *
+                            stride +
+                            (region.x + offset / 4L % region.width) *
+                            4L +
+                            offset %
+                            4L
+                    ]
+                }
+            }
+        return ImageRaster(result, bytes)
+    }
     public override fun close() {
         pixels.close()
     }
+}
+
+internal fun checkImageRegion(size: TerminalImageSize, region: TerminalImageRect) {
+    if (region.x <
+        0L ||
+        region.y <
+        0L ||
+        region.width <=
+        0L ||
+        region.height <=
+        0L ||
+        region.x >
+        size.width.toLong() ||
+        region.y >
+        size.height.toLong() ||
+        region.width >
+        size.width.toLong() -
+        region.x ||
+        region.height >
+        size.height.toLong() -
+        region.y
+    )
+        throw IllegalArgumentException(Some("image source rectangle is outside the image"))
 }
 
 internal fun decodeImageRgb(

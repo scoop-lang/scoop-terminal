@@ -376,6 +376,8 @@ Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使�
 
 索引平面采用 64×64 的不可变块和稀疏背景，局部擦除只复制相交块；颜色表另行版本化。快照共享未变块，冻结、复制和上传时同时存活的新旧分配均计入预算，最后一个租约关闭时清掉数组引用并退还配额。
 
+`image.tile(column, row)` 返回源矩形、像素块／palette 版本及透明空块标记，缓存键同时包含 `image.namespace`，避免不同会话的版本数值碰撞。`image.pixels(region)` 只生成指定矩形的 RGBA8，不为了一个可见块转换整张 Sixel 图片；未变索引块在局部擦除后继续复用原生上传。
+
 已实现的图片读接口为 `reading.images`，资源通过 `image(key)` 查找，placement 分页读取；该视图借用当前 reading 的生命周期。`TerminalSnapshot` 自动取得图片租约，model 交付和 UI 帧可单独调用 `images.retain()` 获得 `TerminalImageLease`。`image.pixels()` 返回必须关闭的 straight-alpha RGBA8 上传租约，不传 native 对象。搜索从独立文本投影读取，共享不可变行数据而不引用图片帧。
 
 后台 publication 持有独立图片租约，在窗口接受下一代时释放。跨线程交接必须完成所有权转移后才响应取消，不能把已产生的 owned 结果丢在取消路径中。自然 EOF 保留最后画面；显式关闭 session 释放其图片所有权，当前 reading 通过 `withoutImages()` 保留文本与元数据。已经取得的快照、上传租约和已准备好的原生绘制帧各自独立存活。

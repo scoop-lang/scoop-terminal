@@ -108,6 +108,8 @@ Sixel 协议：`TerminalSixelProtocolTest` 8/8，相关解码 6/6、store 9/9、
 
 生产图片交接：`TerminalModelImageTest` 2/2、原后台 model 7/7、真实／模拟 PTY 会话 6/6、核心图片快照 4/4。每次后台发布先取得图片租约，窗口接受新代次后退还旧租约；交接处不允许取消丢弃已产生的 owned 结果，下一请求仍检查取消。连续 100 次替换在 192 KiB CPU 配额内完成；实际 worker 被阻塞并在交接期间取消时，最后图片仍可读取。显式 `model/session.close()` 关闭核心资源并把当前 reading 换成无图片的共享文本投影；此前取得的图片／快照租约独立存活，自然 EOF 仍保留图片供最终画面使用。`reading.withoutImages()` 开放同一文本投影能力，不反向保留完整 reading。UI 依赖锁已更新为图形原语所需的 compression／platform；没有新增下载或临时文件。
 
+局部图片上传：`TerminalImageRegionTest` 3/3，索引块 4/4、Sixel 协议 8/8 回归。RGBA 子矩形按原图 stride 拷贝，Sixel 仅转换所需块，返回值独立计费和释放；越界与溢出矩形在分配前拒绝。4K×4K 的稀疏背景在 1 MiB CPU 配额下可上传 64×64 可见块，完整 RGBA 转换被限额拒绝且不遗留分配。部分擦除保持未变块版本，共享改色改变 palette 版本；进程内独立 namespace 防止多会话缓存键碰撞。没有下载或临时文件。
+
 ## 后续执行约束
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。

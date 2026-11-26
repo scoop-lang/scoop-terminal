@@ -7,6 +7,15 @@ public enum TerminalImageProtocol {
 /** Source pixels, independent of the terminal's cell size and UI scale factor. */
 public struct TerminalImageRect(val x: Long, val y: Long, val width: Long, val height: Long)
 
+/** A 64x64 source tile (clipped at the image edge), with versions for native upload reuse. */
+public struct TerminalImageTile(
+    val source: TerminalImageRect,
+    val contentVersion: Long,
+    val paletteVersion: Long,
+    val background: Int,
+    val transparent: Boolean
+)
+
 /** Immutable buffer-relative placement. Zero columns/rows retain the image's pixel dimensions. */
 public struct TerminalImagePlacement(
     val key: Long,
@@ -58,6 +67,9 @@ public class TerminalImage private constructor(
     content: ImageContent,
     internal val retainedBytes: Long
 ) {
+    /** Process-local storage namespace; equal numeric versions in other terminals are distinct. */
+    public val namespace: Long get() = memory.namespace
+    public val tileSide: Long get() = 64L
     private val retained = AtomicRef<ImageContentReference>(ImageContentReference(Some(content)))
     private fun available(): ImageContent = retained.load().value ?:
         throw IllegalStateException(Some("terminal image version is released"))
@@ -69,6 +81,40 @@ public class TerminalImage private constructor(
             case Indexed(val plane, val palette) -> plane.rgba(palette)
         }
     )
+
+    /** Converts only this source rectangle. Temporary upload pixels count against the CPU budget. */
+    public fun pixels(region: TerminalImageRect): TerminalImagePixels {
+        checkImageRegion(size, region)
+        return TerminalImagePixels(
+            when (val content = available()) {
+                case Raster(val raster) -> raster.region(region)
+                case Indexed(val plane, val palette) -> plane.rgba(palette, region)
+            }
+        )
+    }
+
+    /** Tile coordinates, not pixels. Unchanged indexed tiles survive partial erasure versions. */
+    public fun tile(column: Long, row: Long): TerminalImageTile {
+        val width = size.width.toLong()
+        val height = size.height.toLong()
+        if (column < 0L || row < 0L || column >= (width + 63L) / 64L || row >= (height + 63L) / 64L)
+            throw IndexOutOfBoundsException()
+        val x = column * 64L
+        val y = row * 64L
+        val region = TerminalImageRect(x, y, clamp(width - x, 1L, 64L), clamp(height - y, 1L, 64L))
+        return when (val content = available()) {
+            case Raster(val raster) ->
+                TerminalImageTile(region, raster.pixels.version, 0L, -1, false)
+
+            case Indexed(val plane, val palette) -> {
+                val version = plane.tileVersion(column, row)
+                TerminalImageTile(
+                    region, version, palette.version, plane.background,
+                    version == 0L && plane.background == -1
+                )
+            }
+        }
+    }
 
     internal fun retain(): TerminalImage = when (val content = available()) {
         case Raster(val raster) -> TerminalImage.raster(key, imageId, imageNumber, raster.retain())
