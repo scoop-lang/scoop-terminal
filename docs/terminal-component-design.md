@@ -1,6 +1,6 @@
 # Terminal 组件改进设计
 
-状态：实施中；完成证据与剩余工作见 [实现进度](implementation-progress.md)。基线：`d990f72`，Scoop `0.0.0-dev.20261126`。更新：2026-11-26。
+状态：本轮 M1–M6 已实现并完成 macOS、Linux GNU、Windows 验证；证据与兼容范围见 [实现进度](implementation-progress.md) 和 [兼容性报告](compatibility.md)。基线：`d990f72`，Scoop `0.0.0-dev.20261126`。更新：2026-11-26。
 
 ## 1. 目标与范围
 
@@ -20,11 +20,11 @@
 
 Kitty **键盘**协议与 Kitty **图形**协议是不同工作项；本轮先补传统输入正确性，不把键盘扩展混入图形任务。完整 shell 自动注入、命令重新执行、命令折叠和命令工具栏也不在本轮范围内。
 
-### 1.1 当前代码与改动起点
+### 1.1 改动前的基线
 
-现有核心已支持基本 VT 编辑、主备屏、历史、颜色、UTF-8/字素、粘贴和鼠标输入，UI 已接通真实 PTY、IME 和基本选择。改进以这些功能为基础：
+基线 `d990f72` 已支持基本 VT 编辑、主备屏、历史、颜色、UTF-8/字素、粘贴和鼠标输入，UI 已接通真实 PTY、IME 和基本选择。改进以这些功能为基础：
 
-| 当前实现 | 本设计对应改动 |
+| 基线实现 | 本设计对应改动 |
 | --- | --- |
 | `screen.scoop` resize 裁切物理行，无正文 reflow | 增加逻辑行和锚点，修复缩窄后再变宽丢字的问题 |
 | `parser.scoop` 只派发标题 OSC，DCS/APC 被忽略 | 增加有界控制串处理及协议模块 |
@@ -568,7 +568,7 @@ M5 可拆成共用资源管线、Sixel、Kitty 三个独立可评审改动；只
 
 `emulator` 和 `terminal-ui` 测试覆盖常规回归；有桌面环境时继续运行现有 `demo` 窗口测试。实际应用 smoke 至少包含 shell/readline、vim/neovim、less、tmux、进度输出，以及支持 Sixel/Kitty direct mode 的图片发送工具。tmux 的图片测试注明传输模式，不把尚不支持的 Unicode placeholders 路径算作通过。
 
-每个里程碑交付实现、必要测试、兼容范围和基准变化。本文件本身只完成设计，不代表上述新能力已存在或已经通过测试。
+每个里程碑交付实现、必要测试、兼容范围和基准变化。实际完成状态和验证结果见 [实现进度](implementation-progress.md)、[兼容性报告](compatibility.md) 与 [性能测量](performance.md)，不能仅凭设计条目推断已经通过验收。
 
 ## 13. 参考与取舍依据
 

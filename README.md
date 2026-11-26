@@ -8,7 +8,7 @@ session 的公开调用和宿主回调在窗口 owner 上执行；VT 解析、�
 
 普通输出直接请求下一可用帧，由 UI root 合并同帧更新；同步输出仍保持其提交边界。闪烁只在有焦点、可见且运行中的视图按需计时，隐藏、遮挡、退出和卸载会取消；辅助功能内容随已接受帧更新。
 
-组件后续改进见 [Terminal 组件改进设计](docs/terminal-component-design.md)，包含核心正确性、OSC、选择与搜索 API、字体连字、图形和性能；外围工具 UI 留给后续 demo。
+组件的实现范围和兼容性取舍见 [Terminal 组件改进设计](docs/terminal-component-design.md)，验证证据见 [兼容性报告](docs/compatibility.md) 和 [实现进度](docs/implementation-progress.md)。核心正确性、OSC、选择与搜索 API、字体连字、图形和性能属于组件；搜索框、标签页、分屏与会话管理等外围工具 UI 留给后续 demo。
 
 组件提供 [scoop-terminal terminfo](terminfo/README.md)，与 XTGETTCAP 使用同一份能力表。核心也支持 DECRQM、DECRQSS 和字符/设备像素尺寸查询；无窗口使用者通过 `resize(..., pixels = ...)` 提供已接受的像素尺寸，未提供时像素查询报告 0。
 
@@ -42,7 +42,7 @@ Sixel 支持私有／共享调色板、透明背景、像素比例、80／1070�
 
 ## 开发
 
-使用包含伪终端接口、纯文本 `scoop.charset.wordBoundaries` 及 `FontCollection.copy()` 的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径。
+使用包含伪终端接口、Unicode 17 字素／宽度、纯文本 `scoop.charset.wordBoundaries`、`FontCollection.copy()`、严格 PNG 解码及 `Canvas.clipRect(..., antiAlias = false)` 的 Scoop 工具链。使用 Scoop 源码仓库的开发 sysroot 时显式传入其路径；本轮修复的上游 PR 和验证版本见兼容性及实现进度文档。
 
 ```sh
 scoop --sysroot ../scoop/sysroot test --release emulator
@@ -51,5 +51,7 @@ scoop --sysroot ../scoop/sysroot run --release demo
 ```
 
 示例启动本机默认 shell，可以在 `--` 后指定可执行文件和参数。在有桌面会话的 macOS、Linux GNU 或 Windows 环境运行 `scoop --sysroot ../scoop/sysroot test --release demo`，可验证真实窗口 resize 和 shell 退出后的输出。Unix 用例还检查子进程发出的 VT 光标查询。
+
+创建原生 `Application` 的测试使用 `@Test(useProcess = true)`，每个用例在独立进程中运行；无需将多个窗口场景合并为一个测试。普通核心／离屏 UI 用例继续共享测试进程。Windows 安装工具链的主驱动名称为 `sco.exe`。
 
 手动性能基准、固定基线和指标边界见 [性能测量](docs/performance.md)。普通测试跳过这些测量；使用 `tools/benchmark_terminal.py --cases ...` 只重测受影响场景。

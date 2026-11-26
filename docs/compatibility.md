@@ -49,7 +49,7 @@ scoop --sysroot ../scoop/sysroot test --release terminal-ui \
   --ignored --filter TerminalNativeClipboardTest
 ```
 
-macOS 和 Linux 已通过该项。`TerminalWorkerSessionTest` 用可控制读写的 PTY 测试替身验证异步 OSC 52／DSR／用户输入顺序；该套件的真实 PTY 用例另外验证退出前的尾数据和最终画面。原生 adapter 与有序队列分别记录，不将它们描述为同一次端到端剪贴板测试。Linux 的 adapter 测试运行在独立 Xvfb 显示，其剪贴板初始为空。
+macOS、Linux 和 Windows 已通过该项。`TerminalWorkerSessionTest` 用可控制读写的 PTY 测试替身验证异步 OSC 52／DSR／用户输入顺序；该套件的真实 PTY 用例另外验证退出前的尾数据和最终画面。原生 adapter 与有序队列分别记录，不将它们描述为同一次端到端剪贴板测试。Linux 的 adapter 测试运行在独立 Xvfb 显示，其剪贴板初始为空。
 
 ## 参考终端的真实回包
 
@@ -98,8 +98,12 @@ Ghostty 在 macOS 上经 `open -n -a Ghostty --args` 启动，设置 `--config-d
 | 平台 | 核心 | UI | 原生窗口 | 只读剪贴板 |
 | --- | --- | --- | --- | --- |
 | Linux GNU x86_64，glibc 2.43 | 186 通过 | 97 通过 | 2 通过 | 1 通过 |
-| Windows x64 / Microsoft UCRT | 验证中 | 验证中 | 验证中 | 验证中 |
+| Windows x64 / Microsoft UCRT | 186 通过 | 97 通过 | 2 通过 | 1 通过 |
 
 Linux 使用 GTK X11、独立 Xvfb 显示及 `dbus-run-session`，验证 resize、实际 PTY 的 CPR／PNG ACK、最终输出、退出关闭和独立装饰的 Accepted 帧。它验证原生窗口路径，不等同于 Wayland、物理显示器时序或硬件 GPU 性能。`useProcess` 使两个原生用例分别初始化窗口应用，完整套件通过。
+
+Windows 11 build 26300 使用 Microsoft UCRT 目标、MSVC tools 14.51.36231 和 Windows SDK 10.0.26100.0。原生窗口／剪贴板用例在已登录用户的交互桌面运行，验证 ConPTY 的焦点与输入、resize、退出码 17、最终输出保留，以及选择／OSC 133 装饰进入 Accepted 帧而不增加文字布局。两个窗口用例分别在 `useProcess` 子进程中初始化 `Application`。
+
+首次 Windows UI 回归为 96 项通过、1 项失败：真实 ConPTY 的立即退出用例预期 7，实际为 1。已定位为 Scoop 为普通 `/d`、`/c` 参数添加不必要引号，修复合并于 [Scoop PR #232](https://github.com/scoop-lang/scoop/pull/232)，上游 Windows 进程测试 8/8 通过。更新开发 sysroot 及其下游依赖后，完整 UI 97 项、demo 2 项和只读剪贴板 1 项重新通过；未受此修复影响的核心 186 项复用此前结果，JSON 为其单独保留原 sysroot 版本。
 
 [Linux 应用记录](compatibility-applications-linux.json) 包含 Bash 5.3.9、Neovim 0.11.6、less 668 和进度脚本，以及 Bash／Neovim 的 `xterm-256color` 回退。该机的 `vim` 命令实际指向 Neovim，因此记录保留两个命令入口及实际版本，不重复计为独立 Vim 实现；macOS 的 Vim 9.1 记录见上文。tmux 与两种图片发送工具的实际应用覆盖来自本机记录，Linux 另完成 xterm Sixel 实际回包对照。
