@@ -246,8 +246,12 @@ internal class ImageIndexedPlane private constructor(storage: IndexedImageStorag
     }
 }
 
-private class MutableImageTile(private val memory: ImageMemory, background: Int) : Closeable {
-    private val reservation = memory.reserve(imageTileBytes + 512L)
+private class MutableImageTile(
+    private val memory: ImageMemory,
+    background: Int,
+    private val beforeAllocate: (Long) -> Unit
+) : Closeable {
+    private val reservation = indexedReserve(memory, imageTileBytes + 512L, beforeAllocate)
     private var pixels: MutableArray<Int>? = Some(MutableArray<Int>(4096L) { background })
     private var frozen: ImageBytes? = None
     fun set(column: Long, row: Long, value: Int) {
@@ -255,6 +259,7 @@ private class MutableImageTile(private val memory: ImageMemory, background: Int)
     }
     fun freeze(): ImageBytes {
         val source = pixels!!
+        beforeAllocate(imageTileBytes + ImageBytes.overhead)
         val result = ImageBytes
             .create(memory, imageTileBytes) {
                 Array<Byte>(imageTileBytes) { offset ->
@@ -278,8 +283,12 @@ private class MutableImageTile(private val memory: ImageMemory, background: Int)
 }
 
 /** Mutable sparse decode tiles; their default background does not allocate a full raster eagerly. */
-internal class ImageIndexedBuilder(val memory: ImageMemory, val background: Int) : Closeable {
-    private val reservation = memory.reserve(512L)
+internal class ImageIndexedBuilder(
+    val memory: ImageMemory,
+    val background: Int,
+    private val beforeAllocate: (Long) -> Unit = {}
+) : Closeable {
+    private val reservation = indexedReserve(memory, 512L, beforeAllocate)
     private var tiles = HashMap<Long, MutableImageTile>()
     private val stride = imageTileColumns(memory.limits.maxDimension)
     private var ended = false
@@ -326,7 +335,7 @@ internal class ImageIndexedBuilder(val memory: ImageMemory, val background: Int)
 
             case None -> {
                 if (value == background) return
-                val tile = MutableImageTile(memory, background)
+                val tile = MutableImageTile(memory, background, beforeAllocate)
                 tiles[key] = tile
                 tile
             }
@@ -342,7 +351,7 @@ internal class ImageIndexedBuilder(val memory: ImageMemory, val background: Int)
             val size = imageSize(wide, high, memory.limits)
             val columns = imageTileColumns(wide)
             val slots = columns * imageTileColumns(high)
-            val reserved = memory.reserve(indexedMapBytes(slots))
+            val reserved = indexedReserve(memory, indexedMapBytes(slots), beforeAllocate)
             try {
                 val result = Array<ImageBytes?>(slots) { index ->
                     val key = index / columns * stride + index % columns
@@ -373,6 +382,15 @@ internal class ImageIndexedBuilder(val memory: ImageMemory, val background: Int)
         tiles = HashMap<Long, MutableImageTile>()
         reservation.close()
     }
+}
+
+private fun indexedReserve(
+    memory: ImageMemory,
+    bytes: Long,
+    beforeAllocate: (Long) -> Unit
+): ImageReservation {
+    beforeAllocate(bytes)
+    return memory.reserve(bytes)
 }
 
 private fun imageTileColumns(pixels: Long): Long = (pixels + imageTileSide - 1L) / imageTileSide

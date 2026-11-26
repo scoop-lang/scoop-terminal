@@ -10,7 +10,14 @@ internal class SixelRegisters(private val memory: ImageMemory) : Closeable {
 
     fun snapshot(): ImageBytes = available().retain()
 
-    fun define(index: Long, space: Long, first: Long, second: Long, third: Long): Boolean {
+    fun define(
+        index: Long,
+        space: Long,
+        first: Long,
+        second: Long,
+        third: Long,
+        beforeAllocate: (Long) -> Unit = {}
+    ): Boolean {
         if (index < 0L || index >= count)
             imageFailure(TerminalImageFailure.Limit, "Sixel color register exceeds limit")
         val color = sixelColor(space, first, second, third)
@@ -24,6 +31,7 @@ internal class SixelRegisters(private val memory: ImageMemory) : Closeable {
             color[2L]
         )
             return false
+        beforeAllocate(previous.size + ImageBytes.overhead)
         val updated = ImageBytes
             .create(memory, previous.size) {
                 Array<Byte>(previous.size) { position ->

@@ -15,6 +15,9 @@ internal class TerminalModes {
     var pixelMouse = false
     var focusEvents = false
     var bracketedPaste = false
+    var sixelDisplay = false
+    var sixelPrivateColors = true
+    var sixelMovesRight = false
 }
 
 internal fun lineCharacter(character: Char): Char = when (character) {

@@ -102,10 +102,11 @@ internal class TerminalImageStore(
         return clock
     }
 
-    fun palette(): SixelRegisters = when (val palette = shared) {
+    fun palette(beforeAllocate: (Long) -> Unit = {}): SixelRegisters = when (val palette = shared) {
         case Some(val palette) -> palette
 
         case None -> {
+            beforeAllocate(memory.limits.colorRegisters * 4L + ImageBytes.overhead)
             val palette = SixelRegisters(memory)
             shared = Some(palette)
             palette
@@ -299,7 +300,7 @@ internal class TerminalImageStore(
                     entry,
                     TerminalImageBounds(
                         0.0, 0.0,
-                        entry.screen.columns.toDouble() * cellWidth.toDouble(), Double.MAX_VALUE
+                        Double.MAX_VALUE, Double.MAX_VALUE
                     )
                 )
             } else
@@ -333,6 +334,15 @@ internal class TerminalImageStore(
         tracking.watch(handle.id) { changed() }
         refreshTail(entry)
         changed()
+    }
+
+    fun movePlacement(entry: StoredImagePlacement, row: Long, column: Long) {
+        if (placed[entry.record.key]?.record?.key == Some(entry.record.key))
+            relocate(entry, row, column)
+    }
+
+    fun clipPlacement(entry: StoredImagePlacement, region: TerminalImageBounds) {
+        if (placed[entry.record.key]?.record?.key == Some(entry.record.key)) clip(entry, region)
     }
 
     private fun clip(entry: StoredImagePlacement, region: TerminalImageBounds) {
@@ -406,7 +416,7 @@ internal class TerminalImageStore(
                     entry,
                     TerminalImageBounds(
                         0.0, 0.0,
-                        screen.columns.toDouble() * cellWidth.toDouble(), Double.MAX_VALUE
+                        Double.MAX_VALUE, Double.MAX_VALUE
                     )
                 )
             } else if (moved.moving) clip(entry, scroll.region)

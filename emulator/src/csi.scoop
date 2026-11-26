@@ -20,6 +20,10 @@ internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
     }
     if (command.intermediate != 0) return false
     val final = command.final.toChar()
+    if (final == 'S' && command.prefix == '?'.code) {
+        queryGraphics(terminal, command)
+        return false
+    }
     if (final == 'c' || final == 'n') {
         query(terminal, command)
         return false
@@ -171,6 +175,9 @@ private fun applyModes(terminal: TerminalState, command: VtCsi, enabled: Boolean
             case 1049 -> terminal.switchScreen(enabled, true, true)
             case 2004 -> modes.bracketedPaste = enabled
             case 2026 -> terminal.setSynchronizedOutput(enabled)
+            case 80 -> if (terminal.graphics.sixel) modes.sixelDisplay = enabled
+            case 1070 -> if (terminal.graphics.sixel) modes.sixelPrivateColors = enabled
+            case 8452 -> if (terminal.graphics.sixel) modes.sixelMovesRight = enabled
             case _ -> {}
         }
     }
@@ -186,7 +193,7 @@ private fun query(terminal: TerminalState, command: VtCsi) {
     val value = command.argument(0L, 0)
     if (command.final == 'c'.code && value == 0) {
         if (command.prefix == 0)
-            terminal.reply("\u001b[?1;2c")
+            terminal.reply(if (terminal.graphics.sixel) "\u001b[?1;2;4c" else "\u001b[?1;2c")
         else if (command.prefix == 0x3e) terminal.reply("\u001b[>0;1;0c")
     } else if (command.final == 'n'.code) {
         if (value == 5 && command.prefix == 0) terminal.reply("\u001b[0n")

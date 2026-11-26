@@ -19,7 +19,8 @@ public class Terminal public constructor(
     linkLimits: TerminalLinkLimits = TerminalLinkLimits(),
     trackingLimits: TerminalTrackingLimits = TerminalTrackingLimits(),
     commandLimits: TerminalCommandLimits = TerminalCommandLimits(),
-    imageLimits: TerminalImageLimits = TerminalImageLimits()
+    imageLimits: TerminalImageLimits = TerminalImageLimits(),
+    graphics: TerminalGraphicsSupport = TerminalGraphicsSupport()
 ) : Closeable {
     private var closed = false
     private val state = createState(
@@ -28,7 +29,7 @@ public class Terminal public constructor(
         historyLimit,
         parserLimits,
         ambiguousWidth,
-        colors, clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits
+        colors, clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits, graphics
     )
     private val snapshots = TerminalSnapshotPool(snapshotLimits)
 
@@ -171,7 +172,8 @@ private fun createState(
     linkLimits: TerminalLinkLimits,
     trackingLimits: TerminalTrackingLimits,
     commandLimits: TerminalCommandLimits,
-    imageLimits: TerminalImageLimits
+    imageLimits: TerminalImageLimits,
+    graphics: TerminalGraphicsSupport
 ): TerminalState {
     checkSize(columns, rows)
     checkClipboardPolicy(clipboardPolicy)
@@ -183,7 +185,7 @@ private fun createState(
         parserLimits,
         ambiguousWidth,
         colors,
-        clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits
+        clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits, graphics
     )
 }
 

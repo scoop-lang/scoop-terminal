@@ -1,0 +1,266 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class TerminalSixelProtocolTest {
+    @Test fun capabilitiesAndModeQueriesFollowTheEmbeddingConfiguration() {
+        Terminal(8L, 4L)
+            .use { plain ->
+                val update = plain
+                    .feed(
+                        ("\u001b[c\u001b[?80$p\u001b[?1;1S" + sixelPixels("~") + "ok").toByteArray()
+                    )
+                assertEquals("\u001b[?1;2c\u001b[?80;0$y\u001b[?1;3S", sixelReplies(update))
+                assertEquals(0L, plain.reading.images.imageCount)
+                assertEquals("o", plain.reading.lines(0L, 1L)[0L].cells[0L].text)
+            }
+        sixelTerminal()
+            .use { terminal ->
+                val initial = terminal
+                    .feed("\u001b[c\u001b[?80$p\u001b[?1070$p\u001b[?8452$p".toByteArray())
+                assertEquals(
+                    "\u001b[?1;2;4c\u001b[?80;2$y\u001b[?1070;1$y\u001b[?8452;2$y",
+                    sixelReplies(initial)
+                )
+                val changed = terminal
+                    .feed("\u001b[?80;8452h\u001b[?1070l\u001b[?80;1070;8452$p".toByteArray())
+                assertEquals(
+                    "\u001b[?80;1$y\u001b[?1070;2$y\u001b[?8452;1$y",
+                    sixelReplies(changed)
+                )
+                val reset = terminal.feed("\u001b[!p\u001b[?80;1070;8452$p".toByteArray())
+                assertEquals("\u001b[?80;2$y\u001b[?1070;1$y\u001b[?8452;2$y", sixelReplies(reset))
+                val geometry = terminal
+                    .feed(
+                        "\u001b[?1;1S\u001b[?2;1S\u001b[?2;4S\u001b[?3;1S\u001b[?1;8S\u001b[?1;3;2S"
+                            .toByteArray()
+                    )
+                assertEquals(
+                    "\u001b[?1;0;1024S\u001b[?2;0;8;4S\u001b[?2;0;16384;16384S\u001b[?3;1S\u001b[?1;2S\u001b[?1;3S",
+                    sixelReplies(geometry)
+                )
+            }
+    }
+
+    @Test fun everyByteBoundaryCompletesPixelsBeforeTheFollowingCursorQuery() {
+        val stream = sixelPixels("\"1;1;2;6#1;2;100;0;0!2~") + "\u001b[6n"
+        val bytes = stream.toByteArray()
+        for (split in 0L..bytes.size) {
+            sixelTerminal(cellHeight = 2L)
+                .use { terminal ->
+                    val first = terminal.feed(Array<Byte>(split) { index -> bytes[index] })
+                    val second = terminal
+                        .feed(Array<Byte>(bytes.size - split) { index -> bytes[index + split] })
+                    assertEquals("\u001b[3;1R", sixelReplies(first) + sixelReplies(second))
+                    assertEquals(1L, terminal.reading.images.placementCount)
+                    val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                    val image = terminal.reading.images.image(placement.imageKey)!!
+                    assertEquals(TerminalImageSize(2, 6), image.size)
+                    image
+                        .pixels()
+                        .use { pixels ->
+                            for (index in 0L..<12L) {
+                                assertEquals(255, imageByte(pixels.bytes, index * 4L))
+                                assertEquals(255, imageByte(pixels.bytes, index * 4L + 3L))
+                            }
+                        }
+                    assertEquals(
+                        6.0,
+                        placement.geometry(terminal.reading, 1.0, 2.0)!!.destination.height
+                    )
+                }
+        }
+    }
+
+    @Test fun trailingBandAdvanceAndRightwardWrapHaveDistinctCursorAndHistoryResults() {
+        for (trailing in [false, true]) {
+            sixelTerminal()
+                .use { terminal ->
+                    terminal.feed("\u001b[3;4H".toByteArray())
+                    val update = terminal
+                        .feed(
+                            (sixelPixels("!2~" + if (trailing) "-" else "") + "\u001b[6n")
+                                .toByteArray()
+                        )
+                    assertEquals(
+                        if (trailing) "\u001b[3;4R" else "\u001b[4;4R",
+                        sixelReplies(update)
+                    )
+                    assertEquals(if (trailing) 5L else 4L, terminal.historySize)
+                    val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                    assertEquals(
+                        2.0,
+                        placement.geometry(terminal.reading, 1.0, 1.0)!!.destination.y
+                    )
+                }
+        }
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed("\u001b[?8452h\u001b[3;8H".toByteArray())
+                val update = terminal.feed((sixelPixels("!2~") + "\u001b[6n").toByteArray())
+                assertEquals("\u001b[4;1R", sixelReplies(update))
+                assertEquals(5L, terminal.historySize)
+                assertEquals(1.0, terminal.reading.images.placements(0L, 1L)[0L].clipRight)
+            }
+    }
+
+    @Test fun displayModeUsesThePageOriginAndPreservesCursorAndPendingWrap() {
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed("abcdefgh\u001b[?80h".toByteArray())
+                val update = terminal.feed((sixelPixels("~-") + "\u001b[6n").toByteArray())
+                assertEquals("\u001b[1;8R", sixelReplies(update))
+                assertEquals(0L, terminal.historySize)
+                val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                assertEquals(
+                    Some(TerminalPosition(0L, 0L)),
+                    terminal.reading.resolve(placement.anchor)
+                )
+                terminal.feed("Z".toByteArray())
+                assertEquals("Z", terminal.reading.lines(1L, 1L)[0L].cells[0L].text)
+            }
+    }
+
+    @Test fun sharedAndPrivateRegistersKeepFrozenPalettesAndBufferOwnership() {
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed("\u001b[?1070l".toByteArray())
+                terminal.feed(sixelPixels("#1;2;100;0;0@").toByteArray())
+                val first = terminal.reading.images.placements(0L, 1L)[0L].imageKey
+                val frozen = terminal.snapshot()
+                terminal.feed(("\u001b[2;1H" + sixelPixels("#1;2;0;100;0@")).toByteArray())
+                terminal
+                    .reading
+                    .images
+                    .image(first)!!
+                    .pixels()
+                    .use { pixels ->
+                        assertEquals(0, imageByte(pixels.bytes, 0L))
+                        assertEquals(255, imageByte(pixels.bytes, 1L))
+                    }
+                frozen
+                    .images
+                    .image(first)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 0L)) }
+                terminal
+                    .feed(("\u001b[?1070h\u001b[3;1H" + sixelPixels("#1;2;0;0;100@")).toByteArray())
+                terminal
+                    .reading
+                    .images
+                    .image(first)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 1L)) }
+                terminal.feed(("\u001b[?1049h" + sixelPixels("@")).toByteArray())
+                assertEquals(1L, terminal.reading.images.placementCount)
+                terminal.feed("\u001b[?1049l".toByteArray())
+                assertEquals(3L, terminal.reading.images.placementCount)
+                terminal.feed("\u001b[?1049h".toByteArray())
+                assertEquals(0L, terminal.reading.images.placementCount)
+                frozen.close()
+            }
+    }
+
+    @Test fun cancellationEofAndLimitsReleaseTheTransferAndRecoverAtTheStringBoundary() {
+        val state = TerminalState(
+            8L, 4L, 2L, TerminalParserLimits(), TerminalAmbiguousWidth.Narrow,
+            TerminalColors(), TerminalClipboardPolicy(), TerminalLinkLimits(),
+            TerminalTrackingLimits(),
+            TerminalCommandLimits(), TerminalImageLimits(), TerminalGraphicsSupport(true)
+        )
+        for (cancel in [0x18, 0x1a]) {
+            state.feed("\u001bP7;1q~".toByteArray())
+            assertTrue(state.images.memory.bytes > 0L)
+            state.feed([cancel.toByte()])
+            assertEquals(0L, state.images.memory.bytes)
+        }
+        state.feed("\u001bP7;1q~".toByteArray())
+        state.finishOutput()
+        assertEquals(0L, state.images.memory.bytes)
+        state.close()
+        sixelTerminal(limits = TerminalImageLimits(maxSixelPixelWrites = 3L))
+            .use { terminal ->
+                val update = terminal
+                    .feed((sixelPixels("!100~ignored") + "X\u001b[6n").toByteArray())
+                assertEquals(1L, sixelDiagnostics(update))
+                assertEquals("\u001b[1;2R", sixelReplies(update))
+                assertEquals(0L, terminal.reading.images.imageCount)
+                assertEquals("X", terminal.reading.lines(0L, 1L)[0L].cells[0L].text)
+            }
+    }
+
+    @Test fun resizeMigratesAnInProgressOriginAndWideTailsRetainTheirCellOffset() {
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed("abcdef\u001bP7;1q#1;2;".toByteArray())
+                terminal.resize(4L, 4L, pixels = Some(TerminalPixelSize(4L, 4L, 1L, 1L)))
+                terminal.feed("100;0;0@\u001b\\".toByteArray())
+                val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                assertEquals(
+                    Some(TerminalPosition(1L, 2L)),
+                    terminal.reading.resolve(placement.anchor)
+                )
+                assertEquals(2L, terminal.cursor.column)
+            }
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed(("界\u001b[2G" + sixelPixels("@")).toByteArray())
+                val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                assertEquals(1.0, placement.geometry(terminal.reading, 1.0, 1.0)!!.destination.x)
+                assertEquals(1L, terminal.cursor.column)
+            }
+    }
+
+    @Test fun scrollingInsideMarginsClipsTheImageAndKeepsTextOutsideTheRegion() {
+        sixelTerminal()
+            .use { terminal ->
+                terminal.feed("head\u001b[2;4r\u001b[?69h\u001b[2;5s\u001b[3;2H".toByteArray())
+                val update = terminal.feed((sixelPixels("!2~") + "\u001b[6n").toByteArray())
+                assertEquals("\u001b[4;2R", sixelReplies(update))
+                assertEquals(0L, terminal.historySize)
+                assertEquals("h", terminal.reading.lines(0L, 1L)[0L].cells[0L].text)
+                val placement = terminal.reading.images.placements(0L, 1L)[0L]
+                val area = placement.geometry(terminal.reading, 1.0, 1.0)!!
+                assertEquals(1.0, area.visible.y)
+                assertEquals(3.0, area.visible.height)
+            }
+    }
+}
+
+private fun sixelTerminal(
+    cellHeight: Long = 1L,
+    limits: TerminalImageLimits = TerminalImageLimits()
+): Terminal {
+    val terminal = Terminal(
+        8L,
+        4L,
+        10L,
+        imageLimits = limits,
+        graphics = TerminalGraphicsSupport(true)
+    )
+    terminal.resize(8L, 4L, pixels = Some(TerminalPixelSize(8L, 4L * cellHeight, 1L, cellHeight)))
+    return terminal
+}
+
+private fun sixelPixels(payload: String): String = "\u001bP7;1q" + payload + "\u001b\\"
+
+private fun sixelReplies(update: TerminalUpdate): String {
+    val result = StringBuilder()
+    for (effect in update.effects)
+        when (effect) {
+            case Reply(val bytes) -> result.append(String.fromUtf8(bytes));
+            case _ -> {}
+        }
+    return result.toString()
+}
+
+private fun sixelDiagnostics(update: TerminalUpdate): Long {
+    var count = 0L
+    for (effect in update.effects)
+        when (effect) {
+            case Diagnostic(_) -> count += 1L;
+            case _ -> {}
+        }
+    return count
+}

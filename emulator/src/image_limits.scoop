@@ -1,5 +1,8 @@
 package scoop.terminal.emulator
 
+/** Enable a protocol only when the embedding host can display its committed image readings. */
+public struct TerminalGraphicsSupport(val sixel: Boolean = false)
+
 /** Policy limits, not protocol constants. CPU accounting includes retained versions and work. */
 public struct TerminalImageLimits(
     val maxEncodedBytes: Long = 100663296L,

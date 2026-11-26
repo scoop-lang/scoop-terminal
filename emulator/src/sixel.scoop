@@ -1,0 +1,238 @@
+package scoop.terminal.emulator
+
+internal fun sixelString(terminal: TerminalState, command: VtCsi): VtStringSink? {
+    if (!terminal.graphics.sixel) return None
+    var start: TerminalTrackedRange? = None
+    var registers: SixelRegisters? = None
+    var decoder: SixelDecoder? = None
+    val privateColors = terminal.modes.sixelPrivateColors
+    try {
+        if (command.arguments.size >
+            3L ||
+            command.argument(0L, 0) >
+            9 ||
+            command.argument(1L, 0) >
+            2
+        )
+            imageFailure(TerminalImageFailure.InvalidData, "invalid Sixel DCS parameters")
+        for (separator in command.separators)
+            if (separator != ';'.code)
+                imageFailure(TerminalImageFailure.InvalidData, "Sixel parameters use semicolons")
+        terminal.beginGraphics()
+        val screen = terminal.screen
+        if (privateColors)
+            terminal
+                .images
+                .makeRoom(
+                    terminal.images.memory.limits.colorRegisters * 4L + ImageBytes.overhead, screen
+                )
+        val column = if (terminal.modes.sixelDisplay) 0L else screen.column
+        val row = screen.historySize + if (terminal.modes.sixelDisplay) 0L else screen.row
+        val boundary = screen.anchorAt(row, column, TerminalAffinity.Before)!!
+        val position = screen.resolve(boundary)!!
+        start = Some(
+            terminal
+                .tracking
+                .registerLive(
+                    screen, TerminalRange(boundary, boundary),
+                    TerminalTrackingKind.Position, terminal.reading.presentationVersion,
+                    followTextEdits = false
+                )
+        )
+        registers = Some(
+            if (privateColors)
+                SixelRegisters(terminal.images.memory)
+            else
+                terminal.images.palette { bytes -> terminal.images.makeRoom(bytes, screen) }
+        )
+        decoder = Some(
+            SixelDecoder(
+                terminal.images.memory, registers!!,
+                command.argument(1L, 0) == 1, command.argument(0L, 0).toLong(),
+                { bytes -> terminal.images.makeRoom(bytes, screen) }
+            )
+        )
+        return Some(
+            TerminalSixelSink(
+                terminal, screen, start!!, column - position.column,
+                registers!!, decoder!!, privateColors, terminal.modes.sixelDisplay, terminal
+                    .modes
+                    .sixelMovesRight
+            )
+        )
+    } catch (error: TerminalImageException) {
+        terminal
+            .emit(
+                TerminalEffect
+                    .Diagnostic(
+                        "Sixel image rejected: " + (error.message ?: "image limit exceeded")
+                    )
+            )
+    } catch (_: IllegalStateException) {
+        terminal
+            .emit(TerminalEffect.Diagnostic("Sixel image rejected: terminal anchor limit exceeded"))
+    }
+    decoder?.close()
+    if (privateColors) registers?.close()
+    start?.close()
+    return None
+}
+
+private class TerminalSixelSink(
+    private val terminal: TerminalState,
+    private val screen: Screen,
+    private val start: TerminalTrackedRange,
+    private val columnOffset: Long,
+    private val registers: SixelRegisters,
+    private val decoder: SixelDecoder,
+    private val privateColors: Boolean,
+    private val display: Boolean,
+    private val movesRight: Boolean
+) : VtStringSink {
+    private var ended = false
+    public override fun push(byte: Int) {
+        if (ended) return
+        try {
+            decoder.push(byte)
+        } catch (error: TerminalImageException) {
+            reject(error);
+            cancel()
+        }
+    }
+    public override fun finish() {
+        if (ended) return
+        try {
+            decoder.finish().use { decoded -> display(decoded) }
+        } catch (error: TerminalImageException) {
+            reject(error)
+        } catch (_: IllegalStateException) {
+            terminal
+                .emit(
+                    TerminalEffect
+                        .Diagnostic("Sixel image rejected: terminal image anchor is unavailable")
+                )
+        } finally {
+            cancel()
+        }
+    }
+    private fun reject(error: TerminalImageException) {
+        terminal
+            .emit(
+                TerminalEffect
+                    .Diagnostic("Sixel image rejected: " + (error.message ?: "invalid image"))
+            )
+    }
+    private fun display(decoded: SixelDecoded) {
+        val plane = decoded.plane ?: return
+        val anchor = when (terminal.tracking.current(start.id)) {
+            case Some(Available(val range)) -> range.start
+            case _ ->
+                imageFailure(
+                    TerminalImageFailure.Limit,
+                    "Sixel origin was evicted while receiving pixels"
+                )
+        }
+        val origin = screen.resolve(anchor) ?:
+            imageFailure(TerminalImageFailure.Limit, "Sixel origin no longer belongs to the buffer")
+        val startRow = origin.row - screen.historySize
+        val startColumn = origin.column + columnOffset
+        val width = plane.size.width.toLong() * decoded.scaleX
+        val height = plane.size.height.toLong() * decoded.scaleY
+        terminal.images.makeRoom(4096L, screen)
+        val image = TerminalImage
+            .indexed(terminal.images.key(), plane.retain(), registers.snapshot())
+        var installed = false
+        try {
+            terminal.images.install(screen, image, !privateColors)
+            installed = true
+            val placement = terminal
+                .images
+                .place(
+                    screen,
+                    TerminalImagePlacement(
+                        terminal.images.key(), image.key, 0L, anchor,
+                        TerminalImageRect(
+                            0L,
+                            0L,
+                            plane.size.width.toLong(),
+                            plane.size.height.toLong()
+                        ),
+                        scaleX = decoded.scaleX, scaleY = decoded.scaleY, columnOffset =
+                            columnOffset
+                    )
+                )
+            if (display) return
+            var column = startColumn +
+                if (movesRight)
+                    (width + terminal.images.cellWidth - 1L) / terminal.images.cellWidth
+                else
+                    0L
+            var row = startRow -
+                1L +
+                (height + terminal.images.cellHeight - 1L) /
+                terminal.images.cellHeight
+            if (column > screen.right) {
+                column = screen.left;
+                row += 1L
+            }
+            val lineFeed = startRow +
+                (decoded.lineFeedPixels + terminal.images.cellHeight - 1L) /
+                terminal.images.cellHeight
+            val reached = if (lineFeed > row) lineFeed else row
+            val scroll = if (reached > screen.bottom) reached - screen.bottom else 0L
+            var remaining = scroll
+            while (remaining > 0L) {
+                val amount = clamp(remaining, 1L, screen.bottom - screen.top + 1L)
+                screen.scrollUp(screen.top, screen.bottom, amount, terminal.style)
+                remaining -= amount
+            }
+            val placedRow = screen.historySize + startRow - scroll
+            terminal.images.movePlacement(placement, placedRow, startColumn)
+            if (scroll > 0L) {
+                val full = screen.top ==
+                    0L &&
+                    screen.bottom ==
+                    screen.rows -
+                    1L &&
+                    screen.left ==
+                    0L &&
+                    screen.right ==
+                    screen.columns -
+                    1L
+                terminal
+                    .images
+                    .clipPlacement(
+                        placement,
+                        if (full)
+                            TerminalImageBounds(0.0, 0.0, Double.MAX_VALUE, Double.MAX_VALUE)
+                        else
+                            TerminalImageBounds(
+                                screen.left.toDouble() * terminal.images.cellWidth.toDouble(),
+                                (screen.historySize + screen.top).toDouble() *
+                                    terminal.images.cellHeight.toDouble(),
+                                (screen.right - screen.left + 1L).toDouble() *
+                                    terminal.images.cellWidth.toDouble(),
+                                (screen.bottom - screen.top + 1L).toDouble() *
+                                    terminal.images.cellHeight.toDouble()
+                            )
+                    )
+            }
+            row -= scroll
+            if (row >= 0L) {
+                screen.row = clamp(row, 0L, screen.rows - 1L)
+                screen.moveColumn(column)
+                terminal.presentationChanged()
+            }
+        } catch (error: Throwable) {
+            if (installed) terminal.images.removeResource(image.key) else image.close()
+            throw error
+        }
+    }
+    public override fun cancel() {
+        if (ended) return
+        ended = true
+        decoder.close()
+        start.close()
+        if (privateColors) registers.close()
+    }
+}

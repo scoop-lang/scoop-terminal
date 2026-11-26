@@ -14,7 +14,8 @@ internal class TerminalState(
     linkLimits: TerminalLinkLimits,
     trackingLimits: TerminalTrackingLimits,
     commandLimits: TerminalCommandLimits,
-    imageLimits: TerminalImageLimits
+    imageLimits: TerminalImageLimits,
+    val graphics: TerminalGraphicsSupport = TerminalGraphicsSupport()
 ) : VtActions {
     private val ids = RowIds()
     private val screenChanges = ScreenChanges(
@@ -393,8 +394,16 @@ internal class TerminalState(
     }
 
     public override fun startString(kind: VtStringKind): VtStringSink? = when (kind) {
-        case Dcs(val command) -> queryString(this, command)
+        case Dcs(val command) ->
+            if (command.prefix == 0 && command.intermediate == 0 && command.final == 'q'.code)
+                sixelString(this, command)
+            else
+                queryString(this, command)
         case Apc -> None
+    }
+
+    fun beginGraphics() {
+        combining = None
     }
 
     fun reply(text: String) {

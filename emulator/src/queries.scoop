@@ -61,7 +61,39 @@ private fun modeState(terminal: TerminalState, privateMode: Boolean, value: Int)
         case 1049 -> Some(terminal.alternateScreen)
         case 2004 -> Some(modes.bracketedPaste)
         case 2026 -> Some(terminal.synchronizedOutput)
+        case 80 -> if (terminal.graphics.sixel) Some(modes.sixelDisplay) else None
+        case 1070 -> if (terminal.graphics.sixel) Some(modes.sixelPrivateColors) else None
+        case 8452 -> if (terminal.graphics.sixel) Some(modes.sixelMovesRight) else None
         case _ -> None
+    }
+}
+
+internal fun queryGraphics(terminal: TerminalState, command: VtCsi) {
+    val item = command.argument(0L, 0)
+    val action = command.argument(1L, 0)
+    val status = if (item != 1 && item != 2)
+        1
+    else if (action < 1 || action > 4)
+        2
+    else if (!terminal.graphics.sixel || (action != 1 && action != 4)) 3 else 0
+    if (status != 0) {
+        terminal.reply(f"\u001b[?${item};${status}S")
+        return
+    }
+    val limits = terminal.images.memory.limits
+    if (item == 1)
+        terminal.reply(f"\u001b[?1;0;${limits.colorRegisters}S")
+    else {
+        val pixels = terminal.pixelSize
+        val width = if (action == 4)
+            limits.maxDimension
+        else
+            clamp(pixels?.width ?: 0L, 0L, limits.maxDimension)
+        val height = if (action == 4)
+            limits.maxDimension
+        else
+            clamp(pixels?.height ?: 0L, 0L, limits.maxDimension)
+        terminal.reply(f"\u001b[?2;0;${width};${height}S")
     }
 }
 

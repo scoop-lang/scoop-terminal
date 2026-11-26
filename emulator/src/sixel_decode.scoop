@@ -19,9 +19,10 @@ internal class SixelDecoder(
     private val memory: ImageMemory,
     private val registers: SixelRegisters,
     transparent: Boolean = false,
-    macro: Long = 0L
+    macro: Long = 0L,
+    private val beforeAllocate: (Long) -> Unit = {}
 ) : Closeable {
-    private val pixels = ImageIndexedBuilder(memory, if (transparent) -1 else 0)
+    private val pixels = ImageIndexedBuilder(memory, if (transparent) -1 else 0, beforeAllocate)
     private var scaleX = 1L
     private var scaleY = when (macro) {
         case 2L -> 5L
@@ -126,7 +127,14 @@ internal class SixelDecoder(
                 imageFailure(TerminalImageFailure.Limit, "Sixel color register exceeds limit")
             if (parameterCount == 5L)
                 registers
-                    .define(index, parameters[1L], parameters[2L], parameters[3L], parameters[4L])
+                    .define(
+                        index,
+                        parameters[1L],
+                        parameters[2L],
+                        parameters[3L],
+                        parameters[4L],
+                        beforeAllocate
+                    )
             selected = index.toInt()
         } else if (command == 3) {
             val numerator = if (parameters[0L] <= 0L) 1L else parameters[0L]
