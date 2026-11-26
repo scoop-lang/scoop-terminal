@@ -25,7 +25,7 @@ private class TerminalKittyTransferTest {
                         replies.add(reply)
                 assertEquals(3L, replies.size)
                 assertEquals("\u001b_Gi=31,p=9;OK\u001b\\", replies[0L])
-                assertEquals("\u001b[2;2R", replies[1L])
+                assertEquals("\u001b[1;2R", replies[1L])
                 assertEquals("\u001b[?1;2c", replies[2L])
                 val placement = state.reading.images.placements(0L, 1L)[0L]
                 assertEquals(9L, placement.placementId)
@@ -73,7 +73,7 @@ private class TerminalKittyTransferTest {
             val final = state.feed((kittyCommand("m=0", "AP8A") + "\u001b[6n").toByteArray())
             val replies = kittyTestReplies(final)
             assertEquals("\u001b_Gi=10;OK\u001b\\", replies[0L])
-            assertEquals("\u001b[5;6R", replies[1L])
+            assertEquals("\u001b[4;6R", replies[1L])
             val placement = state.reading.images.placements(0L, 1L)[0L]
             assertEquals(Some(TerminalPosition(3L, 4L)), state.reading.resolve(placement.anchor))
         } finally {

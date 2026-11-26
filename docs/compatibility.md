@@ -49,4 +49,40 @@ scoop --sysroot ../scoop/sysroot test --release terminal-ui \
 
 macOS 已通过该项。真实 PTY 的异步 OSC 52／DSR／用户输入顺序另由 `TerminalWorkerSessionTest` 检查；原生 adapter 测试与 PTY 测试分别记录，不将二者描述为同一次端到端剪贴板测试。
 
-参考终端回包及 Linux／Windows 的本轮结果在完成后追加。
+## 参考终端的真实回包
+
+[macOS 录制](compatibility-reference-macos.json) 来自 Kitty 0.51.0 和 Ghostty 1.4.0 的独立真实窗口／PTY。两者均关闭用户配置和 shell integration，初始网格 80×24；记录包含每次输入、完整回包及查询得到的设备像素格宽高。`tools/reference_terminal.py compare` 在相同网格和像素尺寸下回放给 Scoop 核心，不通过截图推测协议结果。
+
+两者与组件一致的行为包括字符编辑后的 CPR、origin／上下边距、2026 查询与冻结期间的实时 CPR、OSC 8／133 穿插文字后的光标，以及 Kitty 普通查询、放置 ACK 和后续 CPR。链接／命令项在这里检查解析及光标；其元数据与选择行为由核心和视图测试验证。
+
+实际对照发现并修正 Kitty 放置后多下移一行的问题。协议说明的字面写法是下移图片行数，但 Kitty 实现使用 `effective_num_rows - 1`，Ghostty 的实际回包一致；组件明确采用最后一行的行为。两行图片从第 2 行开始，结束 CPR 为第 3 行，随后文字落在该行。单行、分块、同步输出及两种实际像素尺寸均有回归。
+
+其余记录中的 `identical=false` 是以下明确差异：
+
+| 项目 | 实际差异与组件策略 |
+| --- | --- |
+| OSC 4 终止符 | 本次 BEL 结尾查询得到 Ghostty 的 BEL 回复；Kitty 和组件均用 ST。颜色值相同，两种终止符均合法 |
+| Kitty feature query | Kitty 回显 `U=1`，组件省略未支持的 Unicode placeholders；键的顺序按协议可不同。Ghostty 1.4.0 没有识别该新 feature query，将本应忽略的 payload 当作压缩图片并返回错误 |
+| Sixel | 这两个固定版本均查询返回不支持，且跳过图片；组件开启 Sixel 后有对应模式与光标行为。display mode 的 CPR 偶然相同不能视为参考终端支持 Sixel |
+
+这里不以参考终端的多数行为覆盖规范。图片光标采用实际 Kitty 行为的取舍已写入设计；未支持的 feature query 键继续省略，标准允许的 OSC 终止符继续使用 ST。Sixel 的现代 xterm 实机对照随 Linux 验证执行。
+
+录制程序必须在参考终端自己的 PTY 中运行，例如：
+
+```sh
+kitty --config NONE -o shell_integration=disabled \
+  -o remember_window_size=no -o initial_window_width=80c -o initial_window_height=24c \
+  -o close_on_child_death=yes \
+  python3 /absolute/path/to/tools/reference_terminal.py record \
+  --name Kitty --version 0.51.0 --configuration 'config NONE; shell integration disabled; initial grid 80x24' \
+  --output /tmp/kitty-window.json
+
+python3 tools/reference_terminal.py compare \
+  --recordings /tmp/kitty-window.json \
+  --scoop ~/.scoop/bin/scoop --sysroot ../scoop/sysroot \
+  --output /tmp/terminal-reference-comparison.json
+```
+
+Ghostty 在 macOS 上经 `open -n -a Ghostty --args` 启动，设置 `--config-default-files=false --window-save-state=never --shell-integration=none --quit-after-last-window-closed=true --confirm-close-surface=false --window-width=80 --window-height=24`，再以 `-e` 运行同一录制程序。全部探测完成后子进程退出，专用参考窗口关闭；没有复用或关闭用户已有窗口。
+
+Linux／Windows 的本轮结果在完成后追加。

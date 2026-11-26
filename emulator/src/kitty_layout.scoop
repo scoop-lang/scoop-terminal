@@ -53,7 +53,8 @@ internal fun kittyDisplay(
     else
         screen.rows - 1L
     screen.moveColumn(clamp(screen.column + area.occupiedColumns, 0L, lastColumn))
-    screen.row = clamp(screen.row + area.occupiedRows, 0L, lastRow)
+    // Kitty places the cursor on the image's last row, even for a one-row placement.
+    screen.row = clamp(screen.row + area.occupiedRows - 1L, 0L, lastRow)
     terminal.presentationChanged()
 }
 

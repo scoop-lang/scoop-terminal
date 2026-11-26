@@ -39,7 +39,7 @@ private class TerminalKittyLayoutTest {
             assertTrue(state.screen.pendingWrap)
             val moved = state.feed((kittyCommand("a=p,i=7,p=2") + "\u001b[6n").toByteArray())
             assertFalse(state.screen.pendingWrap)
-            assertEquals("\u001b[3;12R", kittyTestReplies(moved)[1L])
+            assertEquals("\u001b[2;12R", kittyTestReplies(moved)[1L])
             assertEquals(2L, state.reading.images.placementCount)
             for (suffix in ["X=10", "Y=10", "x=10", "y=5", "C=2", "P=1", "U=1"]) {
                 val failed = state.feed(kittyCommand("a=p,i=7,p=3," + suffix).toByteArray())
@@ -155,7 +155,7 @@ private class TerminalKittyLayoutTest {
                         .toByteArray()
                 )
             assertEquals(0L, state.reading.images.imageCount)
-            assertEquals("\u001b[3;3R", kittyTestReplies(update)[1L])
+            assertEquals("\u001b[2;3R", kittyTestReplies(update)[1L])
             state.setSynchronizedOutput(false)
             state.feed([])
             val placement = state.reading.images.placements(0L, 1L)[0L]
@@ -170,6 +170,46 @@ private class TerminalKittyLayoutTest {
             state.close()
         }
         assertEquals(0L, state.images.memory.bytes)
+    }
+
+    /** Kitty 0.51.0 and Ghostty 1.4.0 returned these bytes from real PTYs. */
+    @Test fun recordedPlacementLeavesTextOnTheLastImageRow() {
+        for ((cellWidth, cellHeight) in [(14L, 25L), (16L, 34L)]) {
+            Terminal(80L, 24L, graphics = TerminalGraphicsSupport(kitty = true))
+                .use { terminal ->
+                    terminal
+                        .resize(
+                            80L,
+                            24L,
+                            pixels = Some(
+                                TerminalPixelSize(
+                                    80L * cellWidth, 24L * cellHeight, cellWidth, cellHeight
+                                )
+                            )
+                        )
+                    val update = terminal
+                        .feed(
+                            (
+                                "\u001bc\u001b[2;3H" +
+                                    kittyCommand(
+                                        "a=T,i=7102,p=1,f=32,s=1,v=1,c=3,r=2",
+                                        "/wAA/w=="
+                                    ) +
+                                    "\u001b[6n" +
+                                    kittyCommand("a=d,d=I,i=7102") +
+                                    "\u001b[6n"
+                            )
+                                .toByteArray()
+                        )
+                    val replies = kittyTestReplies(update)
+                    assertEquals("\u001b_Gi=7102,p=1;OK\u001b\\", replies[0L])
+                    assertEquals("\u001b[3;6R", replies[1L])
+                    assertEquals("\u001b[3;6R", replies[2L])
+                    terminal.feed("X".toByteArray())
+                    assertEquals("X", terminal.reading.lines(2L, 1L)[0L].cells[5L].text)
+                    assertEquals(0L, terminal.reading.images.placementCount)
+                }
+        }
     }
 
     @Test fun shrinkingCellsClampOffsetsWithoutChangingAnOwnedOldPlacement() {

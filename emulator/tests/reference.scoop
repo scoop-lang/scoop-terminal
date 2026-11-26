@@ -1,0 +1,44 @@
+package scoop.terminal.emulator
+
+import scoop.io.encoding.Base64
+import scoop.platform.env.environmentVariable
+import scoop.test.*
+import scoop.text.split
+import scoop.text.toLong
+
+/** Replays exact recorded bytes and geometry; tools/reference_terminal.py records and compares replies. */
+@Test
+private class TerminalReferenceReplay {
+    @Test
+    @Ignore("manual real reference terminal comparison")
+    fun recordedQueries() {
+        val fields = environmentVariable("SCOOP_TERMINAL_REFERENCE")!!.decodeUtf8().split('\n')
+        val columns = fields[0L].toLong()
+        val rows = fields[1L].toLong()
+        val cellWidth = fields[2L].toLong()
+        val cellHeight = fields[3L].toLong()
+        for (index in 4L..<fields.size) {
+            Terminal(columns, rows, graphics = TerminalGraphicsSupport(sixel = true, kitty = true))
+                .use { terminal ->
+                    terminal
+                        .resize(
+                            columns,
+                            rows,
+                            pixels = Some(
+                                TerminalPixelSize(
+                                    columns * cellWidth, rows * cellHeight, cellWidth, cellHeight
+                                )
+                            )
+                        )
+                    val result = terminal.feed(Base64.Default.decode(fields[index]))
+                    val reply = StringBuilder()
+                    for (effect in result.effects)
+                        when (effect) {
+                            case Reply(val bytes) -> reply.append(String.fromUtf8(bytes))
+                            case _ -> {}
+                        }
+                    println("REFERENCE " + Base64.Default.encode(reply.toString().toByteArray()))
+                }
+        }
+    }
+}

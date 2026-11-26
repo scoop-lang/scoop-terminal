@@ -1,0 +1,206 @@
+{
+  "scoop_commit": "8f9c7ec4639cd96e3345e5a0a6598e470b391f26",
+  "working_tree_changes": true,
+  "references": [
+    {
+      "timestamp": "2026-11-26T10:45:57.207583+00:00",
+      "terminal": "Kitty",
+      "version": "0.51.0",
+      "configuration": "config NONE; shell integration disabled; initial grid 80x24",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "results": [
+        {
+          "case": "editing",
+          "input": "\u001bc\u001b[3;5Habc中\u001b[2D\u001b[P\u001b[6n",
+          "reply": "\u001b[3;8R",
+          "scoop_reply": "\u001b[3;8R",
+          "identical": true
+        },
+        {
+          "case": "origin-margins",
+          "input": "\u001bc\u001b[3;12r\u001b[?6h\u001b[2;7H\u001b[6n",
+          "reply": "\u001b[2;7R",
+          "scoop_reply": "\u001b[2;7R",
+          "identical": true
+        },
+        {
+          "case": "osc-colors",
+          "input": "\u001bc\u001b]4;1;rgb:12/34/56\u001b\\\u001b]4;1;?\u0007\u001b]10;rgb:ab/cd/ef\u001b\\\u001b]10;?\u001b\\\u001b]11;rgb:01/23/45\u001b\\\u001b]11;?\u001b\\\u001b]12;rgb:89/ab/cd\u001b\\\u001b]12;?\u001b\\\u001b[6n",
+          "reply": "\u001b]4;1;rgb:1212/3434/5656\u001b\\\u001b]10;rgb:abab/cdcd/efef\u001b\\\u001b]11;rgb:0101/2323/4545\u001b\\\u001b]12;rgb:8989/abab/cdcd\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b]4;1;rgb:1212/3434/5656\u001b\\\u001b]10;rgb:abab/cdcd/efef\u001b\\\u001b]11;rgb:0101/2323/4545\u001b\\\u001b]12;rgb:8989/abab/cdcd\u001b\\\u001b[1;1R",
+          "identical": true
+        },
+        {
+          "case": "synchronized-output",
+          "input": "\u001bc\u001b[?2026$p\u001b[?2026habc\u001b[?2026$p\u001b[6n\u001b[?2026l\u001b[?2026$p\u001b[6n",
+          "reply": "\u001b[?2026;2$y\u001b[?2026;1$y\u001b[1;4R\u001b[?2026;2$y\u001b[1;4R",
+          "scoop_reply": "\u001b[?2026;2$y\u001b[?2026;1$y\u001b[1;4R\u001b[?2026;2$y\u001b[1;4R",
+          "identical": true
+        },
+        {
+          "case": "osc-links-commands",
+          "input": "\u001bc\u001b]133;A\u001b\\$ \u001b]133;B\u001b\\echo\u001b]133;C\u001b\\\u001b]8;id=probe;https://example.com\u001b\\link中\u001b]8;;\u001b\\\u001b]133;D;0\u001b\\\u001b[6n",
+          "reply": "\u001b[1;13R",
+          "scoop_reply": "\u001b[1;13R",
+          "identical": true
+        },
+        {
+          "case": "kitty-query",
+          "input": "\u001bc\u001b_Ga=q,i=7101,f=24,s=1,v=1;/wAA\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7101;OK\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b_Gi=7101;OK\u001b\\\u001b[1;1R",
+          "identical": true
+        },
+        {
+          "case": "kitty-placement",
+          "input": "\u001bc\u001b[2;3H\u001b_Ga=T,i=7102,p=1,f=32,s=1,v=1,c=3,r=2;/wAA/w==\u001b\\\u001b[6n\u001b_Ga=d,d=I,i=7102;\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7102,p=1;OK\u001b\\\u001b[3;6R\u001b[3;6R",
+          "scoop_reply": "\u001b_Gi=7102,p=1;OK\u001b\\\u001b[3;6R\u001b[3;6R",
+          "identical": true
+        },
+        {
+          "case": "kitty-feature-query",
+          "input": "\u001bc\u001b_Ga=q,i=7103,e=T,C=1,U=1,o=z,s=10,v=5;ignored\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7103,e=T,o=z,s=10,v=5,C=1,U=1;OK\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b_Gi=7103,e=T,C=1,o=z,s=10,v=5;OK\u001b\\\u001b[1;1R",
+          "identical": false
+        },
+        {
+          "case": "sixel-modes",
+          "input": "\u001bc\u001b[?80$p\u001b[?1070$p\u001b[?8452$p\u001b[6n",
+          "reply": "\u001b[?80;0$y\u001b[?1070;0$y\u001b[?8452;0$y\u001b[1;1R",
+          "scoop_reply": "\u001b[?80;2$y\u001b[?1070;1$y\u001b[?8452;2$y\u001b[1;1R",
+          "identical": false
+        },
+        {
+          "case": "sixel-scrolling",
+          "input": "\u001bc\u001b[?80l\u001b[?8452l\u001b[2;3H\u001bP0;1q\"1;1;8;54#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[4;3R",
+          "identical": false
+        },
+        {
+          "case": "sixel-display",
+          "input": "\u001bc\u001b[?80h\u001b[2;3H\u001bP0;1q\"1;1;8;54#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[2;3R",
+          "identical": true
+        },
+        {
+          "case": "sixel-rightward",
+          "input": "\u001bc\u001b[?80l\u001b[?8452h\u001b[2;3H\u001bP0;1q\"1;1;8;54#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[4;4R",
+          "identical": false
+        }
+      ],
+      "geometry": {
+        "columns": 80,
+        "rows": 24,
+        "cell_width": 14,
+        "cell_height": 25,
+        "query_reply": "\u001b[6;25;14t\u001b[1;1R"
+      }
+    },
+    {
+      "timestamp": "2026-11-26T10:46:08.711412+00:00",
+      "terminal": "Ghostty",
+      "version": "1.4.0",
+      "configuration": "config-default-files=false; shell integration none; initial grid 80x24; window-save-state=never",
+      "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+      "results": [
+        {
+          "case": "editing",
+          "input": "\u001bc\u001b[3;5Habc中\u001b[2D\u001b[P\u001b[6n",
+          "reply": "\u001b[3;8R",
+          "scoop_reply": "\u001b[3;8R",
+          "identical": true
+        },
+        {
+          "case": "origin-margins",
+          "input": "\u001bc\u001b[3;12r\u001b[?6h\u001b[2;7H\u001b[6n",
+          "reply": "\u001b[2;7R",
+          "scoop_reply": "\u001b[2;7R",
+          "identical": true
+        },
+        {
+          "case": "osc-colors",
+          "input": "\u001bc\u001b]4;1;rgb:12/34/56\u001b\\\u001b]4;1;?\u0007\u001b]10;rgb:ab/cd/ef\u001b\\\u001b]10;?\u001b\\\u001b]11;rgb:01/23/45\u001b\\\u001b]11;?\u001b\\\u001b]12;rgb:89/ab/cd\u001b\\\u001b]12;?\u001b\\\u001b[6n",
+          "reply": "\u001b]4;1;rgb:1212/3434/5656\u0007\u001b]10;rgb:abab/cdcd/efef\u001b\\\u001b]11;rgb:0101/2323/4545\u001b\\\u001b]12;rgb:8989/abab/cdcd\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b]4;1;rgb:1212/3434/5656\u001b\\\u001b]10;rgb:abab/cdcd/efef\u001b\\\u001b]11;rgb:0101/2323/4545\u001b\\\u001b]12;rgb:8989/abab/cdcd\u001b\\\u001b[1;1R",
+          "identical": false
+        },
+        {
+          "case": "synchronized-output",
+          "input": "\u001bc\u001b[?2026$p\u001b[?2026habc\u001b[?2026$p\u001b[6n\u001b[?2026l\u001b[?2026$p\u001b[6n",
+          "reply": "\u001b[?2026;2$y\u001b[?2026;1$y\u001b[1;4R\u001b[?2026;2$y\u001b[1;4R",
+          "scoop_reply": "\u001b[?2026;2$y\u001b[?2026;1$y\u001b[1;4R\u001b[?2026;2$y\u001b[1;4R",
+          "identical": true
+        },
+        {
+          "case": "osc-links-commands",
+          "input": "\u001bc\u001b]133;A\u001b\\$ \u001b]133;B\u001b\\echo\u001b]133;C\u001b\\\u001b]8;id=probe;https://example.com\u001b\\link中\u001b]8;;\u001b\\\u001b]133;D;0\u001b\\\u001b[6n",
+          "reply": "\u001b[1;13R",
+          "scoop_reply": "\u001b[1;13R",
+          "identical": true
+        },
+        {
+          "case": "kitty-query",
+          "input": "\u001bc\u001b_Ga=q,i=7101,f=24,s=1,v=1;/wAA\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7101;OK\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b_Gi=7101;OK\u001b\\\u001b[1;1R",
+          "identical": true
+        },
+        {
+          "case": "kitty-placement",
+          "input": "\u001bc\u001b[2;3H\u001b_Ga=T,i=7102,p=1,f=32,s=1,v=1,c=3,r=2;/wAA/w==\u001b\\\u001b[6n\u001b_Ga=d,d=I,i=7102;\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7102,p=1;OK\u001b\\\u001b[3;6R\u001b[3;6R",
+          "scoop_reply": "\u001b_Gi=7102,p=1;OK\u001b\\\u001b[3;6R\u001b[3;6R",
+          "identical": true
+        },
+        {
+          "case": "kitty-feature-query",
+          "input": "\u001bc\u001b_Ga=q,i=7103,e=T,C=1,U=1,o=z,s=10,v=5;ignored\u001b\\\u001b[6n",
+          "reply": "\u001b_Gi=7103;EINVAL: decompression failed\u001b\\\u001b[1;1R",
+          "scoop_reply": "\u001b_Gi=7103,e=T,C=1,o=z,s=10,v=5;OK\u001b\\\u001b[1;1R",
+          "identical": false
+        },
+        {
+          "case": "sixel-modes",
+          "input": "\u001bc\u001b[?80$p\u001b[?1070$p\u001b[?8452$p\u001b[6n",
+          "reply": "\u001b[?80;0$y\u001b[?1070;0$y\u001b[?8452;0$y\u001b[1;1R",
+          "scoop_reply": "\u001b[?80;2$y\u001b[?1070;1$y\u001b[?8452;2$y\u001b[1;1R",
+          "identical": false
+        },
+        {
+          "case": "sixel-scrolling",
+          "input": "\u001bc\u001b[?80l\u001b[?8452l\u001b[2;3H\u001bP0;1q\"1;1;8;72#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[4;3R",
+          "identical": false
+        },
+        {
+          "case": "sixel-display",
+          "input": "\u001bc\u001b[?80h\u001b[2;3H\u001bP0;1q\"1;1;8;72#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[2;3R",
+          "identical": true
+        },
+        {
+          "case": "sixel-rightward",
+          "input": "\u001bc\u001b[?80l\u001b[?8452h\u001b[2;3H\u001bP0;1q\"1;1;8;72#1;2;100;0;0#1!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~-!8~\u001b\\\u001b[6n",
+          "reply": "\u001b[2;3R",
+          "scoop_reply": "\u001b[4;4R",
+          "identical": false
+        }
+      ],
+      "geometry": {
+        "columns": 80,
+        "rows": 24,
+        "cell_width": 16,
+        "cell_height": 34,
+        "query_reply": "\u001b[6;34;16t\u001b[2;1R"
+      }
+    }
+  ]
+}

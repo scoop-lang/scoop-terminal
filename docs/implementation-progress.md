@@ -38,7 +38,7 @@
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，真实窗口对照待集中验收 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 已实现且桌面默认启用；18 项协议、4 项绘制、完整 UI 90 项及 macOS 真实窗口 PNG／PTY 用例通过 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 存储、重排、下一帧调度、行缓存和独立装饰已接入；核心、字体/DPI、原生帧、搜索/重排/图形数据已记录 |
-| M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 原生 resize/回包/图片/退出、独立装饰、八组实际应用与系统剪贴板已通过；参考终端对照继续执行 |
+| M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 原生 resize/回包/图片/退出、独立装饰、八组实际应用、系统剪贴板及 Kitty／Ghostty 实际回包已验证；xterm 随 Linux 执行 |
 | M6 | Linux 本轮完整回归 | 待本机完成后执行 |
 | M6 | Windows 本轮完整回归 | 待本机完成后执行 |
 
@@ -143,6 +143,9 @@ PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty �
 资源基准：五项手动 release 场景全部完成；10 万行／1000 命中分页搜索 24.78 ms，128 次选择定位 p95 0.068 ms；带选择、高亮和图片的 24 次 reflow 为 2191.84 ms，内容与 anchor 每次验证。UHD PNG 只解码一次／准备 2040 tile；密集 UHD Sixel 只准备窗口可见块；1024 placements 共享一次解码和一个源 tile。重复帧无新增准备，清空 native cache 后权重归零、RIS 清掉所有 placements。修正了测试把屏幕擦除误当全图片重置的假设；屏外 Sixel 片段保留是正确行为。实际 RSS、分配、首次成本及缓存权重分别记录，CPU raster 不声称独立 GPU 显存测量。UHD fixture 按行生成，无外部图像；生成一致性检查通过，原始临时 JSON 的关键数据归档后已清理。
 
 实际应用：macOS 的 Bash/readline、Vim、Neovim、less、tmux、Kitty icat、libsixel img2sixel 和 OSC 9;4 进度脚本均通过生产 PTY/model 测试；Bash 与 Neovim 另通过 xterm-256color 回退。tmux 使用显式 direct graphics passthrough，图片像素允许 libsixel 的调色板量化。原生只读剪贴板 adapter、OSC 52 与后续 DSR 顺序验证通过，测试不改变或记录系统剪贴板。版本、参数、证据边界和复现步骤见 [兼容性报告](compatibility.md)。仅为测试下载的 libsixel／Meson 经指定代理置于依赖目录；应用临时配置／文件与专用 tmux server 自动清理，原始结果归档后删除。
+
+
+真实参考终端：Kitty 0.51.0、Ghostty 1.4.0 各录制 12 组字节与回包，使用其实际像素尺寸回放到核心。发现 Kitty 放置后光标多下移一行：固定实现与两个终端实际使用最后一行，已修复并明确记录与协议文字的取舍；Kitty 定向回归 19/19 通过，修复后的放置 ACK／CPR 完全相同。OSC 终止符、feature query 和 Sixel 支持范围的差异逐项写入 [兼容性报告](compatibility.md)，未将它们隐去或计为等价支持。原始输入及回复归档，专用窗口与进程结束，录制临时 JSON 清理；xterm 源码参考仍留到 Linux 对照结束。
 
 ## 后续执行约束
 
