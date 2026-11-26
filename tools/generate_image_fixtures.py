@@ -131,6 +131,17 @@ def main() -> None:
                     raise SystemExit(f"fixture differs: {destination}")
             else:
                 destination.write_bytes(data)
+    # UHD, opaque green. Stream compression avoids a full expanded fixture in the generator.
+    compressor = zlib.compressobj()
+    row = b"\0" + bytes((0, 255, 0, 255)) * 3840
+    compressed = b"".join(compressor.compress(row) for _ in range(2160)) + compressor.flush()
+    data = SIGNATURE + header(3840, 2160, 8, 6) + chunk(b"IDAT", compressed) + chunk(b"IEND", b"")
+    destination = ROOT / "terminal-ui/tests/data/images/uhd.png"
+    if args.check:
+        if destination.read_bytes() != data:
+            raise SystemExit(f"fixture differs: {destination}")
+    else:
+        destination.write_bytes(data)
 
 
 if __name__ == "__main__":

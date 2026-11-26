@@ -14,3 +14,5 @@ them. The underlying complete-image fix is Scoop PR #226.
 removes these before the codec and displays the original RGBA pixels within a 4 MiB CPU policy.
 `icc.png` contains a locally generated ICC v4 RGB matrix profile; `icc-text.png` combines it
 with compressed text. The protocol output must match direct decoding of the color-only PNG.
+
+`uhd.png` 是基准使用的 3840×2160 纯绿色 RGBA8 PNG，解码像素为 33,177,600 字节；由同一脚本按行压缩生成，不依赖外部图片。普通测试不执行 4K 基准。
