@@ -4,6 +4,8 @@
 
 `scoop.ui.terminal` 提供桌面会话和 `terminalView(session)`。在 `Application.runWithAsyncio` 的作用域中调用 `TerminalEmulatorSession.start(command)`，把视图挂到 UI 树。会话通过 `EventLoop.spawnPty()` 启动子进程，并按序写入用户输入和 VT 回包。视图处理已接受的尺寸、历史浏览、选择、剪贴板和输入法。通过 `session.reading` 读取已提交的不可变画面；需要跨更新保留内容时取得 `session.snapshot()` 并在使用结束后关闭。嵌入方负责调用 `session.close()`，自然退出后可以继续展示最后的屏幕和状态。
 
+session 的公开调用和宿主回调在窗口 owner 上执行；VT 解析、输入编码、resize、主题和宽度切换按队列顺序交给独立 model worker。`send`、`setColors`、`setAmbiguousWidth` 都是排队操作，`reading` 反映最近一次已交付的结果。普通操作默认最多保留 1024 项／8 MiB 输入负载，包含正在执行的一项；超出时调用明确失败。PTY 每个 8 KiB 输出块等待处理和发布后才继续读，慢解码不会积累无界待处理输出。选择跟踪也通过队列注册和释放，不等待后台完成一次手势。
+
 组件后续改进见 [Terminal 组件改进设计](docs/terminal-component-design.md)，包含核心正确性、OSC、选择与搜索 API、字体连字、图形和性能；外围工具 UI 留给后续 demo。
 
 组件提供 [scoop-terminal terminfo](terminfo/README.md)，与 XTGETTCAP 使用同一份能力表。核心也支持 DECRQM、DECRQSS 和字符/设备像素尺寸查询；无窗口使用者通过 `resize(..., pixels = ...)` 提供已接受的像素尺寸，未提供时像素查询报告 0。

@@ -39,6 +39,7 @@ internal class TerminalModel private constructor(
     private val stopped = Channel<Unit>(0L)
     private var value = state.initial
     val current: TerminalModelPublication get() = value
+    val isClosing: Boolean get() = closing
 
     companion object {
         suspend fun create(

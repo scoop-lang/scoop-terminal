@@ -1,0 +1,350 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.concurrent.Channel
+import scoop.platform.concurrent.*
+import scoop.platform.fs.Path
+import scoop.platform.memory.NativeByteBuffer
+import scoop.platform.process.*
+import scoop.platform.system.*
+import scoop.platform.time.MonotonicTimeSource
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.time.Duration
+
+@Test
+private class TerminalWorkerSessionTest {
+    @Test fun realPtyImmediateExitDrainsItsTailThroughTheBackgroundModel() {
+        val windows = operatingSystem == OperatingSystem.Windows
+        val child = if (windows)
+            command(Path.fromString("cmd.exe")) {
+                arg(OsString.fromString("/d"))
+                arg(OsString.fromString("/c"))
+                arg(OsString.fromString("echo TAIL&exit /b 7"))
+            }
+        else
+            command(Path.fromString("/bin/sh")) {
+                arg(OsString.fromString("-c"))
+                arg(OsString.fromString("printf 'head\\033[?2026hTAIL'; exit 7"))
+            }
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(16L, 4L) }
+                val pty = try {
+                    currentEventLoop().spawnPty(child, 16L, 4L, searchPath = windows)
+                } catch (error: Throwable) {
+                    model.close();
+                    throw error
+                }
+                val session = TerminalEmulatorSession(model, pty)
+                session.launch(this)
+                try {
+                    awaitSessionTest { !sessionRunning(session.state) }
+                    assertSessionExit(session.state, 7)
+                    val query = session.search("TAIL")
+                    try {
+                        val page = query.nextPage()
+                        assertEquals(1L, page.matches.size)
+                        assertEquals(Some("TAIL"), session.reading.text(page.matches[0L].range))
+                    } finally {
+                        query.close()
+                    }
+                } finally {
+                    session.close()
+                }
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+
+    @Test fun delayedClipboardRepliesKeepTheirPositionAheadOfDsrAndUserInput() {
+        eventLoop()
+            .run {
+                val owner = currentThreadId()
+                val model = TerminalModel
+                    .create {
+                        Terminal(10L, 3L, clipboardPolicy = TerminalClipboardPolicy(read = true))
+                    }
+                val pty = SessionTestPty()
+                val clipboard = SessionTestClipboard()
+                val titles = Channel<String>(8L)
+                val session = TerminalEmulatorSession(
+                    model, pty,
+                    onTitle = { title ->
+                        assertEquals(owner, currentThreadId());
+                        titles.trySend(title);
+                        Unit
+                    },
+                    configuredClipboard = Some(clipboard)
+                )
+                session.launch(this)
+                try {
+                    pty.emit("abc\u001b]52;c;?\u0007\u001b[6n\u001b]2;parsed\u0007")
+                    assertEquals("parsed", titles.receive())
+                    session.send(TerminalInput.Text("USER"))
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals("", pty.writtenText())
+                    assertEquals(1L, clipboard.pending.size)
+                    clipboard
+                        .pending[0L](
+                            Some(
+                                TerminalClipboardContent(TerminalClipboardTarget.Clipboard, "clip")
+                            )
+                        )
+                    val expected = "\u001b]52;c;Y2xpcA==\u001b\\\u001b[1;4RUSER"
+                    awaitSessionTest { pty.writtenBytes >= expected.byteLength }
+                    assertEquals(expected, pty.writtenText())
+                    session.requestSize(20L, 4L)
+                    session.requestSize(20L, 4L)
+                    model.submit(TerminalModelCommand.Barrier)
+                    assertEquals(1L, pty.resizes.size)
+                    assertEquals(TerminalModelSize(20L, 4L, None), pty.resizes[0L])
+                    assertEquals(20L, session.reading.columns)
+                } finally {
+                    session.close()
+                }
+                assertTrue(pty.closed)
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+
+    @Test fun continuousRepeatedBsuCannotPostponeTheIndependentDeadline() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(8L, 2L) }
+                val pty = SessionTestPty()
+                val frozen = ArrayList<TerminalReading>()
+                val parsed = Channel<Unit>(1L)
+                val capture = SessionReference()
+                val session = TerminalEmulatorSession(
+                    model, pty,
+                    onTitle = { _ ->
+                        frozen.add(capture.session!!.reading);
+                        parsed.trySend(Unit);
+                        Unit
+                    },
+                    synchronizedOutputTimeout = Duration.milliseconds(60L)
+                )
+                capture.session = Some(session)
+                session.launch(this)
+                try {
+                    pty.emit("a\u001b[?2026hb\u001b[6n\u001b]2;frozen\u0007")
+                    parsed.receive()
+                    assertEquals("", frozen[0L].lines(0L, 1L)[0L].cells[1L].text)
+                    awaitSessionTest { pty.writtenBytes >= 6L }
+                    assertEquals("\u001b[1;3R", pty.writtenText())
+                    val producing = AtomicBoolean(true)
+                    val producer = launch {
+                        for (iteration in 0L..<60L) {
+                            currentEventLoop().sleep(Duration.milliseconds(5L))
+                            pty.emit("\u001b[?2026h")
+                        }
+                        producing.store(false)
+                    }
+                    try {
+                        awaitSessionTest { session.reading.lines(0L, 1L)[0L].cells[1L].text == "b" }
+                        assertTrue(producing.load())
+                        assertEquals("", frozen[0L].lines(0L, 1L)[0L].cells[1L].text)
+                    } finally {
+                        producer.cancel();
+                        producer.join()
+                    }
+                } finally {
+                    session.close()
+                }
+            }
+    }
+
+    @Test fun naturalExitKeepsTheFinalCommittedTextSearchAndReflowUsable() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(16L, 3L) }
+                val pty = SessionTestPty()
+                val session = TerminalEmulatorSession(model, pty)
+                session.launch(this)
+                try {
+                    pty.emit("tail ·\u001b[?2026hFINAL")
+                    pty.exit(7)
+                    awaitSessionTest { !sessionRunning(session.state) }
+                    assertSessionExit(session.state, 7)
+                    val snapshot = session.snapshot()
+                    val search = session.search("FINAL")
+                    try {
+                        val page = search.nextPage()
+                        assertEquals(1L, page.matches.size)
+                        assertEquals(Some("FINAL"), snapshot.text(page.matches[0L].range))
+                        session.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+                        session.requestSize(5L, 4L)
+                        model.submit(TerminalModelCommand.Barrier)
+                        assertEquals(5L, session.reading.columns)
+                        assertEquals(TerminalAmbiguousWidth.Wide, session.ambiguousWidth)
+                        assertEquals(0L, pty.resizes.size)
+                        assertEquals(
+                            TerminalSearchMatchStatus.Current,
+                            page.matches[0L].status(session.reading)
+                        )
+                        assertEquals(Some("FINAL"), session.reading.text(page.matches[0L].range))
+                        assertEquals(16L, snapshot.columns)
+                    } finally {
+                        search.close();
+                        snapshot.close()
+                    }
+                } finally {
+                    session.close()
+                }
+                assertSessionExit(session.state, 7)
+                assertTrue(model.executor.isTerminated)
+                session.snapshot().close()
+            }
+    }
+
+    @Test fun closingBeforeTheDriversStartCancelsQueriesAndReleasesBothOwners() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(8L, 2L) }
+                val pty = SessionTestPty()
+                val session = TerminalEmulatorSession(model, pty)
+                val query = session.search("needle")
+                session.launch(this)
+                session.close()
+                session.close()
+                when (session.state) {
+                    case Closed -> {}
+                    case _ -> fail(Some("session did not close"))
+                }
+                assertEquals(TerminalSearchStatus.Cancelled, query.status)
+                assertEquals(TerminalSearchStatus.Cancelled, query.nextPage().status)
+                assertTrue(pty.closed)
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+
+    @Test fun aThrowingHostEffectFailsTheSessionButRetainsItsLastReading() {
+        eventLoop()
+            .run {
+                val model = TerminalModel.create { Terminal(8L, 2L) }
+                val pty = SessionTestPty()
+                val error = IllegalStateException(Some("host title failure"))
+                val session = TerminalEmulatorSession(model, pty, onTitle = { throw error })
+                session.launch(this)
+                try {
+                    pty.emit("last\u001b]2;fail\u0007")
+                    awaitSessionTest { !sessionRunning(session.state) }
+                    when (session.state) {
+                        case Failed(val actual) -> assertSame(error, actual)
+                        case _ -> fail(Some("host failure was lost"))
+                    }
+                    assertEquals("l", session.reading.lines(0L, 1L)[0L].cells[0L].text)
+                } finally {
+                    session.close()
+                }
+                assertTrue(pty.closed)
+                assertTrue(model.executor.isTerminated)
+            }
+    }
+}
+
+private class SessionReference {
+    var session: TerminalEmulatorSession? = None
+}
+
+private fun sessionRunning(state: TerminalSessionState): Boolean = when (state) {
+    case Running -> true
+    case _ -> false
+}
+
+private fun assertSessionExit(state: TerminalSessionState, code: Int) {
+    when (state) {
+        case Exited(val status) -> assertEquals(ExitStatus.Exited(code), status)
+        case _ -> fail(Some("session did not retain its child exit status"))
+    }
+}
+
+private suspend fun awaitSessionTest(condition: () -> Boolean) {
+    val limit = MonotonicTimeSource.now() + Duration.seconds(2L)
+    while (!condition()) {
+        if (MonotonicTimeSource.now() >= limit) fail(Some("session condition timed out"))
+        currentEventLoop().sleep(Duration.milliseconds(1L))
+    }
+}
+
+private class SessionTestClipboard : TerminalClipboardAdapter {
+    val pending = ArrayList<(TerminalClipboardContent?) -> Unit>()
+    private val owner = currentThreadId()
+    public override fun read(
+        targets: Array<TerminalClipboardTarget>,
+        complete: (TerminalClipboardContent?) -> Unit
+    ): Disposable? {
+        assertEquals(owner, currentThreadId())
+        pending.add(complete)
+        return None
+    }
+    public override fun write(request: TerminalClipboardWrite) {
+        assertEquals(owner, currentThreadId())
+    }
+}
+
+/** All PTY calls assert window affinity; the fake only supplies deterministic stream and exit events. */
+private class SessionTestPty : AsyncPty {
+    private val owner = currentThreadId()
+    private val output = Channel<Array<Byte>>(8L)
+    private val ended = Channel<Unit>(0L)
+    private val written = ArrayList<Byte>()
+    private var status: ExitStatus? = None
+    private var pending: Array<Byte> = []
+    private var offset = 0L
+    var closed = false
+    val resizes = ArrayList<TerminalModelSize>()
+    val writtenBytes: Long get() = written.size
+    fun writtenText(): String = String.fromUtf8(written.toArray())
+    suspend fun emit(text: String) {
+        output.send(text.toByteArray())
+    }
+    fun exit(code: Int) {
+        status = Some(ExitStatus.Exited(code));
+        ended.close();
+        output.close()
+    }
+
+    public override suspend fun readInto(buffer: NativeByteBuffer, count: Long): Long {
+        assertEquals(owner, currentThreadId())
+        if (count == 0L) return 0L
+        if (offset == pending.size) {
+            pending = output.receiveOrNone() ?: return 0L
+            offset = 0L
+        }
+        val amount = clamp(pending.size - offset, 0L, count)
+        buffer.writeBytes(pending, offset, amount)
+        offset += amount
+        return amount
+    }
+    public override suspend fun writeFrom(buffer: NativeByteBuffer, count: Long): Long {
+        assertEquals(owner, currentThreadId())
+        if (closed) throw IoClosedException()
+        // Short writes exercise the real session's writeFully path and ordered queue.
+        val amount = clamp(count, 0L, 3L)
+        for (byte in buffer.readBytes(amount))
+            written.add(byte)
+        return amount
+    }
+    public override suspend fun flush() {
+        assertEquals(owner, currentThreadId())
+    }
+    public override suspend fun resize(columns: Long, rows: Long) {
+        assertEquals(owner, currentThreadId())
+        if (closed) throw IoClosedException()
+        resizes.add(TerminalModelSize(columns, rows, None))
+    }
+    public override suspend fun wait(): ExitStatus {
+        assertEquals(owner, currentThreadId())
+        ended.receiveOrNone()
+        return status ?: ExitStatus.Exited(0)
+    }
+    public override suspend fun close() {
+        assertEquals(owner, currentThreadId())
+        if (closed) return
+        closed = true
+        if (status == None) status = Some(ExitStatus.Exited(0))
+        ended.close()
+        output.close()
+    }
+}

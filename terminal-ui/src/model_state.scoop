@@ -35,6 +35,7 @@ internal struct TerminalModelPublication(
     val input: Array<Byte>,
     val size: TerminalModelSize,
     val resizePty: Boolean,
+    val completedResize: TerminalModelSize?,
     val mouseReporting: Boolean,
     val metadata: TerminalMetadata,
     val ambiguousWidth: TerminalAmbiguousWidth,
@@ -56,6 +57,7 @@ internal class TerminalModelState(private val terminal: Terminal) {
         val generation = terminal.synchronizationGeneration
         var input: Array<Byte> = []
         var resized = false
+        var completedResize: TerminalModelSize? = None
         var binding: TerminalModelBinding? = None
         val update = when (command) {
             case Feed(val bytes) -> terminal.feed(bytes)
@@ -66,6 +68,7 @@ internal class TerminalModelState(private val terminal: Terminal) {
             }
 
             case Resize(val size, val restoreHistory) -> {
+                completedResize = Some(size)
                 resized = size.columns != terminal.columns || size.rows != terminal.rows
                 terminal.resize(size.columns, size.rows, restoreHistory, size.pixels)
             }
@@ -125,7 +128,7 @@ internal class TerminalModelState(private val terminal: Terminal) {
             synchronizedSince = None
         else if (generation != terminal.synchronizationGeneration || synchronizedSince == None)
             synchronizedSince = Some(started)
-        return publication(update, input, resized, binding)
+        return publication(update, input, resized, binding, completedResize)
     }
 
     fun close() {
@@ -145,10 +148,12 @@ internal class TerminalModelState(private val terminal: Terminal) {
         update: TerminalUpdate,
         input: Array<Byte> = [],
         resizePty: Boolean = false,
-        binding: TerminalModelBinding? = None
+        binding: TerminalModelBinding? = None,
+        completedResize: TerminalModelSize? = None
     ): TerminalModelPublication = TerminalModelPublication(
         terminal.reading, update, input,
         TerminalModelSize(terminal.columns, terminal.rows, terminal.pixelSize), resizePty,
+        completedResize,
         terminal.mouseReporting, terminal.metadata, terminal.ambiguousWidth,
         terminal.synchronizationGeneration, synchronizedSince, binding
     )
