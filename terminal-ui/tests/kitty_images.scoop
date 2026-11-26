@@ -12,8 +12,8 @@ import scoop.test.*
 @Test
 private class TerminalKittyPaintTest {
     @Test fun tiledLinearSamplingMatchesTheWholeImageAcrossSeamsCropAndViewportEdges() {
-        val width = 130L
-        val height = 70L
+        val width = 530L
+        val height = 270L
         val raw = Array<Byte>(width * height * 4L) { offset ->
             val pixel = offset / 4L
             val x = pixel % width
@@ -36,16 +36,18 @@ private class TerminalKittyPaintTest {
                             .use { fonts ->
                                 val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
                                 try {
-                                    val crop = if (cropped) ",x=7,y=3,w=117,h=65" else ""
+                                    val crop = if (cropped) ",x=7,y=3,w=517,h=265" else ""
                                     kittyPaintTransmit(
                                         terminal,
-                                        f"a=T,i=1,s=130,v=70,c=${columns},X=3,Y=2,C=1${crop}",
+                                        f"a=T,i=1,s=${width},v=${height},c=${columns},X=3,Y=2,C=1${
+                                            crop
+                                        }",
                                         raw
                                     )
                                     val source = if (cropped)
-                                        Rect(7.0, 3.0, 117.0, 65.0)
+                                        Rect(7.0, 3.0, 517.0, 265.0)
                                     else
-                                        Rect(0.0, 0.0, 130.0, 70.0)
+                                        Rect(0.0, 0.0, width.toDouble(), height.toDouble())
                                     val targetWidth = columns.toDouble() * 8.0 - 3.0
                                     val target = Rect(
                                         3.0,

@@ -151,6 +151,8 @@ PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty �
 
 Metal 资源计量：新增仅 macOS 测试依赖的设备／纹理／计数桥接，复用现有 MetalContext，不修改生产 API 或运行依赖。UHD PNG、UHD Sixel 可见区与 1024 placements 三项分别通过实际 GPU 绘制、像素、重复准备和关闭回收验证。每帧等待 GPU 完成并释放本轮原生临时对象，记录 MTLDevice.currentAllocatedSize，与托管分配、进程 RSS 和组件缓存估算分别保存。结果见 [性能报告](performance.md)；64×64 PNG tile 导致约 203 MiB 帧后 GPU 分配，作为下一项局部优化的实测依据。
 
+RGBA 上传调优：不可变图片使用 254×254 正文加邻边形成最大 256×256 原生块，核心 64×64 tile API 和 Sixel 局部块版本不变。扩大接缝／源裁剪／窗口裁剪测试图片以跨越新边界，Kitty 绘制 4/4 通过。相同 UHD PNG 的 native 准备从 2040 降至 144，Metal 帧后分配从 202.55 降至 71.97 MiB、缓存帧 p95 从 17.46 降至 1.45 ms；CPU raster p95 为 2.20 ms。数据、首次成本、RSS 和预算边界分别记录于性能报告。
+
 ## 后续执行约束
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。

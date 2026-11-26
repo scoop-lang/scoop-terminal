@@ -38,7 +38,7 @@ OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, coun
 
 Sixel 支持私有／共享调色板、透明背景、像素比例、80／1070／8452 模式和能力查询。Kitty 支持 direct mode 的 RGB／RGBA／PNG、Base64 分块、Zlib、静态放置／删除／查询、源裁剪及 z 图层；图像后的文字与光标查询按同一 VT 流处理。文件和共享内存 transport、动画、Unicode placeholders、relative placements 与 f=8/16 不在本轮范围；不能把 tmux 的 placeholder 图片路径视为已支持。PNG 只向 codec 传递像素／颜色 chunks，保留有界 ICC 配置；文字和 EXIF 不展开，方向遵循 IHDR 像素网格。
 
-`reading.images` 提供图片和 placement；跨更新使用时保留快照或调用 `images.retain()`，上传区域由 `image.pixels(region)` 返回独立租约。视图仅上传可见的 64×64 块，按 LRU 管理原生图片，默认 128 MiB 估算预算、4096 个缓存条目和每帧 8192 次 tile 准备。`TerminalViewOptions.imageCacheLimits` 调整这些上限，`onImageError` 接收每帧首次准备失败；失败的 placement 整体跳过，文字继续绘制。预算包括仍被旧帧持有的原生图片，缩小预算不会强制关闭它们。自然退出保留图片；显式关闭核心／session 释放其图片所有权，已取得的快照或原生绘制帧仍独立存活。`reading.withoutImages()` 可只保留文本和元数据。
+`reading.images` 提供图片和 placement；跨更新使用时保留快照或调用 `images.retain()`，上传区域由 `image.pixels(region)` 返回独立租约。视图仅准备与可见区域相交的块：Sixel 复用 64×64 索引块，RGBA 使用 254×254 正文加一像素采样邻边，原生图片最大 256×256，按 LRU 管理原生图片，默认 128 MiB 估算预算、4096 个缓存条目和每帧 8192 次 tile 准备。`TerminalViewOptions.imageCacheLimits` 调整这些上限，`onImageError` 接收每帧首次准备失败；失败的 placement 整体跳过，文字继续绘制。预算包括仍被旧帧持有的原生图片，缩小预算不会强制关闭它们。自然退出保留图片；显式关闭核心／session 释放其图片所有权，已取得的快照或原生绘制帧仍独立存活。`reading.withoutImages()` 可只保留文本和元数据。
 
 ## 开发
 

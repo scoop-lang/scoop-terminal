@@ -121,9 +121,10 @@ internal class TerminalImagePaint : Closeable {
             source.y + source.height
         )
         val prepared = ArrayList<TerminalImagePaintTile>()
+        val side = cache.tileSide(image.image)
         try {
-            for (row in top / 64L..<(bottom + 63L) / 64L) {
-                for (column in left / 64L..<(right + 63L) / 64L) {
+            for (row in top / side..<(bottom + side - 1L) / side) {
+                for (column in left / side..<(right + side - 1L) / side) {
                     if (work >= cache.maxFrameTiles)
                         throw TerminalImageException(
                             TerminalImageFailure.Limit,

@@ -26,6 +26,13 @@ internal class TerminalImageCache(limits: TerminalImageCacheLimits = TerminalIma
     val uploadCount: Long get() = uploads
     val maxFrameTiles: Long get() = budget.limits.maxFrameTiles
 
+    // A one-pixel gutter on each side makes an interior RGBA upload exactly 256x256.
+    // Sixel keeps its independently versioned sparse 64x64 storage tiles.
+    fun tileSide(image: TerminalImage): Long = if (image.protocol == TerminalImageProtocol.Kitty)
+        254L
+    else
+        image.tileSide
+
     fun configure(limits: TerminalImageCacheLimits) {
         ensureOpen()
         checkImageCacheLimits(limits)
@@ -40,7 +47,36 @@ internal class TerminalImageCache(limits: TerminalImageCacheLimits = TerminalIma
 
     fun acquire(image: TerminalImage, column: Long, row: Long): TerminalImageTileLease? {
         ensureOpen()
-        val tile = image.tile(column, row)
+        val side = tileSide(image)
+        val width = image.size.width.toLong()
+        val height = image.size.height.toLong()
+        if (column <
+            0L ||
+            row <
+            0L ||
+            column >=
+            (width + side - 1L) /
+            side ||
+            row >=
+            (height + side - 1L) /
+            side
+        )
+            throw IndexOutOfBoundsException()
+        val tile = if (image.protocol == TerminalImageProtocol.Kitty) {
+            // RGBA content is immutable as a whole; its first storage tile verifies the lease
+            // and supplies the shared content identity without coupling upload and storage grids.
+            val base = image.tile(0L, 0L)
+            val x = column * side
+            val y = row * side
+            TerminalImageTile(
+                TerminalImageRect(
+                    x, y, clamp(width - x, 1L, side),
+                    clamp(height - y, 1L, side)
+                ), base.contentVersion, base.paletteVersion,
+                base.background, base.transparent
+            )
+        } else
+            image.tile(column, row)
         if (tile.transparent) return None
         val gutter = if (image.protocol == TerminalImageProtocol.Kitty) 1L else 0L
         val left = clamp(tile.source.x - gutter, 0L, image.size.width.toLong())

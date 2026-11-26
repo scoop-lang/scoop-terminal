@@ -161,7 +161,7 @@ UHD 的完整 RGBA 等价像素为 31.64 MiB，Sixel 实际保留索引颜色面
 
 三组重复帧没有新增组件图片准备；原生缓存清空后组件估算权重为零，但 Skia／Metal 仍可缓存对应设备资源。关闭 target wrapper 和 context 后大幅回收，释放测试 target 后还保留 device／queue 的少量资源，最后由测试 owner 关闭。原生临时对象必须按测试作用域释放，避免没有桌面事件循环的离屏测试把 autorelease 暂存误判为长期泄漏。
 
-UHD PNG 的 2040 个 64×64 native tile 在 Metal 上带来明显的分配与绘制成本；组件估算约 69 MiB 与实测约 203 MiB 的差异说明该预算不能用作后端显存硬上限。下一步针对不可变 RGBA 数据减少小纹理数量，保留 Sixel 的局部块复用语义。
+UHD PNG 的 2040 个 64×64 native tile 在 Metal 上带来明显的分配与绘制成本；组件估算约 69 MiB 与实测约 203 MiB 的差异说明该预算不能用作后端显存硬上限。后续据此调整不可变 RGBA 的上传粒度，结果见下节。
 
 ```sh
 python3 tools/benchmark_terminal.py \
@@ -169,3 +169,22 @@ python3 tools/benchmark_terminal.py \
   --cases metalPng4k metalSixel4k metalPlacements \
   --label metal --output /tmp/terminal-metal.json
 ```
+
+## RGBA 上传粒度
+
+按上述结果，将 RGBA 正文块改为 254×254，加线性采样邻边后最大为 256×256，减少小纹理和 draw 调用；Sixel 的稀疏 64×64 块、局部擦除版本及最近邻策略保持原样。核心 `image.tile()` 仍描述 64×64 存储块，视图中的 RGBA 上传按整个不可变像素版本复用。与可见区域相交的边界块可能包含暂不可见的像素，但最大准备范围、预算、旧帧租约和失败回退仍有界。
+
+扩大固定图案后，跨新 tile 边界、缩放、源裁剪及视口边缘的逐像素对照通过；透明度、z 层及 PNG 旧帧寿命回归也通过。只重测受影响的两项 UHD PNG 场景，结果保存在 [RGBA tile 报告](performance-rgba-tiles.json)。
+
+| 指标 | 64×64 正文 | 254×254 正文 |
+| --- | ---: | ---: |
+| native 图片准备次数 | 2040 | 144 |
+| 组件缓存估算 MiB | 69.21 | 64.39 |
+| Metal 首帧 ms | 106.95 | 61.08 |
+| Metal 缓存帧 p95 ms | 17.46 | 1.45 |
+| 帧后 Metal 资源分配 MiB | 202.55 | 71.97 |
+| Metal 场景进程峰值 RSS MiB | 313.4 | 217.9 |
+| CPU raster 缓存帧 p95 ms | 4.39 | 2.20 |
+| CPU raster 场景进程峰值 RSS MiB | 246.7 | 192.8 |
+
+重复绘制保持一次解码、无额外图片准备；清空缓存归还全部组件权重，关闭 context 后 Metal 资源降到 3.53 MiB，释放测试 target 后为 1.16 MiB。Metal 计数、RSS 和估算权重继续按不同口径报告，表内数据不构成任意后端或机器上的内存上限保证。

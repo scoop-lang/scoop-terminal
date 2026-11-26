@@ -384,7 +384,7 @@ Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使�
 
 后台 publication 持有独立图片租约，在窗口接受下一代时释放。跨线程交接必须完成所有权转移后才响应取消，不能把已产生的 owned 结果丢在取消路径中。自然 EOF 保留最后画面；显式关闭 session 释放其图片所有权，当前 reading 通过 `withoutImages()` 保留文本与元数据。已经取得的快照、上传租约和已准备好的原生绘制帧各自独立存活。
 
-视图只为可见源区域准备 64×64 原生块，RGBA 的线性采样额外保留一像素邻边，Sixel 使用最近邻。准备期间临时保留 CPU 图片 reading，完成后帧只持有可见原生块租约；缓存淘汰、关闭、切换会话或缩小上限不会关闭仍被帧使用的图片。默认 128 MiB 预算按原生 CPU 像素副本、可能的纹理和元数据作保守估算，包含旧帧引用；它不是 Skia 全局设备缓存／进程 RSS 的实测上限。另限 4096 个缓存条目、每帧 8192 次 tile 准备，防止很多重叠 placement 产生无界绘制工作。`TerminalViewOptions.imageCacheLimits` 配置上限，`onImageError` 每帧报告首个失败，失败 placement 整体跳过而不留下半幅图片。默认背景、极低 z 图片、非默认背景、负 z 图片、文字和非负 z 图片依次绘制，选择／搜索／光标及命令分割线为最上层本地装饰。
+视图只为与可见源区域相交的块准备原生图片。Sixel 使用独立版本的 64×64 索引块及最近邻；不可变 RGBA 使用 254×254 正文，线性采样额外保留一像素邻边，内部原生块恰为 256×256。RGBA 上传粒度与核心 `image.tile()` 的 64×64 描述粒度解耦，按整个不可变像素版本缓存；Sixel 仍能在局部擦除后复用未变块。该策略由 Metal 实测确定，降低小纹理与绘制数量；只露出局部的 RGBA 图片可能多准备相交块中的其他像素，仍在相同预算内。准备期间临时保留 CPU 图片 reading，完成后帧只持有可见原生块租约；缓存淘汰、关闭、切换会话或缩小上限不会关闭仍被帧使用的图片。默认 128 MiB 预算按原生 CPU 像素副本、可能的纹理和元数据计权，包含旧帧引用；它不是 Skia 全局设备缓存／进程 RSS 的实测上限。另限 4096 个缓存条目、每帧 8192 次 tile 准备，防止很多重叠 placement 产生无界绘制工作。`TerminalViewOptions.imageCacheLimits` 配置上限，`onImageError` 每帧报告首个失败，失败 placement 整体跳过而不留下半幅图片。默认背景、极低 z 图片、非默认背景、负 z 图片、文字和非负 z 图片依次绘制，选择／搜索／光标及命令分割线为最上层本地装饰。
 
 PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 `terminal-ui`，复用 `scoop.graphics.Image.decode` 与 CPU `RasterSurface.readPixels()`，创建、使用、关闭 codec/native 资源后只返回不可变 RGBA8。先验证 PNG signature、IHDR 尺寸和乘法溢出，再交给 codec；不用 GPU framebuffer 读回来解码 PNG。核心不依赖 Skia；无窗口测试可注入确定性 decoder 或在 CPU 上单独测试该 adapter。
 
