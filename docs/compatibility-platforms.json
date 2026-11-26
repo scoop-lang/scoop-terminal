@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "runs": [
+    {
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.43",
+      "compiler": "scoop 0.0.0-dev.20261126 (bb295704db1ae4592a065fa424dead159cfd5d84)",
+      "terminal_revision": "d01cb832e5aa39683d0690187ab2fbb7fcaa4186",
+      "sysroot_revision": "5dc2e21e5d58716a8c4b83b9bd60c30de8b6feca",
+      "target": "x86_64-unknown-linux-gnu",
+      "window_environment": "SCOOP_WINDOW_BACKEND=x11; independent Xvfb X11 display, 1280x1024x24; dbus-run-session",
+      "clipboard_environment": "independent Xvfb X11 display, 640x480x24; initially empty clipboard; read-only test",
+      "source_changes": "tools/reference_terminal.py contains the three extra Sixel recordings committed in 472cb51; production sources match terminal_revision",
+      "results": [
+        {
+          "suite": "emulator",
+          "exit_code": 0,
+          "containers": 37,
+          "tests": 195,
+          "passed": 186,
+          "failed": 0,
+          "ignored": 9,
+          "not_run": 0,
+          "elapsed_seconds_including_build": 35.137
+        },
+        {
+          "suite": "terminal-ui",
+          "exit_code": 0,
+          "containers": 30,
+          "tests": 108,
+          "passed": 97,
+          "failed": 0,
+          "ignored": 11,
+          "not_run": 0,
+          "elapsed_seconds_including_build": 95.141
+        },
+        {
+          "suite": "demo",
+          "exit_code": 0,
+          "containers": 3,
+          "tests": 3,
+          "passed": 2,
+          "failed": 0,
+          "ignored": 1,
+          "not_run": 0,
+          "elapsed_seconds_including_build": 95.734
+        },
+        {
+          "suite": "clipboard",
+          "exit_code": 0,
+          "containers": 1,
+          "tests": 1,
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "not_run": 0,
+          "elapsed_seconds_including_build": 0.415
+        }
+      ],
+      "reference_replay": "The 15 xterm 407 recordings yield the same core replies on Linux and macOS."
+    }
+  ]
+}

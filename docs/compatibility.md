@@ -49,7 +49,7 @@ scoop --sysroot ../scoop/sysroot test --release terminal-ui \
   --ignored --filter TerminalNativeClipboardTest
 ```
 
-macOS 已通过该项。真实 PTY 的异步 OSC 52／DSR／用户输入顺序另由 `TerminalWorkerSessionTest` 检查；原生 adapter 测试与 PTY 测试分别记录，不将二者描述为同一次端到端剪贴板测试。
+macOS 和 Linux 已通过该项。`TerminalWorkerSessionTest` 用可控制读写的 PTY 测试替身验证异步 OSC 52／DSR／用户输入顺序；该套件的真实 PTY 用例另外验证退出前的尾数据和最终画面。原生 adapter 与有序队列分别记录，不将它们描述为同一次端到端剪贴板测试。Linux 的 adapter 测试运行在独立 Xvfb 显示，其剪贴板初始为空。
 
 ## 参考终端的真实回包
 
@@ -69,7 +69,7 @@ macOS 已通过该项。真实 PTY 的异步 OSC 52／DSR／用户输入顺序�
 
 这里不以参考终端的多数行为覆盖规范。图片光标采用实际 Kitty 行为的取舍已写入设计；未支持的 feature query 键继续省略，标准允许的 OSC 终止符继续使用 ST。
 
-[Linux 录制](compatibility-reference-linux.json) 来自 xterm 407 的实际 PTY，运行于独立 Xvfb X11 显示，网格 80×24、实际单元 6×13 像素。显式设置 `decTerminalID=340`、`sixelScrolling=true`、`privateColorRegisters=true`。15 组输入包括七项 Sixel 检查：80／1070／8452 模式查询、scrolling／display／rightward 模式，以及结尾 `-` 在 8452 开关下的光标、右边界换行；这些回包全部与组件一致。原始输入与回包已保存，本次在 macOS 的同版本核心上按录制尺寸回放。
+[Linux 录制](compatibility-reference-linux.json) 来自 xterm 407 的实际 PTY，运行于独立 Xvfb X11 显示，网格 80×24、实际单元 6×13 像素。显式设置 `decTerminalID=340`、`sixelScrolling=true`、`privateColorRegisters=true`。15 组输入包括七项 Sixel 检查：80／1070／8452 模式查询、scrolling／display／rightward 模式，以及结尾 `-` 在 8452 开关下的光标、右边界换行；这些回包全部与组件一致。原始输入与回包已保存，按录制尺寸在 macOS、Linux 核心分别回放，结果一致。
 
 xterm 的普通编辑、origin／边距及 OSC 8／133 穿插文字后的 CPR 也相同。其余差异为 OSC 4 使用 BEL 回复，以及该版本对 2026 查询返回不支持、忽略 Kitty graphics APC；没有将这些差异记作等价支持。该录制验证模式和光标位置，Sixel 像素、比例、透明度、共享调色板和擦除行为仍由核心／光栅用例验证。
 
@@ -91,4 +91,15 @@ python3 tools/reference_terminal.py compare \
 
 Ghostty 在 macOS 上经 `open -n -a Ghostty --args` 启动，设置 `--config-default-files=false --window-save-state=never --shell-integration=none --quit-after-last-window-closed=true --confirm-close-surface=false --window-width=80 --window-height=24`，再以 `-e` 运行同一录制程序。全部探测完成后子进程退出，专用参考窗口关闭；没有复用或关闭用户已有窗口。
 
-Linux／Windows 的本轮结果在完成后追加。
+## Linux 与 Windows 集中回归
+
+本轮使用各机器已有的 `0.0.0-dev.20261126` 发布编译器，并在任务专用目录重建所需开发 sysroot，包含本轮已合并的 Unicode、字体、PNG 和裁剪修复。复用已有原生依赖和 runtime，不改动用户的原仓库。测试记录见 [跨平台结果](compatibility-platforms.json)；耗时包含构建，不能作为跨平台性能比较。
+
+| 平台 | 核心 | UI | 原生窗口 | 只读剪贴板 |
+| --- | --- | --- | --- | --- |
+| Linux GNU x86_64，glibc 2.43 | 186 通过 | 97 通过 | 2 通过 | 1 通过 |
+| Windows x64 / Microsoft UCRT | 验证中 | 验证中 | 验证中 | 验证中 |
+
+Linux 使用 GTK X11、独立 Xvfb 显示及 `dbus-run-session`，验证 resize、实际 PTY 的 CPR／PNG ACK、最终输出、退出关闭和独立装饰的 Accepted 帧。它验证原生窗口路径，不等同于 Wayland、物理显示器时序或硬件 GPU 性能。`useProcess` 使两个原生用例分别初始化窗口应用，完整套件通过。
+
+[Linux 应用记录](compatibility-applications-linux.json) 包含 Bash 5.3.9、Neovim 0.11.6、less 668 和进度脚本，以及 Bash／Neovim 的 `xterm-256color` 回退。该机的 `vim` 命令实际指向 Neovim，因此记录保留两个命令入口及实际版本，不重复计为独立 Vim 实现；macOS 的 Vim 9.1 记录见上文。tmux 与两种图片发送工具的实际应用覆盖来自本机记录，Linux 另完成 xterm Sixel 实际回包对照。
