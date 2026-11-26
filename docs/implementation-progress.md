@@ -34,7 +34,7 @@
 | M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
 | M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片文本投影已验证不保留图片资源 |
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
-| M5 | 图片 store/decoder/cache、预算 | 解码／传输、图片快照和锚点 store 已实现，store 9 项及完整核心 149 项通过；生产帧交付和绘制接入待完成 |
+| M5 | 图片 store/decoder/cache、预算 | 解码／传输、图片快照、锚点 store 和生产 model 交付已实现，新增交接 2 项及相关 17 项回归通过；原生缓存与绘制待完成 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | DCS、模式、查询与 VT 顺序已接入，8 项协议及 20 项相关回归通过；绘制接入待完成 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
@@ -105,6 +105,8 @@ Sixel 像素基础：`TerminalSixelDecodeTest` 6/6、`TerminalSixelPaletteTest` 
 Sixel 协议：`TerminalSixelProtocolTest` 8/8，相关解码 6/6、store 9/9、能力查询 5/5。DCS 按字节流处理，CAN／SUB／EOF 释放未完成传输，超限后恢复文字与回包。80、1070、8452 与 DECRQM、DA、XTSMGRAPHICS 按显式 `TerminalGraphicsSupport` 配置响应；未实现的查询 item/action 明确失败。结尾换带的触达范围与最终像素高度分别计算，图像滚动和光标定位在随后 DSR 之前完成；display mode 保留原光标和 pending wrap。测试还覆盖私有／共享 palette、冻结快照、主备屏、接收期间 reflow、宽字符尾格及边距裁切。垂直全屏滚动不永久裁掉图片右侧；分配前优先回收旧的无 placement／离屏资源。
 
 核心默认为关闭图形；生产 session 在 UI 绘制完成后启用 Sixel。此处游标行为根据固定 xterm 源码核对并由回放锁定，尚未宣称真实窗口对照已完成。没有下载或新建临时文件，协议参考继续用于后续图形验证。
+
+生产图片交接：`TerminalModelImageTest` 2/2、原后台 model 7/7、真实／模拟 PTY 会话 6/6、核心图片快照 4/4。每次后台发布先取得图片租约，窗口接受新代次后退还旧租约；交接处不允许取消丢弃已产生的 owned 结果，下一请求仍检查取消。连续 100 次替换在 192 KiB CPU 配额内完成；实际 worker 被阻塞并在交接期间取消时，最后图片仍可读取。显式 `model/session.close()` 关闭核心资源并把当前 reading 换成无图片的共享文本投影；此前取得的图片／快照租约独立存活，自然 EOF 仍保留图片供最终画面使用。`reading.withoutImages()` 开放同一文本投影能力，不反向保留完整 reading。UI 依赖锁已更新为图形原语所需的 compression／platform；没有新增下载或临时文件。
 
 ## 后续执行约束
 

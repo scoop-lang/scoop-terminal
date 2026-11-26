@@ -38,6 +38,13 @@ public interface TerminalReading {
     public fun logicalLineRange(id: Long): TerminalRange?
 }
 
+/** Shares immutable text and metadata without retaining any image resources or a parent reading. */
+public fun TerminalReading.withoutImages(): TerminalReading = when {
+    this is TerminalReadingData -> textProjection()
+    this is TerminalSnapshot -> available().textProjection()
+    else -> throw IllegalArgumentException(Some("reading was not produced by the terminal core"))
+}
+
 internal class TerminalReadingData(
     public override val columns: Long,
     public override val bufferEpoch: Long,

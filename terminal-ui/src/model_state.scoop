@@ -41,8 +41,18 @@ internal struct TerminalModelPublication(
     val ambiguousWidth: TerminalAmbiguousWidth,
     val synchronizationGeneration: Long,
     val synchronizedSince: MonotonicInstant?,
-    val binding: TerminalModelBinding?
-)
+    val binding: TerminalModelBinding?,
+    val imageLease: TerminalImageLease
+) {
+    fun withoutImages(): TerminalModelPublication {
+        val text = reading.withoutImages()
+        return TerminalModelPublication(
+            text, update, input, size, resizePty, completedResize, mouseReporting, metadata,
+            ambiguousWidth, synchronizationGeneration, synchronizedSince, binding,
+            text.images.retain()
+        )
+    }
+}
 
 /** Constructed, accessed and retired only on one background worker. */
 internal class TerminalModelState(private val terminal: Terminal) {
@@ -133,10 +143,10 @@ internal class TerminalModelState(private val terminal: Terminal) {
 
     fun close() {
         checkOwner()
-        terminal.finishOutput()
         for (handle in tracked.values)
             handle.close()
         tracked.clear()
+        terminal.close()
     }
 
     private fun checkOwner() {
@@ -155,7 +165,10 @@ internal class TerminalModelState(private val terminal: Terminal) {
         TerminalModelSize(terminal.columns, terminal.rows, terminal.pixelSize), resizePty,
         completedResize,
         terminal.mouseReporting, terminal.metadata, terminal.ambiguousWidth,
-        terminal.synchronizationGeneration, synchronizedSince, binding
+        terminal.synchronizationGeneration, synchronizedSince, binding, terminal
+            .reading
+            .images
+            .retain()
     )
 }
 

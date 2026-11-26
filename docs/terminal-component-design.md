@@ -378,6 +378,8 @@ Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使�
 
 已实现的图片读接口为 `reading.images`，资源通过 `image(key)` 查找，placement 分页读取；该视图借用当前 reading 的生命周期。`TerminalSnapshot` 自动取得图片租约，model 交付和 UI 帧可单独调用 `images.retain()` 获得 `TerminalImageLease`。`image.pixels()` 返回必须关闭的 straight-alpha RGBA8 上传租约，不传 native 对象。搜索从独立文本投影读取，共享不可变行数据而不引用图片帧。
 
+后台 publication 持有独立图片租约，在窗口接受下一代时释放。跨线程交接必须完成所有权转移后才响应取消，不能把已产生的 owned 结果丢在取消路径中。自然 EOF 保留最后画面；显式关闭 session 释放其图片所有权，当前 reading 通过 `withoutImages()` 保留文本与元数据。已经取得的快照、上传租约和已准备好的原生绘制帧各自独立存活。
+
 PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 `terminal-ui`，复用 `scoop.graphics.Image.decode` 与 CPU `RasterSurface.readPixels()`，创建、使用、关闭 codec/native 资源后只返回不可变 RGBA8。先验证 PNG signature、IHDR 尺寸和乘法溢出，再交给 codec；不用 GPU framebuffer 读回来解码 PNG。核心不依赖 Skia；无窗口测试可注入确定性 decoder 或在 CPU 上单独测试该 adapter。
 
 **图片尺寸、放置导致的光标移动和查询回复属于 VT 流顺序。** 解析到图形结束时，必须完成决定这些行为所需的校验/解码，再处理后续文字和查询；不能先绘制后续文字，等异步图片回调回来再补光标。生产 session 在第 10 节的串行后台 model 队列执行这一过程，UI 继续显示已提交快照。GPU 资源准备只影响是否能绘制该帧，不反向改变 VT 状态。

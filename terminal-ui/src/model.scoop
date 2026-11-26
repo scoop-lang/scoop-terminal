@@ -36,6 +36,7 @@ internal class TerminalModel private constructor(
     private var started = false
     private var driver: Job? = None
     private var retiring = false
+    private var imagesReleased = false
     private val stopped = Channel<Unit>(0L)
     private var value = state.initial
     val current: TerminalModelPublication get() = value
@@ -54,7 +55,17 @@ internal class TerminalModel private constructor(
                 blocking { threads = 1 }
             }
             try {
-                val state = withExecutor(executor) { TerminalModelState(create()) }
+                val state = nonCancellableScope {
+                    withExecutor(executor) {
+                        val terminal = create()
+                        try {
+                            TerminalModelState(terminal)
+                        } catch (error: Throwable) {
+                            terminal.close()
+                            throw error
+                        }
+                    }
+                }
                 return TerminalModel(state, executor, maxOperations, maxBytes)
             } catch (error: Throwable) {
                 nonCancellableScope {
@@ -164,13 +175,11 @@ internal class TerminalModel private constructor(
         var failure: Throwable = IllegalStateException(Some("terminal model is closed"))
         try {
             while (true) {
+                ensureActive()
                 if (released.size > 0L) {
                     val ids = released.toArray()
                     released = ArrayList<Long>()
-                    val result = withExecutor(executor) {
-                        core.apply(TerminalModelCommand.Untrack(ids))
-                    }
-                    accept(result)
+                    val result = apply(core, TerminalModelCommand.Untrack(ids))
                     publish(result)
                 }
                 if (requests.size == 0L) {
@@ -180,8 +189,7 @@ internal class TerminalModel private constructor(
                 }
                 val request = requests.removeFirst()
                 try {
-                    val result = withExecutor(executor) { core.apply(request.command) }
-                    accept(result)
+                    val result = apply(core, request.command)
                     publish(result)
                     request.completion?.trySend(TerminalModelOutcome.Published(result))
                 } catch (error: Throwable) {
@@ -223,10 +231,25 @@ internal class TerminalModel private constructor(
     }
 
     private fun accept(result: TerminalModelPublication) {
+        val previous = value
         value = result
+        previous.imageLease.close()
         when (result.binding) {
             case Some(val binding) -> tracked[binding.id]?.bind(binding)
             case None -> {}
+        }
+    }
+
+    /** Cancellation cannot drop a worker-produced lease before the window adopts it. */
+    private suspend fun apply(
+        core: TerminalModelState,
+        command: TerminalModelCommand
+    ): TerminalModelPublication {
+        val model = this
+        return nonCancellableScope {
+            val result = withExecutor(model.executor) { core.apply(command) }
+            model.accept(result)
+            result
         }
     }
 
@@ -239,8 +262,7 @@ internal class TerminalModel private constructor(
         val core = state!!
         try {
             try {
-                val last = withExecutor(executor) { core.apply(TerminalModelCommand.Finish) }
-                accept(last)
+                apply(core, TerminalModelCommand.Finish)
             } finally {
                 withExecutor(executor) { core.close() }
             }
@@ -266,9 +288,21 @@ internal class TerminalModel private constructor(
             } finally {
                 // A cancelled parent may prevent the driver's body (and its finally) from starting.
                 model.closeFrontend(IllegalStateException(Some("terminal model is closed")))
-                model.retire()
-                model.driver = None
+                try {
+                    model.retire()
+                } finally {
+                    model.driver = None
+                    model.releaseImages()
+                }
             }
         }
+    }
+
+    private fun releaseImages() {
+        if (imagesReleased) return
+        imagesReleased = true
+        val previous = value
+        value = previous.withoutImages()
+        previous.imageLease.close()
     }
 }
