@@ -12,7 +12,8 @@ public struct TerminalImageLimits(
     val maxDimension: Long = 16384L,
     val maxPlacements: Long = 4096L,
     val colorRegisters: Long = 1024L,
-    val maxSixelPixelWrites: Long = 67108864L
+    val maxSixelPixelWrites: Long = 67108864L,
+    val maxPngProfileBytes: Long = 1048576L
 )
 
 public enum TerminalImageFailure {
@@ -37,8 +38,8 @@ public struct TerminalImageSize(val width: Int, val height: Int) {
 }
 
 internal fun checkImageLimits(limits: TerminalImageLimits) {
-    if (limits.maxSixelPixelWrites < 0L)
-        throw IllegalArgumentException(Some("negative Sixel pixel-write limit"))
+    if (limits.maxSixelPixelWrites < 0L || limits.maxPngProfileBytes < 0L)
+        throw IllegalArgumentException(Some("negative image work limit"))
     if (limits.maxEncodedBytes <
         0L ||
         limits.maxDecodedBytes <

@@ -226,6 +226,20 @@ private class TerminalKittyPaintTest {
                                 "adam7",
                                 includeBytes("data/images/adam7.png"),
                                 includeBytes("data/images/adam7.pixels")
+                            ),
+                            (
+                                "metadata-text",
+                                includeBytes("data/images/metadata-text.png"),
+                                includeBytes("data/images/rgba.pixels")
+                            ),
+                            (
+                                "icc-text",
+                                includeBytes("data/images/icc-text.png"),
+                                TerminalCpuImageDecoder()
+                                    .decodePng(
+                                        includeBytes("data/images/icc.png"),
+                                        TerminalImageSize(3, 2)
+                                    )
                             )
                         ]
                     ) {
@@ -297,7 +311,7 @@ private fun kittyPaintTerminal(): Terminal {
         ),
         graphics = TerminalGraphicsSupport(kitty = true), imageDecoder = Some(
             TerminalCpuImageDecoder()
-        )
+        ), imageLimits = TerminalImageLimits(maxCpuBytes = 4194304L)
     )
     terminal.resize(16L, 4L, pixels = Some(TerminalPixelSize(128L, 64L, 8L, 16L)))
     return terminal

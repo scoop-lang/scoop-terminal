@@ -135,7 +135,7 @@ public class TerminalEmulatorSession internal constructor(
             onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit = {},
             onProgress: (TerminalProgress) -> Unit = {},
             onDiagnostic: (String) -> Unit = {},
-            graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(sixel = true),
+            graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(sixel = true, kitty = true),
             imageLimits: TerminalImageLimits = TerminalImageLimits()
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
@@ -148,7 +148,7 @@ public class TerminalEmulatorSession internal constructor(
                     Terminal(
                         columns, rows, historyLimit, clipboardPolicy = clipboardPolicy,
                         ambiguousWidth = ambiguousWidth, graphics = graphics, imageLimits =
-                            imageLimits
+                            imageLimits, imageDecoder = Some(TerminalCpuImageDecoder())
                     )
                 }
             val pty = try {

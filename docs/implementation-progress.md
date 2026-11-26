@@ -34,9 +34,9 @@
 | M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
 | M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片文本投影已验证不保留图片资源 |
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
-| M5 | 图片 store/decoder/cache、预算 | 原生 tile 缓存、帧租约与绘制已接入；Sixel 9 项、Kitty RGBA／PNG／线性采样／z 4 项通过，PNG 辅助数据的解码峰值继续核对 |
+| M5 | 图片 store/decoder/cache、预算 | 已实现；Sixel 9 项、Kitty 绘制 4 项及 PNG 辅助数据 3 项通过；真实 RSS／GPU 峰值随 M6 测量 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，真实窗口对照待集中验收 |
-| M5 | Kitty 静态 profile、分块、放置/删除/探测 | 核心已实现，18 项协议及完整核心 178 项通过；桌面 RGBA／PNG／z 绘制验收后默认启用 |
+| M5 | Kitty 静态 profile、分块、放置/删除/探测 | 已实现且桌面默认启用；18 项协议、4 项绘制、完整 UI 90 项及 macOS 真实窗口 PNG／PTY 用例通过 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
 | M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 待实现 |
 | M6 | Linux 本轮完整回归 | 待本机完成后执行 |
@@ -121,6 +121,10 @@ Kitty 静态核心：`TerminalKittyTransferTest` 6/6、`TerminalKittyLayoutTest`
 Kitty 原生绘制：`TerminalKittyPaintTest` 4/4。真实 RGBA 光栅覆盖透明度、三个 z 区间及阈值、同 z 按 image ID 排序；四类 PNG 通过协议和生产 CPU decoder，删除协议资源／清空缓存后已准备帧仍能绘制。多块图像在缩小、放大、源裁剪和窗口裁剪下逐像素对比整幅线性绘制，允许至多 2/255 的插值舍入误差；重复帧没有新增上传。
 
 测试实际发现 `Canvas.clipRect` 固定的抗锯齿覆盖使非整数缩放的 tile 边界变暗。已在独立分支 `codex/graphics-hard-clip` 修复并合并 [Scoop PR #228](https://github.com/scoop-lang/scoop/pull/228)，增加 `antiAlias = false`，同步规范／声明／README／skill 导航。上游 14 项定向回归通过，main 已更新并回合并修复分支推送，开发 sysroot 完整增量更新。组件从扩展采样边缘绘制，再以硬裁剪分配 tile 的设备像素；上述接缝回归通过。没有新依赖，PR 临时文件已删除。
+
+PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty 绘制 4/4，随后完整 `terminal-ui` 90/90。只把像素、透明度和颜色 chunks 送入 codec；按原编码跳过压缩文字、EXIF 与未知辅助数据，不先解压再丢弃。ICC 严格检查 Zlib 结束与长度，默认独立展开上限 1 MiB，验证临时空间和四份原生 profile 的保守成本分别计费；超限、损坏及规范化分配失败释放新资源且不调用 codec。生成的 RGB matrix ICC 保持颜色输出；含八段 7 MiB 文字的 PNG 在 4 MiB 图片预算内保持原像素。规范化采用两次线性扫描和常量工作状态，不按辅助 chunk 数量积累列表。生成 fixture 的一致性检查通过，无外部图片或依赖下载。
+
+桌面 `start()` 现在默认启用 Sixel／Kitty，并在 model worker 中配置 `TerminalCpuImageDecoder`。macOS `scoop test --release demo` 的真实窗口用例通过：子进程收到 CPR，再发送实际 PNG、收到 Kitty OK，窗口接受两次尺寸，PTY 最后尺寸与模型相同，子进程以 17 退出，中文最终画面保留；另验证等待输入的子进程显式关闭。PNG 的预算测试不等同于进程 RSS 硬上限，实测峰值及综合应用 smoke 仍列入 M6。本轮没有自建临时文件遗留。
 
 ## 后续执行约束
 

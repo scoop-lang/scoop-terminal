@@ -386,6 +386,8 @@ Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使�
 
 PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 `terminal-ui`，复用 `scoop.graphics.Image.decode` 与 CPU `RasterSurface.readPixels()`，创建、使用、关闭 codec/native 资源后只返回不可变 RGBA8。先验证 PNG signature、IHDR 尺寸和乘法溢出，再交给 codec；不用 GPU framebuffer 读回来解码 PNG。核心不依赖 Skia；无窗口测试可注入确定性 decoder 或在 CPU 上单独测试该 adapter。
 
+进入 codec 前只保留像素、透明度及颜色配置所需的 PNG chunks，文字、EXIF 和未知辅助块按原编码跳过，不展开；图片方向遵循 IHDR 的像素网格。ICC 保留，先用有界 Zlib 检查展开长度及流结束，默认上限 1 MiB，由 `maxPngProfileBytes` 配置。ICC 验证的临时数据与规范化编码副本也计入 CPU 预算，调用 codec 时另预留四份展开 profile 的保守占用；无需改色的 RGB/RGBA 路径不承担此开销。若未知辅助块夹在 IDAT 之间仍按 PNG 连续数据规则拒绝，不能借移除辅助块修复损坏的 PNG。
+
 **图片尺寸、放置导致的光标移动和查询回复属于 VT 流顺序。** 解析到图形结束时，必须完成决定这些行为所需的校验/解码，再处理后续文字和查询；不能先绘制后续文字，等异步图片回调回来再补光标。生产 session 在第 10 节的串行后台 model 队列执行这一过程，UI 继续显示已提交快照。GPU 资源准备只影响是否能绘制该帧，不反向改变 VT 状态。
 
 ### 9.2 Sixel 首版兼容范围
@@ -451,6 +453,7 @@ Kitty 的 `ED 2` 清除当前屏幕图片；一般文本写入和其他擦除不
 | 每帧图形工作 | 最多准备 8192 个 tile，含透明／复用块；失败 placement 整体跳过并诊断 |
 | placements | 每 session 4096 个，重复放置也计数 |
 | Sixel 像素写入 | 每幅 67108864 次，重复覆盖同一像素也计数 |
+| PNG ICC 展开数据 | 每幅最多一个 profile，默认 1 MiB；文本等非像素元数据不进入 codec |
 
 分别限制编码字节、解压字节、像素面积、重复计数、寄存器索引、placement 数和未完成传输，防止小 payload 产生无界工作。解析超限仍按控制串规则恢复。Kitty 报明确错误；Sixel 无错误回包时丢弃该图并产生可供宿主诊断的事件，不关闭整个终端。
 

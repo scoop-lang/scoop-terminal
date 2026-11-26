@@ -7,10 +7,15 @@ import scoop.platform.memory.NativeByteBuffer
 internal fun inflateImage(
     input: ImageBytes,
     expectedBytes: Long? = None,
-    beforeAllocate: (Long) -> Unit = {}
+    beforeAllocate: (Long) -> Unit = {},
+    outputLimit: Long = input.memory.limits.maxDecompressedBytes
 ): ImageBytes {
     val memory = input.memory
-    val configured = memory.limits.maxDecompressedBytes
+    val configured = if (outputLimit < memory.limits.maxDecompressedBytes)
+        outputLimit
+    else
+        memory.limits.maxDecompressedBytes
+    if (configured < 0L) throw IllegalArgumentException(Some("negative image inflate limit"))
     val maximum = when (expectedBytes) {
         case Some(val expected) -> {
             if (expected < 0L)

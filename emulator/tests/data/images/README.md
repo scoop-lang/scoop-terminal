@@ -7,3 +7,8 @@ Valid fixtures cover RGBA8, indexed color with transparency, grayscale16, Adam7 
 ancillary text chunk. Invalid fixtures independently change PNG framing, CRC, IHDR order,
 palette requirements, trailing bytes and size limits; `animated.png` exercises the static
 profile's explicit rejection of APNG. Pixel decoding is exercised separately in the UI Cone.
+
+`metadata-text.png` contains eight compressed 7 MiB text values and unused EXIF metadata;
+preparation removes these chunks without expanding them. `icc.profile` is a locally generated
+ICC v4 RGB matrix profile with linear curves. `icc.png` / `icc-text.png` verify that color
+profiles survive text removal; the tail and duplicate variants exercise strict profile errors.

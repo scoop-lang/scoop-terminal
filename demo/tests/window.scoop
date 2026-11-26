@@ -56,6 +56,8 @@ private class WindowProbe {
             awaitWindow("first accepted terminal layout and CPR") {
                 title == "reply-ok" && session.reading.columns != 80L
             }
+            assertEquals(1L, session.reading.images.imageCount)
+            assertEquals(1L, session.reading.images.placementCount)
             val oldColumns = session.reading.columns
             val oldRows = session.reading.rows
             window.requestSize(LogicalSize(650.0, 420.0))
@@ -106,6 +108,10 @@ stty -icanon -echo min 1 time 0 || exit 10
 printf '\033[2;3H\033[6n'
 reply=$(dd bs=1 count=6 2>/dev/null)
 [ "$reply" = "$(printf '\033[2;3R')" ] || exit 11
+printf '\033_Ga=T,i=32,f=100,C=1;iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAGklEQVR4nGP4z8DwHwgbgJQDAwj8BwIg1QAAeK4JOa7TPbgAAAAASUVORK5CYII=\033\\'
+expected=$(printf '\033_Gi=32;OK\033\\')
+reply=$(dd bs=1 count=${#expected} 2>/dev/null)
+[ "$reply" = "$expected" ] || exit 13
 stty icanon || exit 12
 printf '\033]2;reply-ok\007'
 IFS= read -r wanted

@@ -22,6 +22,36 @@ def png(ihdr: bytes, pixels: bytes, extra: bytes = b"") -> bytes:
     return SIGNATURE + ihdr + extra + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b"")
 
 
+def profile() -> bytes:
+    """A generated ICC v4 RGB matrix profile with linear transfer curves."""
+    def fixed(value: float) -> bytes:
+        return struct.pack(">i", round(value * 65536))
+
+    def xyz(values: tuple[float, float, float]) -> bytes:
+        return b"XYZ \0\0\0\0" + b"".join(fixed(value) for value in values)
+
+    gamma = b"curv\0\0\0\0" + struct.pack(">IH", 1, 256) + b"\0\0"
+    tags = [(b"rXYZ", xyz((0.4360747, 0.2225045, 0.0139322))),
+            (b"gXYZ", xyz((0.3850649, 0.7168786, 0.0971045))),
+            (b"bXYZ", xyz((0.1430804, 0.0606169, 0.7141733))),
+            (b"wtpt", xyz((0.9642, 1.0, 0.8249))),
+            (b"rTRC", gamma), (b"gTRC", gamma), (b"bTRC", gamma)]
+    data = bytearray(128)
+    data[8:12] = struct.pack(">I", 0x04300000)
+    data[12:24] = b"mntrRGB XYZ "
+    data[36:40] = b"acsp"
+    data[68:80] = b"".join(fixed(value) for value in (0.9642, 1.0, 0.8249))
+    start = 132 + len(tags) * 12
+    table = bytearray(struct.pack(">I", len(tags)))
+    body = bytearray()
+    for name, payload in tags:
+        table += name + struct.pack(">II", start + len(body), len(payload))
+        body += payload
+    data += table + body
+    data[:4] = struct.pack(">I", len(data))
+    return bytes(data)
+
+
 def fixtures() -> dict[str, bytes]:
     rgba = bytes((255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64,
                   0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 128))
@@ -64,6 +94,16 @@ def fixtures() -> dict[str, bytes]:
                 passes += b"\0" + row
     result["adam7.png"] = png(header(5, 5, 8, 6, 1), bytes(passes))
     result["adam7.pixels"] = pixels
+    icc = profile()
+    iccp = b"generated\0\0" + zlib.compress(icc)
+    text = chunk(b"zTXt", b"comment\0\0" + zlib.compress(b"x" * (7 * 1024 * 1024)))
+    # Small encoded inputs that previously made libpng retain tens of MiB of unused text.
+    result["metadata-text.png"] = png(ihdr, raw, text * 8 + chunk(b"eXIf", b"ignored orientation"))
+    result["icc.png"] = png(ihdr, raw, chunk(b"iCCP", iccp))
+    result["icc.profile"] = icc
+    result["icc-text.png"] = png(ihdr, raw, text + chunk(b"iCCP", iccp))
+    result["icc-tail.png"] = png(ihdr, raw, chunk(b"iCCP", iccp + b"tail"))
+    result["icc-duplicate.png"] = png(ihdr, raw, chunk(b"iCCP", iccp) * 2)
     return result
 
 
@@ -73,7 +113,7 @@ def main() -> None:
     args = parser.parse_args()
     core_only = {"huge.png", "no-iend.png", "unknown-critical.png", "ancillary.png",
                  "animated.png", "duplicate-ihdr.png", "trailing.png", "no-palette.png",
-                 "bad-chunk-length.png", "bad-crc.png"}
+                 "bad-chunk-length.png", "bad-crc.png", "icc.profile", "icc-tail.png", "icc-duplicate.png"}
     codec_only = {"truncated-deflate.png", "short-pixels.png", "bad-filter.png"}
     for cone in ("emulator", "terminal-ui"):
         directory = ROOT / cone / "tests" / "data" / "images"

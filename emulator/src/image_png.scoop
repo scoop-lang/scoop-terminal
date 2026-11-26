@@ -92,14 +92,14 @@ private fun invalidPng(reason: String): Nothing = imageFailure(
 
 internal fun imageByte(bytes: Array<Byte>, offset: Long): Int = bytes[offset].toInt() and 255
 
-private fun pngLong(bytes: Array<Byte>, offset: Long): Long = (
+internal fun pngLong(bytes: Array<Byte>, offset: Long): Long = (
     imageByte(bytes, offset).toLong() shl 24
 ) or
     (imageByte(bytes, offset + 1L).toLong() shl 16) or
     (imageByte(bytes, offset + 2L).toLong() shl 8) or
     imageByte(bytes, offset + 3L).toLong()
 
-private fun pngChunk(bytes: Array<Byte>, offset: Long, name: String): Boolean {
+internal fun pngChunk(bytes: Array<Byte>, offset: Long, name: String): Boolean {
     var index = offset
     for (character in name) {
         if (imageByte(bytes, index) != character.code) return false

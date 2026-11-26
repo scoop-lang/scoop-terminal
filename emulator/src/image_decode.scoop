@@ -5,9 +5,11 @@ package scoop.terminal.emulator
  * straight-alpha RGBA8 and close all native resources before returning or throwing.
  */
 public interface TerminalImageDecoder {
-    /** Additional peak bytes, including the returned array, native encoded copies and all work. */
+    /** Additional peak bytes, including returned pixels, encoded copies and codec work.
+     * The terminal separately reserves four expanded ICC-profile copies when present. */
     public fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long
-    /** Input has passed PNG framing/CRC/dimension validation; the codec must reject incomplete pixels. */
+    /** Input has passed framing/CRC/dimension checks and bounded metadata preparation.
+     * Only pixel/color chunks remain; the codec must reject incomplete pixels. */
     public fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte>
 }
 
@@ -108,21 +110,33 @@ internal fun decodeImagePng(
     val size = inspectImagePng(encoded, memory.limits)
     val codec = decoder ?:
         imageFailure(TerminalImageFailure.Unsupported, "PNG decoder is unavailable")
-    val peak = codec.peakBytes(size, encoded.size)
-    if (peak < size.rgbaBytes)
-        throw IllegalArgumentException(Some("PNG decoder peak must include its result pixels"))
-    val reservation = reserveImage(memory, imageByteSum(peak, ImageBytes.overhead), beforeAllocate)
-    try {
-        val result = codec.decodePng(encoded, size)
-        if (result.size != size.rgbaBytes)
-            imageFailure(
-                TerminalImageFailure.InvalidData,
-                "PNG decoder returned a different pixel size"
+    return prepareImagePng(input, beforeAllocate)
+        .use { prepared ->
+            val encoded = prepared.bytes.bytes
+            val peak = codec.peakBytes(size, encoded.size)
+            if (peak < size.rgbaBytes)
+                throw IllegalArgumentException(
+                    Some("PNG decoder peak must include its result pixels")
+                )
+            val profiles = imageByteSum(prepared.profileBytes, prepared.profileBytes)
+            val metadata = imageByteSum(profiles, profiles)
+            val reservation = reserveImage(
+                memory,
+                imageByteSum(imageByteSum(peak, metadata), ImageBytes.overhead),
+                beforeAllocate
             )
-        reservation.resize(imageByteSum(result.size, ImageBytes.overhead))
-        return ImageRaster(size, ImageBytes.adopt(memory, reservation, result))
-    } catch (error: Throwable) {
-        reservation.close()
-        throw error
-    }
+            try {
+                val result = codec.decodePng(encoded, size)
+                if (result.size != size.rgbaBytes)
+                    imageFailure(
+                        TerminalImageFailure.InvalidData,
+                        "PNG decoder returned a different pixel size"
+                    )
+                reservation.resize(imageByteSum(result.size, ImageBytes.overhead))
+                ImageRaster(size, ImageBytes.adopt(memory, reservation, result))
+            } catch (error: Throwable) {
+                reservation.close()
+                throw error
+            }
+        }
 }
