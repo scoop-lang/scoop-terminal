@@ -36,7 +36,10 @@ def run_case(root: Path, args, label: str, case: str) -> dict:
     if len(records) != 1 or len(metrics) != 1:
         raise RuntimeError(f"{label}/{case}: expected one benchmark and one process metric record:\n{text}")
     result = {"label": label, "case": case, **records[0], "runtime": metrics[0]}
-    print(json.dumps(result, ensure_ascii=False), flush=True)
+    print(f"{label}/{case}: {result['ns'] / 1e6:.2f} ms, "
+          f"p95 {result['p95'] / 1e6:.3f} ms, "
+          f"allocated {metrics[0]['allocated_bytes'] / 1048576:.1f} MiB, "
+          f"peak RSS {metrics[0]['peak_rss_bytes'] / 1048576:.1f} MiB", flush=True)
     return result
 
 

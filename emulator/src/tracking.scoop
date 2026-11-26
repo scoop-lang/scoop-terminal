@@ -340,6 +340,7 @@ internal class TerminalTracking(
     }
 
     fun replace(row: ScreenRow, start: Long, end: Long, erased: Boolean) {
+        if (row.tracked.size == 0L) return
         for (entry in row.tracked.toArray()) {
             if (entry.kind == TerminalTrackingKind.Position) continue
             val left = if (entry.start.row === row) entry.start.column else 0L

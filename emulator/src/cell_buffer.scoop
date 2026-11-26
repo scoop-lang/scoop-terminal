@@ -3,20 +3,21 @@ package scoop.terminal.emulator
 /** Immutable physical columns with a shared, implicit suffix of blank cells. */
 internal class CellReading(
     public override val size: Long,
-    val content: Array<TerminalCell>,
-    val blank: TerminalCell
+    private val content: List<TerminalCell>,
+    private val blank: TerminalCell,
+    val storedColumns: Long = content.size
 ) : List<TerminalCell> {
     val retainedBytes: Long = cellReadingBytes(content)
 
     public override operator fun get(index: Long): TerminalCell {
         if (index < 0L || index >= size) throw IndexOutOfBoundsException()
-        return if (index < content.size) content[index] else blank
+        return if (index < storedColumns) content[index] else blank
     }
 
     public override operator fun iterator(): Iterator<TerminalCell> = CellIterator(this)
 }
 
-private fun cellReadingBytes(content: Array<TerminalCell>): Long {
+private fun cellReadingBytes(content: List<TerminalCell>): Long {
     var result = 512L + content.size * 200L
     for (cell in content)
         result += cell.text.byteLength
@@ -37,7 +38,7 @@ internal class CellBuffer(public override val size: Long, style: TerminalStyle) 
         if (index >= length) return blank
         return when (writable) {
             case Some(val cells) -> cells[index]
-            case None -> frozen.content[index]
+            case None -> frozen[index]
         }
     }
 
@@ -57,7 +58,7 @@ internal class CellBuffer(public override val size: Long, style: TerminalStyle) 
             case Some(val cells) -> if (cells.size >= required) return cells
             case None -> {}
         }
-        var capacity = if (length > 16L) length else 16L
+        var capacity = if (length > 4L) length else 4L
         while (capacity < required)
             capacity *= 2L
         if (capacity > size) capacity = size
@@ -69,7 +70,7 @@ internal class CellBuffer(public override val size: Long, style: TerminalStyle) 
             else
                 when (previous) {
                     case Some(val cells) -> cells[index]
-                    case None -> old.content[index]
+                    case None -> old[index]
                 }
         }
         writable = Some(result)
@@ -79,11 +80,15 @@ internal class CellBuffer(public override val size: Long, style: TerminalStyle) 
     fun snapshot(): CellReading {
         when (writable) {
             case Some(val cells) -> {
-                frozen = CellReading(
-                    size,
-                    Array<TerminalCell>(length) { index -> cells[index] },
-                    blank
-                )
+                // Transfer exclusive ownership; no mutable reference escapes CellReading.
+                // Shrink erased suffixes so a short line cannot pin an arbitrarily large buffer.
+                val storage: List<TerminalCell> = if (length == 0L)
+                    []
+                else if (cells.size > length + 8L)
+                    Array<TerminalCell>(length) { index -> cells[index] }
+                else
+                    cells
+                frozen = CellReading(size, storage, blank, length)
                 writable = None
             }
 

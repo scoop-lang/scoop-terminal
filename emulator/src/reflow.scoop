@@ -65,7 +65,7 @@ private class ReflowLine(
             column = 0L
         }
         current
-            .putCell(
+            .restoreCell(
                 column,
                 cell.{
                     width: width,

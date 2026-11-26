@@ -26,7 +26,7 @@ private class CompactRowTest {
             }
             for (column in 0L..<257L)
                 cells[column] = blank
-            assertEquals(0L, cells.snapshot().content.size)
+            assertEquals(0L, cells.snapshot().storedColumns)
             assertEquals(257L, cells.snapshot().toArray().size)
             for (sample in 0L..<snapshots.size) {
                 var index = 0L

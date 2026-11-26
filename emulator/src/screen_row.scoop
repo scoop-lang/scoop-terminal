@@ -144,6 +144,19 @@ internal class ScreenRow(
         invalidate(textChanged)
     }
 
+    /** Appends to a fresh reflow row; source edits and tracking migrate once after construction. */
+    fun restoreCell(column: Long, cell: TerminalCell) {
+        replaceCell(column, cell)
+        if (cell.width == 2L)
+            replaceCell(
+                column + 1L,
+                TerminalCell(width = 0L, style = cell.style, linkId = cell.linkId)
+            )
+        if (column + cell.width > used) used = column + cell.width
+        trim()
+        invalidate(textChanged = false)
+    }
+
     private fun trim() {
         val previous = used
         val blank = TerminalCell()
