@@ -1,0 +1,106 @@
+package scoop.terminal.emulator
+
+/** Immutable physical columns with a shared, implicit suffix of blank cells. */
+internal class CellReading(
+    public override val size: Long,
+    val content: Array<TerminalCell>,
+    val blank: TerminalCell
+) : List<TerminalCell> {
+    val retainedBytes: Long = cellReadingBytes(content)
+
+    public override operator fun get(index: Long): TerminalCell {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        return if (index < content.size) content[index] else blank
+    }
+
+    public override operator fun iterator(): Iterator<TerminalCell> = CellIterator(this)
+}
+
+private fun cellReadingBytes(content: Array<TerminalCell>): Long {
+    var result = 512L + content.size * 200L
+    for (cell in content)
+        result += cell.text.byteLength
+    return result
+}
+
+/** Only a row being edited owns mutable storage; publication freezes its populated prefix. */
+internal class CellBuffer(public override val size: Long, style: TerminalStyle) :
+    List<TerminalCell> {
+    private val blank = TerminalCell(style = style)
+    private var frozen = CellReading(size, [], blank)
+    private var writable: MutableArray<TerminalCell>? = None
+    private var length = 0L
+    val storedColumns: Long get() = length
+
+    public override operator fun get(index: Long): TerminalCell {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        if (index >= length) return blank
+        return when (writable) {
+            case Some(val cells) -> cells[index]
+            case None -> frozen.content[index]
+        }
+    }
+
+    operator fun set(index: Long, value: TerminalCell) {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        if (index >= length && value == blank) return
+        val cells = edit(index + 1L)
+        cells[index] = value
+        if (index >= length) length = index + 1L
+        while (length > 0L && cells[length - 1L] == blank)
+            length -= 1L
+    }
+
+    private fun edit(required: Long): MutableArray<TerminalCell> {
+        val previous = writable
+        when (previous) {
+            case Some(val cells) -> if (cells.size >= required) return cells
+            case None -> {}
+        }
+        var capacity = if (length > 16L) length else 16L
+        while (capacity < required)
+            capacity *= 2L
+        if (capacity > size) capacity = size
+        val count = length
+        val old = frozen
+        val result = MutableArray<TerminalCell>(capacity) { index ->
+            if (index >= count)
+                blank
+            else
+                when (previous) {
+                    case Some(val cells) -> cells[index]
+                    case None -> old.content[index]
+                }
+        }
+        writable = Some(result)
+        return result
+    }
+
+    fun snapshot(): CellReading {
+        when (writable) {
+            case Some(val cells) -> {
+                frozen = CellReading(
+                    size,
+                    Array<TerminalCell>(length) { index -> cells[index] },
+                    blank
+                )
+                writable = None
+            }
+
+            case None -> {}
+        }
+        return frozen
+    }
+
+    public override operator fun iterator(): Iterator<TerminalCell> = CellIterator(this)
+}
+
+private class CellIterator(private val cells: List<TerminalCell>) : Iterator<TerminalCell> {
+    private var index = 0L
+    public override fun next(): TerminalCell? {
+        if (index >= cells.size) return None
+        val result = cells[index]
+        index += 1L
+        return Some(result)
+    }
+}

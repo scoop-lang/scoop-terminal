@@ -50,10 +50,10 @@ public struct TerminalCell(
         get() = if (logicalWidth > width) "�" else if (dottedCircle) "◌" + text else text
 }
 
-/** A physical row, with identity retained when the row moves through scrollback. */
+/** A physical row; cells is an immutable indexed grid, including implicit trailing blanks. */
 public struct TerminalLine(
     val id: Long,
-    val cells: Array<TerminalCell>,
+    val cells: List<TerminalCell>,
     val softWrapped: Boolean,
     val contentVersion: Long = 0L,
     val logicalLineId: Long = 0L,

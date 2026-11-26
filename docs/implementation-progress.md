@@ -128,6 +128,8 @@ PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty �
 
 性能测量第一轮：新增 8 个仅手动执行的 release 场景与 `tools/benchmark_terminal.py`。基线 `d990f72`、M5 `89cdabb` 共 16 个独立测试进程完成；同一测量循环采集 feed／历史定位／reflow 耗时，以及运行时累计托管分配和实际峰值 RSS。结果和限制见 [性能测量](performance.md)。历史索引避免全表扫描，但短行空格存储和 reflow 分配明显偏高，作为 M6 优先优化项。基线没有正文 reflow，不将其 resize 耗时宣传为同功能对比；窗口和图形指标仍待后续测量。基线导出目录已自动删除，原始报告暂留供优化对照。
 
+紧凑行存储：尾部默认／样式 blank 按需表示，修改行扩展前缀、发布时冻结，并与历史／快照共享；后续编辑才复制。`TerminalLine.cells` 现在是不可变 `List<TerminalCell>`，保留物理列数和完整索引／迭代语义，需要数组时 `.toArray()`。新增 3 项回归覆盖全网格参考对照、跨代次读取、样式空白／宽尾修复和 6000 行短日志在 16 MiB 快照配额内保留；随后完整核心 184/184、UI 90/90 通过。相同基准中，10 万行历史峰值 RSS 从 6716.0 降至 213.8 MiB，240 列 ASCII 从 840.34 降至 567.12 ms；120 列 ASCII 累计分配上升，详细数据与限制一并保存在性能报告，继续优化 reflow 和空路径。没有新增外部依赖。
+
 ## 后续执行约束
 
 外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。

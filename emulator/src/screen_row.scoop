@@ -6,11 +6,11 @@ internal class ScreenRow(
     style: TerminalStyle,
     private val changes: ScreenChanges
 ) {
-    private var cells = MutableArray<TerminalCell>(columns) { TerminalCell(style = style) }
+    private var cells = CellBuffer(columns, style)
     private var wrapped = false
     private var version = 0L
     private var published: TerminalLine? = None
-    private var publishedCells: Array<TerminalCell>? = None
+    private var publishedCells: CellReading? = None
     private var retainedBytes = 0L
     private var identity = LogicalLine(id)
     private var offset = 0L
@@ -42,10 +42,8 @@ internal class ScreenRow(
             case Some(val content) -> content
 
             case None -> {
-                val content = cells.toArray()
-                retainedBytes = 64L + cells.size * 200L
-                for (cell in content)
-                    retainedBytes += cell.text.byteLength
+                val content = cells.snapshot()
+                retainedBytes = content.retainedBytes
                 publishedCells = Some(content)
                 content
             }
@@ -228,13 +226,13 @@ internal class ScreenRow(
         if (columns < cells.size) changes.tracking.crop(this, columns)
         val previous = cells
         if (columns < previous.size) {
-            for (index in columns..<previous.size)
+            for (index in columns..<previous.storedColumns)
                 changes.links.release(previous[index].linkId)
         }
-        val blank = TerminalCell(style = style)
-        cells = MutableArray<TerminalCell>(columns) { index ->
-            if (index < previous.size) previous[index] else blank
-        }
+        val resized = CellBuffer(columns, style)
+        for (index in 0L..<clamp(previous.size, 0L, columns))
+            resized[index] = previous[index]
+        cells = resized
         repair(style)
         used = cells.size
         trim()
@@ -290,7 +288,7 @@ internal class ScreenRow(
         if (released) return
         released = true
         changes.tracking.release(this, reason)
-        for (cell in cells)
-            changes.links.release(cell.linkId)
+        for (index in 0L..<cells.storedColumns)
+            changes.links.release(cells[index].linkId)
     }
 }

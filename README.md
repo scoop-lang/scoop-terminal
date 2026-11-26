@@ -14,6 +14,8 @@ Unicode ambiguous 字符默认占一列；创建核心／会话时可传 `ambigu
 
 OSC 52 默认允许写入、拒绝读取，文本上限为 1 MiB。可在创建核心或会话时传入 `TerminalClipboardPolicy(read = true)`，也可禁用写入；这不影响用户主动复制/粘贴。挂载的视图提供本机剪贴板及实际可用的 PRIMARY selection，未挂载时可通过 `start(clipboard = Some(adapter))` 注入 `TerminalClipboardAdapter`。异步读取的完成回调必须回到会话 owner，返回的 `Disposable` 用于取消；默认一秒期限、拒绝或服务不可用都会完成空回复。PTY 写队列为每个读取预留位置，后续回复和用户输入保持顺序。宿主服务错误可通过 `onHostServiceError` 观察。
 
+`TerminalLine.cells` 是不可变 `List<TerminalCell>`，索引与 `size` 仍描述完整物理网格，尾部空单元按需表示。需要具体数组的调用者使用 `.toArray()`；历史和快照共享冻结内容，编辑时复制受影响行。
+
 OSC 8 通过 `TerminalViewOptions(onLinkActivated = ..., onLinkHovered = ...)` 暴露宿主回调，默认使用 Ctrl+点击（macOS 为 Command+点击）激活。组件保留完整 URI，由宿主决定如何打开。
 
 OSC 133 的 A/B/C/D 标记生成命令块，可从 `reading.commands(start, count)`、`commandAt(anchor)`、`commandsIn(range)` 读取；`reading.text(range)` 读取原文。`TerminalViewOptions(commandSeparators = true)` 开启提示符行顶部的分割线，默认关闭。组件不修改 shell 配置，标记由 shell 或程序发送。

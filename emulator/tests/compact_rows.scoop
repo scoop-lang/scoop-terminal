@@ -1,0 +1,108 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class CompactRowTest {
+    @Test
+    fun sparseEditsAndFrozenReadingsMatchAFullGrid() {
+        for (style in [TerminalStyle(), TerminalStyle(background = TerminalColor.Indexed(4))]) {
+            val blank = TerminalCell(style = style)
+            val reference = MutableArray<TerminalCell>(257L) { blank }
+            val cells = CellBuffer(257L, style)
+            val snapshots = ArrayList<CellReading>()
+            val expected = ArrayList<Array<TerminalCell>>()
+            for (step in 0L..<200L) {
+                val column = step * 71L % 257L
+                val value = if (step % 3L == 0L) blank else TerminalCell(f"${step}", style = style)
+                cells[column] = value
+                reference[column] = value
+                if (step % 7L == 0L) {
+                    snapshots.add(cells.snapshot())
+                    expected.add(reference.toArray())
+                }
+                for (index in 0L..<257L)
+                    assertEquals(reference[index], cells[index])
+            }
+            for (column in 0L..<257L)
+                cells[column] = blank
+            assertEquals(0L, cells.snapshot().content.size)
+            assertEquals(257L, cells.snapshot().toArray().size)
+            for (sample in 0L..<snapshots.size) {
+                var index = 0L
+                for (cell in snapshots[sample]) {
+                    assertEquals(expected[sample][index], cell)
+                    index += 1L
+                }
+                assertEquals(257L, index)
+            }
+            assertFailsWith<IndexOutOfBoundsException> {
+                cells[-1L];
+                Unit
+            }
+            assertFailsWith<IndexOutOfBoundsException> {
+                cells.snapshot()[257L];
+                Unit
+            }
+        }
+    }
+
+    @Test
+    fun shortHistoryFitsSnapshotBudgetWithoutChangingPhysicalColumns() {
+        Terminal(240L, 4L, 6000L, snapshotLimits = TerminalSnapshotLimits(8L, 16L * 1024L * 1024L))
+            .use { terminal ->
+                val text = StringBuilder()
+                for (_ in 0L..<1000L)
+                    text.append("log\r\n")
+                val bytes = text.toString().toByteArray()
+                for (_ in 0L..<7L)
+                    terminal.feed(bytes)
+                assertEquals(6000L, terminal.historySize)
+                terminal
+                    .snapshot()
+                    .use { old ->
+                        val line = old.lines(0L, 1L)[0L]
+                        assertEquals(240L, line.cells.size)
+                        assertEquals(3L, line.usedColumns)
+                        assertTrue(line.retainedBytes < 2048L)
+                        assertEquals(TerminalCell(), line.cells[239L])
+                        val whole = TerminalRange(old.anchorAt(0L, 0L)!!, old.anchorAt(0L, 240L)!!)
+                        assertEquals(Some("log"), old.text(whole))
+                        assertEquals(240L, old.text(whole, trimPadding = false)!!.charLength)
+                        terminal.feed("new".toByteArray())
+                        terminal.resize(80L, 4L)
+                        assertEquals(240L, old.lines(0L, 1L)[0L].cells.size)
+                        assertEquals("l", old.lines(0L, 1L)[0L].cells[0L].text)
+                    }
+            }
+    }
+
+    @Test
+    fun styledPaddingAndWideTailsSurviveCopyOnWriteAndResize() {
+        Terminal(80L, 3L)
+            .use { terminal ->
+                terminal.feed("\u001b[44m\u001b[2J\u001b[1;70H中  ".toByteArray())
+                terminal
+                    .snapshot()
+                    .use { old ->
+                        val line = old.lines(0L, 1L)[0L]
+                        assertEquals(80L, line.usedColumns)
+                        assertEquals(0L, line.cells[70L].width)
+                        assertEquals(" ", line.cells[71L].text)
+                        assertEquals(TerminalColor.Indexed(4), line.cells[79L].style.background)
+                        terminal.feed("\u001b[0m\u001b[1;71H\u001b[K".toByteArray())
+                        assertEquals(69L, terminal.lines(0L, 1L)[0L].usedColumns)
+                        assertEquals("中", line.cells[69L].text)
+                        assertEquals(0L, line.cells[70L].width)
+                        terminal.feed("\u001b[?1049h\u001b[44m\u001b[2J\u001b[H中".toByteArray())
+                        terminal.resize(1L, 3L)
+                        assertEquals(1L, terminal.lines(0L, 1L)[0L].cells[0L].width)
+                        terminal.resize(100L, 3L)
+                        assertEquals(
+                            TerminalColor.Indexed(4),
+                            terminal.lines(0L, 1L)[0L].cells[99L].style.background
+                        )
+                    }
+            }
+    }
+}
