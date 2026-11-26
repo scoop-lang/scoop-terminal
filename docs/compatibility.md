@@ -67,7 +67,11 @@ macOS 已通过该项。真实 PTY 的异步 OSC 52／DSR／用户输入顺序�
 | Kitty feature query | Kitty 回显 `U=1`，组件省略未支持的 Unicode placeholders；键的顺序按协议可不同。Ghostty 1.4.0 没有识别该新 feature query，将本应忽略的 payload 当作压缩图片并返回错误 |
 | Sixel | 这两个固定版本均查询返回不支持，且跳过图片；组件开启 Sixel 后有对应模式与光标行为。display mode 的 CPR 偶然相同不能视为参考终端支持 Sixel |
 
-这里不以参考终端的多数行为覆盖规范。图片光标采用实际 Kitty 行为的取舍已写入设计；未支持的 feature query 键继续省略，标准允许的 OSC 终止符继续使用 ST。Sixel 的现代 xterm 实机对照随 Linux 验证执行。
+这里不以参考终端的多数行为覆盖规范。图片光标采用实际 Kitty 行为的取舍已写入设计；未支持的 feature query 键继续省略，标准允许的 OSC 终止符继续使用 ST。
+
+[Linux 录制](compatibility-reference-linux.json) 来自 xterm 407 的实际 PTY，运行于独立 Xvfb X11 显示，网格 80×24、实际单元 6×13 像素。显式设置 `decTerminalID=340`、`sixelScrolling=true`、`privateColorRegisters=true`。15 组输入包括七项 Sixel 检查：80／1070／8452 模式查询、scrolling／display／rightward 模式，以及结尾 `-` 在 8452 开关下的光标、右边界换行；这些回包全部与组件一致。原始输入与回包已保存，本次在 macOS 的同版本核心上按录制尺寸回放。
+
+xterm 的普通编辑、origin／边距及 OSC 8／133 穿插文字后的 CPR 也相同。其余差异为 OSC 4 使用 BEL 回复，以及该版本对 2026 查询返回不支持、忽略 Kitty graphics APC；没有将这些差异记作等价支持。该录制验证模式和光标位置，Sixel 像素、比例、透明度、共享调色板和擦除行为仍由核心／光栅用例验证。
 
 录制程序必须在参考终端自己的 PTY 中运行，例如：
 

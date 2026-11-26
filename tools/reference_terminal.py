@@ -42,6 +42,9 @@ def protocol_cases(cell_height: int) -> list[tuple[str, str]]:
         ("sixel-scrolling", ESC + "[?80l" + ESC + "[?8452l" + ESC + "[2;3H" + sixel),
         ("sixel-display", ESC + "[?80h" + ESC + "[2;3H" + sixel),
         ("sixel-rightward", ESC + "[?80l" + ESC + "[?8452h" + ESC + "[2;3H" + sixel),
+        ("sixel-trailing-newline", ESC + "[?80l" + ESC + "[?8452l" + ESC + "[2;3H" + sixel[:-2] + "-" + ST),
+        ("sixel-trailing-newline-rightward", ESC + "[?80l" + ESC + "[?8452h" + ESC + "[2;3H" + sixel[:-2] + "-" + ST),
+        ("sixel-rightward-wrap", ESC + "[?80l" + ESC + "[?8452h" + ESC + "[2;80H" + sixel),
     ]
 
 
