@@ -1,0 +1,190 @@
+package scoop.terminal.demo
+
+import scoop.asyncio.*
+import scoop.graphics.Point
+import scoop.platform.fs.Path
+import scoop.platform.process.*
+import scoop.platform.system.*
+import scoop.surface.FrameSubmission
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.time.Duration
+import scoop.ui.*
+import scoop.ui.terminal.*
+import scoop.window.*
+import scoop.window.asyncio.*
+
+@Test
+private class TerminalNativeDecorationTest {
+    @Test
+    fun selectionAndShellMarkersReachAcceptedFramesWithoutAnotherLayout() {
+        val probe = DecorationProbe()
+        UiHost { host, active, event -> probe.event(host, active, event) }
+            .use { host -> Application().runWithAsyncio(host) }
+        assertTrue(probe.finished)
+    }
+}
+
+private class DecorationProbe {
+    var finished = false
+    var measures = 0L
+    var frames = 0L
+    private var title = ""
+
+    fun event(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed ->
+                currentApplicationScope()
+                    .launch {
+                        try {
+                            this @DecorationProbe.exercise(host, active)
+                        } finally {
+                            active.requestExit()
+                        }
+                    }
+            else -> {}
+        }
+    }
+
+    private suspend fun exercise(host: UiHost, active: ActiveApplication) {
+        val window = active.createWindow(windowAttributes { size = LogicalSize(480.0, 300.0) })
+        val windows = operatingSystem == OperatingSystem.Windows
+        val child = command(Path.fromString(if (windows) "powershell.exe" else "/bin/sh")) {
+            if (windows) {
+                arg(OsString.fromString("-NoLogo"))
+                arg(OsString.fromString("-NoProfile"))
+                arg(OsString.fromString("-NonInteractive"))
+                arg(OsString.fromString("-Command"))
+                arg(OsString.fromString(decorationWindowsScript))
+            } else {
+                arg(OsString.fromString("-c"))
+                arg(OsString.fromString(decorationUnixScript))
+            }
+        }
+        val probe = this
+        val session = TerminalEmulatorSession
+            .start(child, searchPath = windows, onTitle = { value -> probe.title = value })
+        val controller = TerminalViewController(session)
+        var mounted: UiWindow? = None
+        try {
+            mounted = host
+                .attach(window, { scope -> DecorationRoot(session, controller, probe, scope) })
+            window.requestFocus()
+            awaitDecoration { title == "ready" && frames > 0L && session.reading.columns != 80L }
+            currentEventLoop().sleep(Duration.milliseconds(100L))
+            val baseline = measures
+            val initial = session.reading
+            val range = TerminalRange(initial.anchorAt(0L, 0L)!!, initial.anchorAt(0L, 5L)!!)
+            val first = frames
+            assertTrue(controller.select(range))
+            awaitDecoration { frames > first }
+            assertEquals(Some("$ old"), controller.copySelection())
+            assertEquals(baseline, measures, Some("selection should request only a frame"))
+            val selected = frames
+            controller.clearSelection()
+            awaitDecoration { frames > selected }
+            assertEquals(baseline, measures, Some("clearing selection should keep text layout"))
+            val prompt = TerminalRange(initial.anchorAt(1L, 0L)!!, initial.anchorAt(1L, 1L)!!)
+            val bounds = controller.rectsFor(prompt)!!.rects[0L]
+            val point = Point(bounds.x + 1.0, bounds.y + 1.0)
+            assertEquals(None, controller.commandAt(point)?.id)
+            session.send(TerminalInput.Text("mark\r"))
+            awaitDecoration {
+                title == "marked" && controller.commandAt(point)?.separator == Some(true)
+            }
+            assertEquals(initial.screenRevision, session.reading.screenRevision)
+            assertEquals(
+                baseline,
+                measures,
+                Some("OSC 133 should update metadata and decoration only")
+            )
+            session.send(TerminalInput.Text("exit\r"))
+            awaitDecoration {
+                when (session.state) {
+                    case Exited(val status) -> {
+                        assertEquals(ExitStatus.Exited(0), status);
+                        true
+                    }
+
+                    case Failed(val error) -> throw error
+                    case _ -> false
+                }
+            }
+            finished = true
+        } finally {
+            mounted?.close()
+            controller.close()
+            session.close()
+        }
+    }
+}
+
+private class DecorationRoot(
+    private val session: TerminalEmulatorSession,
+    private val controller: TerminalViewController,
+    private val probe: DecorationProbe,
+    scope: ComponentScope
+) : Component(scope) {
+    public override fun render(): View = element(
+        { child -> DecorationContainer(probe, child) },
+        [
+            terminalView(
+                session,
+                autoFocus = true,
+                controller = Some(controller),
+                options = TerminalViewOptions(commandSeparators = true)
+            )
+        ]
+    )
+}
+
+private class DecorationContainer(private val probe: DecorationProbe, scope: ComponentScope) :
+    Element<Unit>(scope) {
+    public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
+        Unit
+    > {
+        probe.measures += 1L
+        val child = context.measureChild(0L, constraints)
+        context.placeChild(0L, Point(0.0, 0.0))
+        return LayoutResult(child, Unit)
+    }
+    public override fun scene(context: SceneContext, layout: Unit) {
+        context.children()
+        context
+            .onFrameComplete { completion ->
+                if (completion.submission == FrameSubmission.Accepted) probe.frames += 1L
+            }
+    }
+}
+
+private suspend fun awaitDecoration(ready: () -> Boolean) {
+    var attempts = 0L
+    while (!ready()) {
+        assertTrue(attempts < 400L, Some("native decoration test timed out"))
+        attempts += 1L
+        currentEventLoop().sleep(Duration.milliseconds(20L))
+    }
+}
+
+private val decorationUnixScript = """
+stty -echo || exit 2
+printf '\033[?25l\033]133;A\007$ old\033]133;D;0\007\r\n\033]2;ready\007'
+IFS= read -r mark
+printf '\033]133;A\007\033]2;marked\007'
+IFS= read -r finish
+printf '\033]133;D;0\007'
+exit 0
+"""
+
+private val decorationWindowsScript = """
+function Wait-Enter {
+  do { $key = [Console]::ReadKey($true) } while ($key.Key -ne [ConsoleKey]::Enter)
+}
+$esc = [char]27
+[Console]::Write("${esc}[?25l${esc}]133;A`a`$ old${esc}]133;D;0`a`r`n${esc}]2;ready`a")
+Wait-Enter
+[Console]::Write("${esc}]133;A`a${esc}]2;marked`a")
+Wait-Enter
+[Console]::Write("${esc}]133;D;0`a")
+exit 0
+"""

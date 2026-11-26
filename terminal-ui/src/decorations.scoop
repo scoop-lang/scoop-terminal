@@ -1,0 +1,177 @@
+package scoop.ui.terminal
+
+import scoop.collections.HashMap
+import scoop.graphics.Rect
+import scoop.terminal.emulator.*
+import scoop.window.Utf8Selection
+
+internal fun terminalSelectionRanges(
+    reading: TerminalReading,
+    selection: TerminalSelection?
+): Array<SelectionRange> {
+    val selected = selection ?: return []
+    val result = ArrayList<SelectionRange>()
+    for (range in selected.ranges) {
+        val start = reading.resolve(range.start) ?: continue
+        val end = reading.resolve(range.end) ?: continue
+        result.add(SelectionRange(start.row, start.column, end.row, end.column, selected.reversed))
+    }
+    return result.toArray()
+}
+
+internal fun terminalSelectionRects(
+    geometry: GridGeometry,
+    ranges: Array<SelectionRange>
+): Array<Rect> {
+    val result = ArrayList<Rect>()
+    for (range in ranges) {
+        val first = clamp(range.startRow - geometry.first, 0L, geometry.rows.size)
+        val last = clamp(range.endRow - geometry.first + 1L, first, geometry.rows.size)
+        for (row in first..<last) {
+            val span = range.onRow(geometry.first + row, geometry.rows[row]) ?: continue
+            val end = clamp(span.end, 0L, geometry.columns)
+            if (end > span.start) result.add(geometry.rect(row, span.start, end - span.start))
+        }
+    }
+    return result.toArray()
+}
+
+/** The text is built once per layout; selection updates only calculate UTF-8 offsets. */
+internal class TerminalTextProjection(
+    private val first: Long,
+    private val lines: Array<TerminalLine>
+) {
+    private val offsets = MutableArray<Long>(lines.size + 1L) { 0L }
+    private val text = build()
+
+    private fun build(): String {
+        val result = StringBuilder()
+        var bytes = 0L
+        for (row in 0L..<lines.size) {
+            offsets[row] = bytes
+            val line = lines[row]
+            val end = if (line.softWrapped) line.usedColumns else line.cells.size
+            for (column in 0L..<end) {
+                val cell = line.cells[column]
+                if (cell.width == 0L) continue
+                val value = if (cell.text == "") " " else cell.text
+                result.append(value)
+                bytes += value.byteLength
+            }
+            if (row + 1L < lines.size && !line.softWrapped) {
+                result.append('\n')
+                bytes += 1L
+            }
+        }
+        offsets[lines.size] = bytes
+        return result.toString()
+    }
+
+    private fun offset(row: Long, column: Long): Long {
+        val line = lines[row]
+        val limit = if (line.softWrapped) line.usedColumns else line.cells.size
+        var bytes = offsets[row]
+        for (index in 0L..<clamp(column, 0L, limit)) {
+            val cell = line.cells[index]
+            if (cell.width != 0L) bytes += if (cell.text == "") 1L else cell.text.byteLength
+        }
+        return bytes
+    }
+
+    fun read(selection: TerminalSelection?, ranges: Array<SelectionRange>): VisibleText {
+        if (selection?.mode != Some(TerminalSelectionMode.Linear) || ranges.size != 1L)
+            return VisibleText(text, None)
+        val range = ranges[0L]
+        var left: Long? = None
+        var right: Long? = None
+        for (row in 0L..<lines.size) {
+            val span = range.onRow(first + row, lines[row]) ?: continue
+            if (left == None) left = Some(offset(row, span.start))
+            right = Some(offset(row, span.end))
+        }
+        val selected = if (left == None || right == None)
+            None
+        else if (range.reversed)
+            Some(Utf8Selection(right!!, left!!))
+        else
+            Some(Utf8Selection(left!!, right!!))
+        return VisibleText(text, selected)
+    }
+}
+
+internal struct TerminalSelectionPaint(val rects: Array<Rect>, val text: VisibleText)
+
+/** Decoration state shares a fixed text layout, including while a newer grid is pending. */
+internal class TerminalSelectionDecorations(private val geometry: GridGeometry) {
+    private val text = TerminalTextProjection(geometry.first, geometry.rows)
+    private var selected: TerminalSelection? = None
+    private var cached: TerminalSelectionPaint? = None
+
+    fun update(selection: TerminalSelection?): TerminalSelectionPaint {
+        when (cached) {
+            case Some(val value) -> if (sameSelection(selected, selection)) return value
+            case None -> {}
+        }
+        val ranges = terminalSelectionRanges(geometry.reading, selection)
+        val value = TerminalSelectionPaint(
+            terminalSelectionRects(geometry, ranges),
+            text.read(selection, ranges)
+        )
+        selected = selection
+        cached = Some(value)
+        return value
+    }
+}
+
+/** Index only bounded command metadata, then visit prompt anchors belonging to visible logical lines. */
+internal class TerminalCommandSeparators {
+    private val prompts = HashMap<Long, ArrayList<TerminalAnchor>>()
+    private var epoch = -1L
+    private var version = -1L
+    private var builds = 0L
+    val buildCount: Long get() = builds
+
+    fun clear() {
+        prompts.clear()
+        epoch = -1L
+        version = -1L
+    }
+
+    private fun update(reading: TerminalReading) {
+        if (epoch == reading.bufferEpoch && version == reading.commandVersion) return
+        clear()
+        epoch = reading.bufferEpoch
+        version = reading.commandVersion
+        builds += 1L
+        for (start in 0L..<reading.commandCount) {
+            val command = reading.commands(start, 1L)[0L]
+            if (!command.separator) continue
+            val prompt = command.prompt ?: continue
+            val group = prompts[prompt.logicalLineId] ?: ArrayList<TerminalAnchor>()
+            group.add(prompt)
+            prompts[prompt.logicalLineId] = group
+        }
+    }
+
+    fun rows(geometry: GridGeometry): Array<Double> {
+        val reading = geometry.reading
+        if (reading.alternateScreen) return []
+        update(reading)
+        val visited = HashMap<Long, Boolean>()
+        val occupied = MutableArray<Boolean>(geometry.rows.size) { false }
+        for (line in geometry.rows) {
+            if (visited[line.logicalLineId] != None) continue
+            visited[line.logicalLineId] = true
+            val group = prompts[line.logicalLineId] ?: continue
+            for (anchor in group) {
+                val position = reading.resolve(anchor) ?: continue
+                val row = position.row - geometry.first
+                if (row >= 0L && row < occupied.size) occupied[row] = true
+            }
+        }
+        val result = ArrayList<Double>()
+        for (row in 0L..<occupied.size)
+            if (occupied[row]) result.add(row.toDouble() * geometry.metrics.height)
+        return result.toArray()
+    }
+}

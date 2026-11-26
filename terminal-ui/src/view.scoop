@@ -32,7 +32,9 @@ private struct TerminalViewProps(
     val controller: TerminalViewController?
 )
 
-private class TerminalViewLayout(val frame: TerminalFrame, val text: VisibleText)
+private class TerminalViewLayout(val frame: TerminalFrame) {
+    val decorations = TerminalSelectionDecorations(frame.geometry)
+}
 
 private class TerminalViewElement(
     private val props: Props<TerminalViewProps>,
@@ -50,6 +52,7 @@ private class TerminalViewElement(
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
     private var rowCache: TerminalRowCache? = None
+    private val commandSeparators = TerminalCommandSeparators()
     private var imageCache: TerminalImageCache? = None
     private var fontSubscription: Closeable? = None
     private var observedScreen = session.reading.screenRevision
@@ -169,6 +172,7 @@ private class TerminalViewElement(
             if (ownsController) controller.close()
             accepted = None
             rowCache?.clear()
+            commandSeparators.clear()
             imageCache?.clear()
             selecting = false
             reported = TerminalMouseButton.NonePressed
@@ -200,6 +204,7 @@ private class TerminalViewElement(
         fontSubscription = None
         rowCache?.close()
         rowCache = None
+        commandSeparators.clear()
         glyphCache?.release()
         glyphCache = None
         imageCache?.close()
@@ -223,9 +228,9 @@ private class TerminalViewElement(
         updateBlinkSchedules(cursor)
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
-            if (colorsChanged || commandsChanged || imagesChanged)
+            if (colorsChanged || imagesChanged)
                 refresh()
-            else if (moved && viewport.atBottom) scope.requestFrame()
+            else if (commandsChanged || (moved && viewport.atBottom)) scope.requestFrame()
             return
         }
         observedScreen = screen
@@ -302,6 +307,11 @@ private class TerminalViewElement(
         area.setCaret(None, Some(composition.revision))
         // The UI root coalesces layout requests until its next eligible frame.
         scope.requestLayout()
+    }
+
+    private fun refreshSelection() {
+        controller.synchronize()
+        scope.requestFrame()
     }
 
     private fun updateSemantics(visible: VisibleText) {
@@ -383,12 +393,12 @@ private class TerminalViewElement(
         controller.layoutStarted(paintRevision)
         val frame = TerminalFrame(
             geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
-            props.value.options.commandSeparators, Some(images), props.value.options.onImageError,
+            false, Some(images), props.value.options.onImageError,
             Some(rows(glyphs))
         )
         try {
-            frame.shape(viewport.ranges(), composition.text)
-            val layout = TerminalViewLayout(frame, viewport.visibleText())
+            frame.shape([], composition.text)
+            val layout = TerminalViewLayout(frame)
             return LayoutResult(LayoutMetrics(size), layout, { frame.close() })
         } catch (error: Throwable) {
             frame.close()
@@ -400,8 +410,8 @@ private class TerminalViewElement(
         val measured = layout.frame
         val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
         val owner = session
-        val geometry = measured.geometry
         val terminal = owner.reading
+        val geometry = measured.geometry.withCommittedMetadata(terminal)
         // The live cursor belongs to this grid only until pending screen output changes it.
         val cursor = if (geometry.screenRevision == terminal.screenRevision)
             terminal.cursor
@@ -433,6 +443,14 @@ private class TerminalViewElement(
                 bounds,
                 screenPaintRevision
             ) { paint -> measured.drawScreen(paint.canvas, textVisible, Some(cursor)) }
+        val selection = layout.decorations.update(viewport.selectionIn(geometry.reading))
+        if (selection.rects.size > 0L)
+            context.draw { paint -> measured.drawSelection(paint.canvas, selection.rects) }
+        if (props.value.options.commandSeparators) {
+            val separators = commandSeparators.rows(geometry)
+            if (separators.size > 0L)
+                context.draw { paint -> measured.drawCommandSeparators(paint.canvas, separators) }
+        }
         val link = hovered
         val highlights = controller.visibleHighlights(geometry)
         if (highlights.size > 0L)
@@ -467,7 +485,7 @@ private class TerminalViewElement(
                     FrameSubmission.Accepted
                 ) {
                     accepted = Some(geometry)
-                    updateSemantics(layout.text)
+                    updateSemantics(selection.text)
                     controller.frameAccepted(geometry, measured.paintRevision)
                     updateBlinkSchedules(cursor, arm = true)
                     updateHover(geometry)
@@ -699,7 +717,7 @@ private class TerminalViewElement(
                                 TerminalSelectionMode.Linear,
                             props.value.options.additionalWordCharacters, Some(frame.reading)
                         )
-                refresh()
+                refreshSelection()
                 return true
             }
         } else {
@@ -733,7 +751,7 @@ private class TerminalViewElement(
                     )
                 viewport.endDrag()
                 stopSelectionScroll()
-                refresh()
+                refreshSelection()
                 return true
             }
         }
@@ -763,7 +781,7 @@ private class TerminalViewElement(
                     Some(frame.reading)
                 )
             updateSelectionScroll(frame)
-            refresh()
+            refreshSelection()
             return true
         }
         if (reportMouse(frame, modifiers)) {

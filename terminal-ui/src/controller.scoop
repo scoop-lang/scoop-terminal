@@ -195,8 +195,10 @@ public class TerminalViewController internal constructor(
                 ?.invoke(
                     if (update.resetInteraction)
                         TerminalViewInvalidation.Reset
-                    else
+                    else if (moved)
                         TerminalViewInvalidation.Layout
+                    else
+                        TerminalViewInvalidation.Frame
                 )
         if (moved) onChanged(TerminalViewChange.Viewport)
         if (selected) onChanged(TerminalViewChange.Selection)

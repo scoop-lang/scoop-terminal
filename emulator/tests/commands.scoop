@@ -5,6 +5,32 @@ import scoop.test.*
 @Test
 private class ShellCommandTest {
     @Test
+    fun migratingBoundaryHandlesAdvancesCommandVersionAndPreservesOldReadings() {
+        Terminal(16L, 3L)
+            .use { terminal ->
+                terminal
+                    .feed(
+                        "\u001b]133;A\u0007$ old\u001b]133;D;0\u0007\r\n\u001b]133;A\u0007$ next"
+                            .toByteArray()
+                    )
+                val before = terminal.reading
+                val block = before.commands(1L, 1L)[0L]
+                assertEquals(Some(TerminalPosition(1L, 0L)), before.resolve(block.prompt!!))
+                terminal.feed("\u001b[2;1H\u001b[@".toByteArray())
+                val after = terminal.reading
+                assertTrue(after.commandVersion > before.commandVersion)
+                assertEquals(
+                    Some(TerminalPosition(1L, 1L)),
+                    after.resolve(after.command(block.id)!!.prompt!!)
+                )
+                assertEquals(
+                    Some(TerminalPosition(1L, 0L)),
+                    before.resolve(before.command(block.id)!!.prompt!!)
+                )
+            }
+    }
+
+    @Test
     fun erasedPromptRedrawKeepsItsIdentityAcrossFeedBoundaries() {
         val bytes = "\r\u001b[2K\u001b]133;A\u0007$ ".toByteArray()
         for (split in 0L..bytes.size) {

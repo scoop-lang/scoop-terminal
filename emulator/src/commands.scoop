@@ -417,6 +417,8 @@ internal class TerminalCommands(
         for (key in dirty.keys)
             pending.add(dirty[key]!!)
         dirty.clear()
+        // Boundary migration changes command positions even when the record keeps its handle IDs.
+        if (pending.size > 0L) version += 1L
         for (entry in pending) {
             var retained = false
             for (point in entry.points) {

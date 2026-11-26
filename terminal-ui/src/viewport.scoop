@@ -236,16 +236,22 @@ internal class TerminalViewport(
 
     val selection: TerminalSelection?
         get() {
-            val state = buffer()
-            if (state.ranges.size == 0L) return None
-            val ranges = ArrayList<TerminalRange>()
-            for (handle in state.ranges)
-                when (handle.state(terminal)) {
-                    case Available(val range) -> ranges.add(range)
-                    case Invalidated(_) -> return None
-                }
-            return Some(TerminalSelection(ranges.toArray(), state.mode, state.unit, state.reversed))
+            buffer()
+            return selectionIn(terminal)
         }
+
+    /** Resolve the handles in the displayed generation, never in an unrelated live grid. */
+    fun selectionIn(reading: TerminalReading): TerminalSelection? {
+        val state = if (reading.alternateScreen) alternate else main
+        if (state.epoch != reading.bufferEpoch || state.ranges.size == 0L) return None
+        val ranges = ArrayList<TerminalRange>()
+        for (handle in state.ranges)
+            when (handle.state(reading)) {
+                case Available(val range) -> ranges.add(range)
+                case Invalidated(_) -> return None
+            }
+        return Some(TerminalSelection(ranges.toArray(), state.mode, state.unit, state.reversed))
+    }
 
     fun select(
         location: CellLocation,
@@ -435,18 +441,7 @@ internal class TerminalViewport(
     }
 
     fun ranges(): Array<SelectionRange> {
-        val reading = terminal
-        val selected = selection ?: return []
-        val ranges = ArrayList<SelectionRange>()
-        for (range in selected.ranges) {
-            val start = reading.resolve(range.start) ?: continue
-            val end = reading.resolve(range.end) ?: continue
-            ranges
-                .add(
-                    SelectionRange(start.row, start.column, end.row, end.column, selected.reversed)
-                )
-        }
-        return ranges.toArray()
+        return terminalSelectionRanges(terminal, selection)
     }
 
     fun copy(options: TerminalCopyOptions = TerminalCopyOptions()): String? {
@@ -461,50 +456,9 @@ internal class TerminalViewport(
     }
 
     fun visibleText(): VisibleText {
-        val start = first
-        val lines = terminal.lines(start, terminal.rows)
         val selected = selection
-        val ranges = ranges()
-        val selection = if (selected?.mode ==
-            Some(TerminalSelectionMode.Linear) &&
-            ranges.size ==
-            1L
-        )
-            Some(ranges[0L])
-        else
-            None
-        val text = StringBuilder()
-        var bytes = 0L
-        var left: Long? = None
-        var right: Long? = None
-        for ((index, line) in lines.withIndex()) {
-            val span = when (selection) {
-                case Some(val value) -> value.onRow(start + index, line)
-                case None -> None
-            }
-            when (span) {
-                case Some(val span) -> {
-                    bytes += appendCells(text, line, 0L, span.start)
-                    if (left == None) left = Some(bytes)
-                    bytes += appendCells(text, line, span.start, span.end)
-                    right = Some(bytes)
-                    bytes += appendCells(text, line, span.end, line.cells.size)
-                }
-
-                case None -> bytes += appendCells(text, line, 0L, line.cells.size)
-            }
-            if (index + 1L < lines.size && !line.softWrapped) {
-                text.append('\n');
-                bytes += 1L
-            }
-        }
-        val offsets: Utf8Selection? = if (left == None || right == None)
-            None
-        else if (selection!!.reversed)
-            Some(Utf8Selection(right!!, left!!))
-        else
-            Some(Utf8Selection(left!!, right!!))
-        return VisibleText(text.toString(), offsets)
+        return TerminalTextProjection(first, terminal.lines(first, terminal.rows))
+            .read(selected, terminalSelectionRanges(terminal, selected))
     }
 
     public override fun close() {
@@ -512,20 +466,6 @@ internal class TerminalViewport(
         alternate.close();
         endDrag()
     }
-}
-
-private fun appendCells(text: StringBuilder, line: TerminalLine, start: Long, end: Long): Long {
-    val limit = if (line.softWrapped && end > line.usedColumns) line.usedColumns else end
-    var bytes = 0L
-    for (column in start..<limit) {
-        val cell = line.cells[column]
-        if (cell.width != 0L) {
-            val value = if (cell.text == "") " " else cell.text
-            text.append(value);
-            bytes += value.byteLength
-        }
-    }
-    return bytes
 }
 
 internal fun sameSelection(left: TerminalSelection?, right: TerminalSelection?): Boolean {

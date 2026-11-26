@@ -1,0 +1,170 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.window.Utf8Selection
+
+@Test
+private class TerminalDecorationTest {
+    @Test
+    fun selectionReusesTextAndPaintsWithoutShapingIncludingWideAndRectangularRanges() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance().{selection: Color(1.0, 0.0, 0.0)}
+                Terminal(8L, 3L, colors = appearance.colorTheme())
+                    .use { terminal ->
+                        terminal.feed("\u001b[8ma中bc\r\n12xyzz".toByteArray())
+                        val viewport = testViewport(terminal)
+                        val glyphs = TerminalGlyphCache(fonts, appearance)
+                        try {
+                            val geometry = testGrid(terminal.reading, 0L)
+                            val decorations = TerminalSelectionDecorations(geometry)
+                            val plain = decorations.update(None)
+                            val source = geometry.reading
+                            viewport
+                                .select(
+                                    CellLocation(source.lines(0L, 1L)[0L].id, 2L),
+                                    mode = TerminalSelectionMode.Rectangular
+                                )
+                            viewport.extend(CellLocation(source.lines(1L, 1L)[0L].id, 4L))
+                            val rectangle = decorations.update(viewport.selectionIn(source))
+                            assertEquals(2L, rectangle.rects.size)
+                            assertEquals(Rect(10.0, 0.0, 40.0, 16.0), rectangle.rects[0L])
+                            assertEquals(Rect(20.0, 16.0, 30.0, 16.0), rectangle.rects[1L])
+                            assertEquals(None, rectangle.text.selection)
+                            assertEquals(plain.text.text, rectangle.text.text)
+                            assertTrue(
+                                rectangle.rects ===
+                                    decorations.update(viewport.selectionIn(source)).rects
+                            )
+                            TerminalFrame(geometry, 1L, source.cursor, 0L, appearance, glyphs)
+                                .use { frame ->
+                                    frame.shape([], "")
+                                    val shaped = glyphs.shapeCount
+                                    RasterSurface(80, 48)
+                                        .use { surface ->
+                                            surface
+                                                .draw { canvas ->
+                                                    frame.drawScreen(canvas);
+                                                    frame.drawSelection(canvas, rectangle.rects)
+                                                }
+                                            val pixels = surface.readPixels()
+                                            assertImageTestPixel(pixels, 80L, 15L, 8L, 255, 0, 0)
+                                            assertImageTestPixel(pixels, 80L, 15L, 24L, 0, 0, 0)
+                                            val cleared = decorations.update(None)
+                                            surface
+                                                .draw { canvas ->
+                                                    frame.drawScreen(canvas);
+                                                    frame.drawSelection(canvas, cleared.rects)
+                                                }
+                                            assertImageTestPixel(
+                                                surface.readPixels(),
+                                                80L,
+                                                15L,
+                                                8L,
+                                                0,
+                                                0,
+                                                0
+                                            )
+                                            assertEquals(shaped, glyphs.shapeCount)
+                                        }
+                                }
+                            viewport.select(CellLocation(source.lines(0L, 1L)[0L].id, 2L))
+                            assertEquals(
+                                Some(Utf8Selection(1L, 4L)),
+                                decorations.update(viewport.selectionIn(source)).text.selection
+                            )
+                        } finally {
+                            viewport.close()
+                            glyphs.release()
+                        }
+                    }
+            }
+    }
+
+    @Test
+    fun pendingReflowAndEditsNeverApplyLiveCoordinatesToTheOldGrid() {
+        Terminal(12L, 3L)
+            .use { terminal ->
+                terminal.feed("abcdefghij".toByteArray())
+                val viewport = testViewport(terminal)
+                try {
+                    viewport.select(CellLocation(terminal.lines(0L, 1L)[0L].id, 6L))
+                    terminal.feed("\u001b[1;1H".toByteArray())
+                    val displayed = terminal.reading
+                    val oldGrid = testGrid(displayed, 0L)
+                    val old = TerminalSelectionDecorations(oldGrid)
+                    assertEquals(
+                        Rect(60.0, 0.0, 10.0, 16.0),
+                        old.update(viewport.selectionIn(displayed)).rects[0L]
+                    )
+                    terminal.resize(4L, 3L)
+                    viewport.update()
+                    assertEquals(
+                        displayed.screenRevision,
+                        oldGrid.withCommittedMetadata(terminal.reading).reading.screenRevision
+                    )
+                    assertEquals(
+                        Rect(60.0, 0.0, 10.0, 16.0),
+                        old.update(viewport.selectionIn(displayed)).rects[0L]
+                    )
+                    val newGrid = testGrid(terminal.reading, 0L)
+                    assertEquals(
+                        Rect(20.0, 16.0, 10.0, 16.0),
+                        TerminalSelectionDecorations(newGrid).update(viewport.selection).rects[0L]
+                    )
+                    terminal.feed("\u001b[2;1H\u001b[@".toByteArray())
+                    viewport.update()
+                    assertEquals(
+                        Rect(60.0, 0.0, 10.0, 16.0),
+                        old.update(viewport.selectionIn(displayed)).rects[0L]
+                    )
+                    assertEquals(Some("g"), viewport.copy())
+                    viewport.clearSelection()
+                    assertEquals(0L, old.update(viewport.selectionIn(displayed)).rects.size)
+                } finally {
+                    viewport.close()
+                }
+            }
+    }
+
+    @Test
+    fun metadataOnlyMarkersAndFrozenOutputReuseTheGridAndIndexVisiblePromptLines() {
+        Terminal(8L, 3L)
+            .use { terminal ->
+                terminal.feed("\u001b]133;A\u0007$ old\u001b]133;D;0\u0007\r\n".toByteArray())
+                val measured = testGrid(terminal.reading, 0L)
+                val separators = TerminalCommandSeparators()
+                assertEquals(0L, separators.rows(measured).size)
+                val builds = separators.buildCount
+                terminal.feed("\u001b]133;A\u0007".toByteArray())
+                assertEquals(measured.screenRevision, terminal.reading.screenRevision)
+                val updated = measured.withCommittedMetadata(terminal.reading)
+                assertTrue(updated.rows === measured.rows)
+                assertEquals(1L, separators.rows(updated).size)
+                assertEquals(16.0, separators.rows(updated)[0L])
+                assertEquals(builds + 1L, separators.buildCount)
+                terminal.feed("\u001b[?2026h\r\n\u001b]133;A\u0007".toByteArray())
+                assertEquals(
+                    1L,
+                    separators.rows(measured.withCommittedMetadata(terminal.reading)).size
+                )
+                assertEquals(builds + 1L, separators.buildCount)
+                terminal.releaseSynchronizedOutput()
+                val current = testGrid(terminal.reading, 0L)
+                assertEquals(2L, separators.rows(current).size)
+                assertEquals(32.0, separators.rows(current)[1L])
+                terminal.feed("\u001b[2;1H\u001b[M".toByteArray())
+                val moved = testGrid(terminal.reading, 0L)
+                assertEquals(1L, separators.rows(moved).size)
+                assertEquals(16.0, separators.rows(moved)[0L])
+                val rebuilt = separators.buildCount
+                separators
+                    .rows(moved.{first: 1L, rows: terminal.reading.lines(1L, 2L), atBottom: false})
+                assertEquals(rebuilt, separators.buildCount)
+                terminal.feed("\u001b[?1049h\u001b]133;A\u0007".toByteArray())
+                assertEquals(0L, separators.rows(testGrid(terminal.reading, 0L)).size)
+            }
+    }
+}

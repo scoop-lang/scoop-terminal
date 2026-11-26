@@ -16,6 +16,19 @@ internal struct GridGeometry(
     val reading: TerminalReading,
     val scaleFactor: Double = 1.0
 ) {
+    fun withCommittedMetadata(current: TerminalReading): GridGeometry = if (screenRevision ==
+        current.screenRevision &&
+        reading.bufferEpoch ==
+        current.bufferEpoch &&
+        reading.columns ==
+        current.columns &&
+        reading.rows ==
+        current.rows
+    )
+        this.{reading: current}
+    else
+        this
+
     fun hit(point: Point): (Long, Long)? {
         if (point.x < 0.0 || point.y < 0.0 || point.x >= size.width || point.y >= size.height)
             return None
@@ -79,8 +92,8 @@ internal class TerminalFrame(
     private val background = colors.background.color()
     private val cursorColor = colors.cursor.color()
     private val rows = ArrayList<TerminalRowLease>()
-    private val selection = ArrayList<Rect>()
-    private val separators = ArrayList<Double>()
+    private var selection: Array<Rect> = []
+    private var separators: Array<Double> = []
     private val images = TerminalImagePaint()
     private var preedit: TextLayout? = None
     private var blinkingText = false
@@ -96,7 +109,6 @@ internal class TerminalFrame(
             case Some(val cache) -> images.prepare(geometry, cache, onImageError)
             case None -> {}
         }
-        var index = 0L
         for (line in geometry.rows) {
             val lease = when (rowCache) {
                 case Some(val cache) ->
@@ -112,33 +124,10 @@ internal class TerminalFrame(
             }
             rows.add(lease)
             blinkingText = blinkingText || lease.layout.hasBlink
-            for (range in ranges) {
-                when (val selected = range.onRow(geometry.first + index, line)) {
-                    case Some(val span) -> {
-                        val end = clamp(span.end, 0L, geometry.columns)
-                        if (end > span.start)
-                            selection.add(geometry.rect(index, span.start, end - span.start))
-                    }
-
-                    case None -> {}
-                }
-            }
-            index += 1L
         }
+        selection = terminalSelectionRects(geometry, ranges)
         if (composition != "") preedit = Some(glyphs.shapePreedit(composition, foreground))
-        if (commandSeparators && !geometry.reading.alternateScreen) {
-            val occupied = MutableArray<Boolean>(geometry.rows.size) { false }
-            for (index in 0L..<geometry.reading.commandCount) {
-                val block = geometry.reading.commands(index, 1L)[0L]
-                if (!block.separator) continue
-                val anchor = block.prompt ?: continue
-                val position = geometry.reading.resolve(anchor) ?: continue
-                val row = position.row - geometry.first
-                if (row >= 0L && row < occupied.size) occupied[row] = true
-            }
-            for (row in 0L..<occupied.size)
-                if (occupied[row]) separators.add(row.toDouble() * geometry.metrics.height)
-        }
+        if (commandSeparators) separators = TerminalCommandSeparators().rows(geometry)
     }
 
     private val clip: Rect get() = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
@@ -195,10 +184,26 @@ internal class TerminalFrame(
             canvas.restore()
         }
         images.draw(canvas, 2)
-        for (highlight in selection)
-            canvas.drawRect(highlight, Paint(appearance.selection))
+        canvas.restore()
+        drawSelection(canvas, selection)
+        drawCommandSeparators(canvas, separators)
+    }
+
+    fun drawSelection(canvas: Canvas, rectangles: Array<Rect>) {
+        if (rectangles.size == 0L) return
+        canvas.save()
+        canvas.clipRect(clip)
+        for (rectangle in rectangles)
+            canvas.drawRect(rectangle, Paint(appearance.selection))
+        canvas.restore()
+    }
+
+    fun drawCommandSeparators(canvas: Canvas, rows: Array<Double>) {
+        if (rows.size == 0L) return
+        canvas.save()
+        canvas.clipRect(clip)
         val separator = Paint(Color(foreground.red, foreground.green, foreground.blue, 0.2))
-        for (y in separators)
+        for (y in rows)
             canvas.drawRect(Rect(0.0, y, geometry.size.width, 1.0), separator)
         canvas.restore()
     }
