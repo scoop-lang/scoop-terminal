@@ -1,0 +1,31 @@
+schema = 1
+
+[cone]
+group = "scoop.tests"
+name = "terminal-gpu-native"
+version = "0.1.0"
+kind = "library"
+
+[[sources]]
+path = "src"
+
+[dependencies]
+"scoop:scoop.core" = "0.1.0"
+"scoop:scoop.std" = "0.1.0"
+
+[native]
+objc_flags = ["-Wall", "-Wextra", "-Werror"]
+
+[[native.sources]]
+path = "native/metal.m"
+when = { os = "darwin" }
+
+[[native.libraries]]
+name = "Foundation"
+kind = "framework"
+when = { os = "darwin" }
+
+[[native.libraries]]
+name = "Metal"
+kind = "framework"
+when = { os = "darwin" }

@@ -26,6 +26,11 @@ path = "src"
 
 [test-dependencies]
 "scoop:scoop.test" = "0.1.0"
+"scoop.tests:terminal-gpu-native" = { version = "0.1.0", path = "test-native", when = { os = "darwin" } }
 
 [[test.sources]]
 path = "tests"
+
+[[test.sources]]
+path = "test-macos"
+when = { os = "darwin" }

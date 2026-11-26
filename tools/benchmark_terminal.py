@@ -17,12 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = ("ascii120", "ascii240", "sgr120", "sgr240", "unicode120", "unicode240", "history100k", "reflow10k")
 VIEWS = ("paint120x1", "paint120x2", "paint240x1", "paint240x2")
 RESOURCES = ("historySearch100k", "reflowDecorations", "graphicsPng4k", "graphicsSixel4k", "graphicsPlacements")
+METAL = ("metalPng4k", "metalSixel4k", "metalPlacements")
 DESKTOP = ("windowFrames",)
 
 
 def run_case(root: Path, args, label: str, case: str) -> dict:
     environment = dict(os.environ, SCOOP_GC_STATS="1")
-    cone = "demo" if case in DESKTOP else "terminal-ui" if case in VIEWS + RESOURCES else "emulator"
+    cone = "demo" if case in DESKTOP else "terminal-ui" if case in VIEWS + RESOURCES + METAL else "emulator"
     command = [str(args.scoop), "--sysroot", str(args.sysroot), "test", "--release",
                str(root / cone), "--ignored", "--nocapture", "--filter", case]
     process = subprocess.run(command, cwd=root, env=environment, text=True,
@@ -112,7 +113,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="raw JSON report outside the repository")
     parser.add_argument("--label", default="working")
     parser.add_argument("--baseline", choices=("d990f72",), help="fixed design baseline with documented API-only adapters")
-    parser.add_argument("--cases", nargs="+", choices=CORE + VIEWS + RESOURCES + DESKTOP, default=list(CORE + VIEWS))
+    parser.add_argument("--cases", nargs="+", choices=CORE + VIEWS + RESOURCES + METAL + DESKTOP, default=list(CORE + VIEWS))
     parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
     # The installed launcher selects its command by executable name; preserve its symlink path.
@@ -121,8 +122,10 @@ def main() -> None:
     args.output = args.output.expanduser().resolve()
     if args.repetitions < 1:
         parser.error("repetitions must be positive")
-    if args.baseline and any(case in RESOURCES for case in args.cases):
+    if args.baseline and any(case in RESOURCES + METAL for case in args.cases):
         parser.error("resource cases require capabilities absent from the fixed baseline; run them without --baseline")
+    if platform.system() != "Darwin" and any(case in METAL for case in args.cases):
+        parser.error("Metal allocation cases require macOS")
     report = {"timestamp": datetime.now(timezone.utc).isoformat(), "machine": platform.machine(),
               "platform": platform.platform(), "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
               "working_tree_changes": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)),

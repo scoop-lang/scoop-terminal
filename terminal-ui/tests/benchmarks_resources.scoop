@@ -230,7 +230,7 @@ private class TerminalResourceBenchmark {
     }
 }
 
-private class ResourceDecoder : TerminalImageDecoder {
+internal class ResourceDecoder : TerminalImageDecoder {
     private val decoder = TerminalCpuImageDecoder()
     var calls = 0L
     public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long = decoder
@@ -238,6 +238,45 @@ private class ResourceDecoder : TerminalImageDecoder {
     public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
         calls += 1L
         return decoder.decodePng(encoded, size)
+    }
+}
+
+internal fun resourceFeedGraphics(terminal: Terminal, kind: String) {
+    if (kind == "sixel") {
+        terminal.feed("\u001b[?80h".toByteArray())
+        val input = StringBuilder().append("\u001bP7;1q\"1;1;3840;2160#1;2;0;100;0")
+        for (band in 0L..<360L) {
+            if (band != 0L) input.append('-')
+            input.append("!3840~")
+        }
+        input.append("\u001b\\")
+        val update = terminal.feed(input.toString().toByteArray())
+        for (effect in update.effects)
+            when (effect) {
+                case Diagnostic(val text) -> fail(Some(text))
+                case _ -> {}
+            }
+    } else if (kind == "png") {
+        resourceTransmit(
+            terminal,
+            "a=T,i=1,f=100,c=120,r=40,C=1",
+            includeBytes("data/images/uhd.png")
+        )
+    } else {
+        resourceTransmit(
+            terminal,
+            "a=t,i=1,f=100",
+            includeBytes("data/images/rgba.png")
+        )
+        for (index in 0L..<1024L) {
+            terminal
+                .feed(
+                    f"\u001b[${index / 80L + 1L};${index % 80L + 1L}H\u001b_Ga=p,i=1,p=${
+                        index + 1L
+                    },c=2,r=1,C=1;\u001b\\"
+                        .toByteArray()
+                )
+        }
     }
 }
 
@@ -257,42 +296,7 @@ private fun resourceGraphics(kind: String) {
                     terminal
                         .resize(120L, 40L, pixels = Some(TerminalPixelSize(960L, 640L, 8L, 16L)))
                     val started = MonotonicTimeSource.now()
-                    if (kind == "sixel") {
-                        terminal.feed("\u001b[?80h".toByteArray())
-                        val input = StringBuilder().append("\u001bP7;1q\"1;1;3840;2160#1;2;0;100;0")
-                        for (band in 0L..<360L) {
-                            if (band != 0L) input.append('-')
-                            input.append("!3840~")
-                        }
-                        input.append("\u001b\\")
-                        val update = terminal.feed(input.toString().toByteArray())
-                        for (effect in update.effects)
-                            when (effect) {
-                                case Diagnostic(val text) -> fail(Some(text))
-                                case _ -> {}
-                            }
-                    } else if (kind == "png") {
-                        resourceTransmit(
-                            terminal,
-                            "a=T,i=1,f=100,c=120,r=40,C=1",
-                            includeBytes("data/images/uhd.png")
-                        )
-                    } else {
-                        resourceTransmit(
-                            terminal,
-                            "a=t,i=1,f=100",
-                            includeBytes("data/images/rgba.png")
-                        )
-                        for (index in 0L..<1024L) {
-                            terminal
-                                .feed(
-                                    f"\u001b[${index / 80L + 1L};${
-                                        index % 80L + 1L
-                                    }H\u001b_Ga=p,i=1,p=${index + 1L},c=2,r=1,C=1;\u001b\\"
-                                        .toByteArray()
-                                )
-                        }
-                    }
+                    resourceFeedGraphics(terminal, kind)
                     val decodedNs = (MonotonicTimeSource.now() - started).inWholeNanoseconds
                     val reading = terminal.reading
                     assertEquals(1L, reading.images.imageCount)
@@ -370,7 +374,7 @@ private fun resourceGraphics(kind: String) {
         }
 }
 
-private fun resourceGeometry(reading: TerminalReading, first: Long): GridGeometry = GridGeometry(
+internal fun resourceGeometry(reading: TerminalReading, first: Long): GridGeometry = GridGeometry(
     Size(reading.columns.toDouble() * 8.0, reading.rows.toDouble() * 16.0), CellMetrics(
         8.0,
         16.0,
@@ -380,7 +384,7 @@ private fun resourceGeometry(reading: TerminalReading, first: Long): GridGeometr
     first == reading.historySize, reading
 )
 
-private fun resourceTransmit(terminal: Terminal, control: String, data: Array<Byte>) {
+internal fun resourceTransmit(terminal: Terminal, control: String, data: Array<Byte>) {
     val encoded = Base64.Default.encode(data)
     var offset = 0L
     while (offset < encoded.charLength) {
@@ -414,7 +418,7 @@ private fun resourceTransmit(terminal: Terminal, control: String, data: Array<By
     }
 }
 
-private fun resourceReport(name: String, times: ArrayList<Long>, extra: String) {
+internal fun resourceReport(name: String, times: ArrayList<Long>, extra: String) {
     val samples = times.sorted()
     var total = 0L
     for (time in samples)

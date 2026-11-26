@@ -146,3 +146,26 @@ reflow 的 p95 从 M5 的 231.85 ms 降至 97.13 ms，累计耗时约减半，�
 UHD 的完整 RGBA 等价像素为 31.64 MiB，Sixel 实际保留索引颜色面。`native_estimated_bytes` 是组件预算：每块按一份 native CPU 像素、可能的一份 GPU texture 及对象成本保守计费；**不是驱动报告的 GPU 显存**。本组 RasterSurface 在 CPU 绘制，不创建 GPU 渲染目标，也未取得独立 GPU 物理内存峰值。原生 `Image` 准备计数同样不冒充驱动 texture 上传遥测。每个场景清空缓存后权重归零、RIS 清掉 placements；擦除当前屏幕只裁去对应 Sixel 区域，不能用于断言屏外片段已释放。
 
 窗口测试使用 `@Test(useProcess = true)` 后重新验证了基准采集：[隔离进程记录](performance-window-isolation.json)。同一 120 次 PTY 交付得到 58 个 Accepted 样本，交付到 Accepted 的 p95 为 9.37 ms，退出后 1.35 秒无新帧；测试子进程峰值 RSS 116.9 MiB，调度父进程 19.0 MiB。脚本按子进程结束、父进程结束的顺序分别记录 `runtime` 与 `runner_runtime`，不相加或以父进程代替绘制进程。原基线数据仍保留其实际测试方式。
+
+## Metal 图片资源
+
+同一机器上的 [Metal 基线](performance-metal-baseline.json) 使用与 raster 资源场景相同的图片、960×640 target 和 8×16 网格，实际调用 MetalContext 绘制。首次单独计时，随后 32 个缓存帧每帧显式等待 GPU 完成；计时包含 CPU 帧准备、GPU 执行和同步，不是异步窗口的帧间隔。测试辅助 Cone 只负责创建 Metal 对象、限定 autorelease pool 和读取 `MTLDevice.currentAllocatedSize`，不会进入生产依赖。
+
+| 场景 | 首帧 ms | 缓存帧 p95 ms | 帧后 Metal 分配 MiB | context 关闭后 MiB | target 释放后 MiB | 进程峰值 RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| UHD PNG，整图缩入窗口 | 106.95 | 17.46 | 202.55 | 3.67 | 1.30 | 313.4 |
+| UHD Sixel，原比例窗口可见区 | 40.60 | 1.60 | 10.62 | 3.53 | 1.16 | 216.4 |
+| 1024 个共享小图 placements | 24.23 | 4.80 | 3.70 | 3.53 | 1.16 | 74.0 |
+
+设备初始分配约 0.45 MiB，创建 target 后约 2.83 MiB，均包含在表中而非扣除。Metal 计数描述该进程的设备资源分配，包含纹理、buffer、后端缓存及 target；它不是独立物理显存或连续采样的驻留峰值。在统一内存机器上不能把它与 RSS 简单相加。每个 GPU 帧完成后采样，JSON 的 `gpu_peak_bytes` 是这些帧后采样的最大值；像素验证 readback 后的 `gpu_after_cache_clear_bytes` 另记，因此可能稍大。
+
+三组重复帧没有新增组件图片准备；原生缓存清空后组件估算权重为零，但 Skia／Metal 仍可缓存对应设备资源。关闭 target wrapper 和 context 后大幅回收，释放测试 target 后还保留 device／queue 的少量资源，最后由测试 owner 关闭。原生临时对象必须按测试作用域释放，避免没有桌面事件循环的离屏测试把 autorelease 暂存误判为长期泄漏。
+
+UHD PNG 的 2040 个 64×64 native tile 在 Metal 上带来明显的分配与绘制成本；组件估算约 69 MiB 与实测约 203 MiB 的差异说明该预算不能用作后端显存硬上限。下一步针对不可变 RGBA 数据减少小纹理数量，保留 Sixel 的局部块复用语义。
+
+```sh
+python3 tools/benchmark_terminal.py \
+  --scoop ~/.scoop/bin/scoop --sysroot ../scoop/sysroot \
+  --cases metalPng4k metalSixel4k metalPlacements \
+  --label metal --output /tmp/terminal-metal.json
+```

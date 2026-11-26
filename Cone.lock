@@ -955,6 +955,19 @@ target = "aarch64-apple-darwin"
 root-coordinate = "scoop:scoop.ui.terminal:0.1.0"
 
 [[resolutions.nodes]]
+coordinate = "scoop.tests:terminal-gpu-native:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "path"
+path = "terminal-ui/test-native"
+
+[[resolutions.nodes]]
 coordinate = "scoop:scoop.asyncio:0.1.0"
 kind = "library"
 dependencies = [
@@ -1149,7 +1162,10 @@ dependencies = [
     "scoop:scoop.window.asyncio:0.1.0",
     "scoop:scoop.window:0.1.0",
 ]
-test-dependencies = ["scoop:scoop.test:0.1.0"]
+test-dependencies = [
+    "scoop.tests:terminal-gpu-native:0.1.0",
+    "scoop:scoop.test:0.1.0",
+]
 
 [resolutions.nodes.source]
 kind = "path"
