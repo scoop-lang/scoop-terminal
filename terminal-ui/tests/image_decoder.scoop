@@ -1,0 +1,92 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.compiler.includeBytes
+import scoop.concurrent.*
+import scoop.platform.concurrent.currentThreadId
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalCpuImageDecoderTest {
+    @Test fun decodesRgbaPaletteSixteenBitAndAdam7WithoutAWindow() {
+        assertDecodedPng(
+            includeBytes("data/images/rgba.png"),
+            TerminalImageSize(3, 2),
+            includeBytes("data/images/rgba.pixels")
+        )
+        assertDecodedPng(
+            includeBytes("data/images/palette.png"),
+            TerminalImageSize(3, 1),
+            includeBytes("data/images/palette.pixels")
+        )
+        assertDecodedPng(
+            includeBytes("data/images/gray16.png"),
+            TerminalImageSize(2, 1),
+            includeBytes("data/images/gray16.pixels")
+        )
+        assertDecodedPng(
+            includeBytes("data/images/adam7.png"),
+            TerminalImageSize(5, 5),
+            includeBytes("data/images/adam7.pixels")
+        )
+    }
+
+    @Test fun rejectsIncompleteOrInvalidPixelsAndIncorrectExpectedDimensions() {
+        val decoder = TerminalCpuImageDecoder()
+        for (
+            bad in [
+                includeBytes("data/images/truncated-deflate.png"),
+                includeBytes("data/images/short-pixels.png"),
+                includeBytes("data/images/bad-filter.png")
+            ]
+        ) {
+            val error = assertFailsWith<TerminalImageException> {
+                decoder.decodePng(bad, TerminalImageSize(3, 2))
+            }
+            assertEquals(TerminalImageFailure.InvalidData, error.kind)
+        }
+        assertFailsWith<TerminalImageException> {
+            decoder.decodePng(includeBytes("data/images/rgba.png"), TerminalImageSize(1, 1))
+        }
+        val bytes = includeBytes("data/images/rgba.png")
+        assertEquals(
+            bytes.size + 24L * 5L + 48L + 1048576L,
+            decoder.peakBytes(TerminalImageSize(3, 2), bytes.size)
+        )
+    }
+
+    @Test fun eachWorkerOwnsAndClosesItsNativeCodecObjects() {
+        val owner = currentThreadId()
+        val decoder = TerminalCpuImageDecoder()
+        val png = includeBytes("data/images/rgba.png")
+        val expected = includeBytes("data/images/rgba.pixels")
+        multiThreadExecutor {
+            workers = 2;
+            blocking { threads = 1 }
+        }
+            .use { executor ->
+                eventLoop()
+                    .run {
+                        val first = async(executor) {
+                            assertNotEquals(owner, currentThreadId())
+                            decoder.decodePng(png, TerminalImageSize(3, 2))
+                        }
+                        val second = async(executor) {
+                            assertNotEquals(owner, currentThreadId())
+                            decoder.decodePng(png, TerminalImageSize(3, 2))
+                        }
+                        for (result in [first.await(), second.await()])
+                            for (index in 0L..<expected.size)
+                                assertEquals(expected[index], result[index])
+                    }
+            }
+    }
+}
+
+private fun assertDecodedPng(png: Array<Byte>, size: TerminalImageSize, expected: Array<Byte>) {
+    val decoded = TerminalCpuImageDecoder().decodePng(png, size)
+    assertEquals(expected.size, decoded.size)
+    for (index in 0L..<expected.size)
+        assertEquals(expected[index], decoded[index])
+}

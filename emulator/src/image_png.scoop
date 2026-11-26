@@ -1,0 +1,123 @@
+package scoop.terminal.emulator
+
+/** Structural validation only. Filtering, interlacing and color conversion belong to the codec. */
+internal fun inspectImagePng(bytes: Array<Byte>, limits: TerminalImageLimits): TerminalImageSize {
+    if (bytes.size > limits.maxEncodedBytes)
+        imageFailure(TerminalImageFailure.Limit, "PNG encoded data exceeds limit")
+    val signature = [137, 80, 78, 71, 13, 10, 26, 10]
+    if (bytes.size < 33L) invalidPng("truncated header")
+    for (offset in 0L..<8L)
+        if (imageByte(bytes, offset) != signature[offset]) invalidPng("invalid signature")
+    if (pngLong(bytes, 8L) != 13L || !pngChunk(bytes, 12L, "IHDR")) invalidPng("missing IHDR")
+    // Check dimensions before scanning large ancillary chunks or entering a native codec.
+    val size = imageSize(pngLong(bytes, 16L), pngLong(bytes, 20L), limits)
+    val depth = imageByte(bytes, 24L)
+    val color = imageByte(bytes, 25L)
+    val validDepth = when (color) {
+        case 0 -> depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16
+        case 2 -> depth == 8 || depth == 16
+        case 3 -> depth == 1 || depth == 2 || depth == 4 || depth == 8
+        case 4 -> depth == 8 || depth == 16
+        case 6 -> depth == 8 || depth == 16
+        else -> false
+    }
+    if (!validDepth ||
+        imageByte(bytes, 26L) !=
+        0 ||
+        imageByte(bytes, 27L) !=
+        0 ||
+        imageByte(bytes, 28L) >
+        1
+    )
+        invalidPng("invalid IHDR fields")
+    var offset = 8L
+    var palette = false
+    var data = false
+    var dataEnded = false
+    while (offset < bytes.size) {
+        if (bytes.size - offset < 12L) invalidPng("truncated chunk")
+        val length = pngLong(bytes, offset)
+        if (length > 2147483647L || length > bytes.size - offset - 12L)
+            invalidPng("invalid chunk length")
+        val type = offset + 4L
+        for (index in 0L..<4L) {
+            val value = imageByte(bytes, type + index)
+            if (!(value >= 65 && value <= 90) && !(value >= 97 && value <= 122))
+                invalidPng("invalid chunk type")
+        }
+        if ((imageByte(bytes, type + 2L) and 32) != 0) invalidPng("reserved chunk bit")
+        val end = offset + 8L + length
+        if (pngCrc(bytes, type, end) != pngLong(bytes, end)) invalidPng("chunk CRC mismatch")
+        if (pngChunk(bytes, type, "IHDR")) {
+            if (offset != 8L) invalidPng("duplicate IHDR")
+        } else if (pngChunk(bytes, type, "PLTE")) {
+            if (palette ||
+                data ||
+                color ==
+                0 ||
+                color ==
+                4 ||
+                length ==
+                0L ||
+                length %
+                3L !=
+                0L ||
+                length >
+                768L ||
+                (color == 3 && length / 3L > (1L shl depth.toLong()))
+            )
+                invalidPng("invalid PLTE")
+            palette = true
+        } else if (pngChunk(bytes, type, "IDAT")) {
+            if (dataEnded || (color == 3 && !palette)) invalidPng("invalid IDAT order")
+            data = true
+        } else if (pngChunk(bytes, type, "IEND")) {
+            if (!data || length != 0L || end + 4L != bytes.size) invalidPng("invalid IEND")
+            return size
+        } else {
+            if ((imageByte(bytes, type) and 32) == 0) invalidPng("unknown critical chunk")
+            if (pngChunk(bytes, type, "acTL"))
+                imageFailure(TerminalImageFailure.Unsupported, "animated PNG is unsupported")
+            if (data) dataEnded = true
+        }
+        offset = end + 4L
+    }
+    invalidPng("missing IEND")
+}
+
+private fun invalidPng(reason: String): Nothing = imageFailure(
+    TerminalImageFailure.InvalidData,
+    "invalid PNG: " + reason
+)
+
+internal fun imageByte(bytes: Array<Byte>, offset: Long): Int = bytes[offset].toInt() and 255
+
+private fun pngLong(bytes: Array<Byte>, offset: Long): Long = (
+    imageByte(bytes, offset).toLong() shl 24
+) or
+    (imageByte(bytes, offset + 1L).toLong() shl 16) or
+    (imageByte(bytes, offset + 2L).toLong() shl 8) or
+    imageByte(bytes, offset + 3L).toLong()
+
+private fun pngChunk(bytes: Array<Byte>, offset: Long, name: String): Boolean {
+    var index = offset
+    for (character in name) {
+        if (imageByte(bytes, index) != character.code) return false
+        index += 1L
+    }
+    return true
+}
+
+private val pngCrcTable = Array<Long>(256L) { index ->
+    var value = index
+    for (_ in 0L..<8L)
+        value = (value shr 1) xor if ((value and 1L) != 0L) 3988292384L else 0L
+    value
+}
+
+private fun pngCrc(bytes: Array<Byte>, start: Long, end: Long): Long {
+    var crc = 4294967295L
+    for (index in start..<end)
+        crc = (crc shr 8) xor pngCrcTable[(crc xor imageByte(bytes, index).toLong()) and 255L]
+    return crc xor 4294967295L
+}

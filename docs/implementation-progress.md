@@ -34,7 +34,7 @@
 | M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
 | M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片接入时另验证文本投影不保留图片资源 |
 | M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
-| M5 | 图片 store/decoder/cache、预算 | 待实现 |
+| M5 | 图片 store/decoder/cache、预算 | 已实现显式像素租约、CPU 预算及 PNG/RGB 解码基础（核心 5 项／UI 3 项通过）；传输、store、快照和绘制接入待完成 |
 | M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 待实现 |
 | M5 | Kitty 静态 profile、分块、放置/删除/探测 | 待实现 |
 | M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 待实现 |
@@ -87,6 +87,10 @@
 - 串行后台模块：`TerminalBackgroundModelTest` 7/7，通过实际不同的线程创建和执行核心，发布回到窗口 owner。验证按序 feed／输入模式／DSR／resize、工作线程阻塞时 UI 仍推进、PTY 提交等待容量、活动请求计入字节／条目限额、注册未完成即关闭、核心配额拒绝、选择迁移／覆盖失效、重复 BSU 保留起始时刻、过时代次不能解冻、关闭提交尾部及回收 worker、发布回调失败会拒绝后续等待者；还覆盖父作用域在 driver 执行前取消的清理。`TerminalTrackedRange` 改为可由 adapter 实现的所有权接口，跨线程只发送不可变注册结果与原子取消位；可变核心句柄仍由后台持有。关闭后释放可变核心和回调引用，只保留最终不可变画面。原锚点 6 项与命令块 7 项回归通过。该提交只建立并验证后台模块，生产 session 在下一步迁移。
 
 - 生产会话已迁移到后台 model，UI 不再持有／访问可变终端；PTY I/O 和宿主回调维持窗口 owner，快照来自独立有界池。`TerminalWorkerSessionTest` 6/6：本机真实 PTY 的立即退出尾部、短写与 OSC 52／DSR／用户输入顺序、重复 resize、持续 BSU 输出期间的独立期限、自然 EOF 提交冻结文字并继续搜索／重排、driver 开始前关闭、宿主回调异常与最终画面保留。随后完整 `terminal-ui` 72/72、`scoop check --release demo --tests` 通过。本轮没有下载和临时文件；真实窗口、系统剪贴板、综合性能及 Linux／Windows 仍按后续集中验收执行。
+
+图片解码基础：`TerminalImageDecodeTest` 5/5、`TerminalCpuImageDecoderTest` 3/3 通过。先检查尺寸与乘法上限、PNG 分块／CRC／结束边界，RGB 补 alpha，RGBA 复用不可变像素；显式租约最后关闭时同时清掉数组引用并退还预算。PNG adapter 在后台调用内创建、使用和关闭原生对象，预留 encoded copy、codec 像素、raster surface、可变 readback 与返回数组的保守峰值；解码失败和大小不一致释放工作预算。固定本地生成的 RGBA／索引透明色／16-bit／Adam7 样本验证实际像素，多 worker 验证原生对象不跨 owner；fixture 生成一致性检查通过。此时尚未向 PTY 声明图形协议支持，store、帧寿命、压缩与绘制预算仍需后续集成验证。
+
+实际测试发现 `scoop.graphics.Image.decode()` 接受不完整 PNG 像素。已在独立分支 `codex/strict-image-decode` 修复并合并 [Scoop PR #226](https://github.com/scoop-lang/scoop/pull/226)：只接受 `SkCodec::kSuccess`，保留颜色／alpha 和 EXIF 方向。上游新增解码 3 项及原绘图 7 项通过，本地 main 已更新并回合并修复分支推送；开发 sysroot 完整更新后，组件的同组坏图回归通过。未下载外部依赖；PR 临时文件已清理。
 
 ## 后续执行约束
 
