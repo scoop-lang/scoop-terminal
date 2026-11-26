@@ -374,6 +374,8 @@ OSC 8 将 `id`、URI 和扩展参数解析为不可变链接记录；单元格�
 
 Sixel 在核心中增量解码为索引平面和颜色表；共享 palette 使用版本化引用，不能一开始就烘焙成永不变色的 RGBA。Kitty RGB/RGBA 转为不可变 straight-alpha RGBA8；复用工具链 Base64 和 `scoop.compression` 的 Zlib decoder，使用其输出字节上限。
 
+索引平面采用 64×64 的不可变块和稀疏背景，局部擦除只复制相交块；颜色表另行版本化。快照共享未变块，冻结、复制和上传时同时存活的新旧分配均计入预算，最后一个租约关闭时清掉数组引用并退还配额。
+
 PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 `terminal-ui`，复用 `scoop.graphics.Image.decode` 与 CPU `RasterSurface.readPixels()`，创建、使用、关闭 codec/native 资源后只返回不可变 RGBA8。先验证 PNG signature、IHDR 尺寸和乘法溢出，再交给 codec；不用 GPU framebuffer 读回来解码 PNG。核心不依赖 Skia；无窗口测试可注入确定性 decoder 或在 CPU 上单独测试该 adapter。
 
 **图片尺寸、放置导致的光标移动和查询回复属于 VT 流顺序。** 解析到图形结束时，必须完成决定这些行为所需的校验/解码，再处理后续文字和查询；不能先绘制后续文字，等异步图片回调回来再补光标。生产 session 在第 10 节的串行后台 model 队列执行这一过程，UI 继续显示已提交快照。GPU 资源准备只影响是否能绘制该帧，不反向改变 VT 状态。
@@ -393,6 +395,8 @@ PNG 通过注入的 `TerminalImageDecoder` 接口解码。生产 adapter 放在 
 | 能力/尺寸查询 | DA 的 Sixel 能力位和 XTSMGRAPHICS 的颜色数、Sixel geometry；未实现的 item/action 明确失败 |
 
 采用 xterm 的方向：`?80h` 为 display mode、关闭 Sixel scrolling；`?80l` 开启 scrolling。旧 DEC 文档对该方向有冲突，不据此反转现代应用期待的行为。display mode 从页面图形原点绘制并保留文本光标；scrolling mode 使用光标位置，在下边界按规则滚动。
+
+像素比例遵循 DEC 宏表及显式 `Pan/Pad`，约分为整数缩放，声明的宽高作为下界。这里有明确兼容差异：参考的 xterm `graphics_sixel.c` v1.66 强制使用正方形像素，本组件保留设计要求的比例支持；不以该版本 xterm 的比例输出作为像素验收结果。寄存器越界按配置限额拒绝，不采用 xterm 的取模行为。
 
 图片结束后的光标位置由实际 Sixel 绘制游标及 8452 决定，以包含结尾 `-` 的 xterm 对照用例锁定；不能统一简化成“图片高度除以行高后换行”。1070 区分每图私有颜色与共享寄存器；修改共享寄存器使仍保留且使用它的图片重新着色，已冻结快照继续持有旧 palette 版本。
 
@@ -437,6 +441,7 @@ Kitty 的 `ED 2` 清除当前屏幕图片；一般文本写入和其他擦除不
 | session 保留的 CPU 图片数据 | 256 MiB，包含仍被已提交帧持有的旧资源版本和解码临时 buffer |
 | GPU/原生图片缓存 | 单独的 128 MiB 预算，淘汰不等于删除协议资源 |
 | placements | 每 session 4096 个，重复放置也计数 |
+| Sixel 像素写入 | 每幅 67108864 次，重复覆盖同一像素也计数 |
 
 分别限制编码字节、解压字节、像素面积、重复计数、寄存器索引、placement 数和未完成传输，防止小 payload 产生无界工作。解析超限仍按控制串规则恢复。Kitty 报明确错误；Sixel 无错误回包时丢弃该图并产生可供宿主诊断的事件，不关闭整个终端。
 

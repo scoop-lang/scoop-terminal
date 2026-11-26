@@ -1,0 +1,218 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class TerminalSixelDecodeTest {
+    @Test fun sixBitRowsRepeatsAndOverprintingUseRegisterIndices() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                decodeSixel(memory, palette, "#1!3~$#2@-#3A", true)
+                    .use { image ->
+                        val plane = image.plane!!
+                        assertEquals(TerminalImageSize(3, 8), plane.size)
+                        assertEquals(2, plane.index(0L, 0L))
+                        assertEquals(1, plane.index(0L, 1L))
+                        assertEquals(1, plane.index(2L, 5L))
+                        assertEquals(-1, plane.index(0L, 6L))
+                        assertEquals(3, plane.index(0L, 7L))
+                        assertEquals(1L, image.column)
+                        assertEquals(6L, image.row)
+                        assertEquals(6L, image.lineFeedPixels)
+                    }
+                for (repeat in ["!~", "!0~", "!1~"])
+                    decodeSixel(memory, palette, repeat, true)
+                        .use { image -> assertEquals(TerminalImageSize(1, 6), image.plane!!.size) }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun declaredExtentIsNotAClipAndBackgroundModePreservesTransparency() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                for (transparent in [false, true])
+                    decodeSixel(memory, palette, "\"1;1;2;3#1!4~", transparent)
+                        .use { image -> assertEquals(TerminalImageSize(4, 6), image.plane!!.size) }
+                decodeSixel(memory, palette, "\"1;1;4;8#1@", false)
+                    .use { image ->
+                        assertEquals(0, image.plane!!.index(3L, 7L))
+                        assertEquals(1, image.plane!!.index(0L, 0L))
+                    }
+                decodeSixel(memory, palette, "\"1;1;4;8#1@", true)
+                    .use { image ->
+                        assertEquals(-1, image.plane!!.index(3L, 7L))
+                        assertEquals(1, image.plane!!.index(0L, 0L))
+                    }
+                decodeSixel(memory, palette, "!5?", false)
+                    .use { image ->
+                        when (image.plane) {
+                            case None -> {};
+                            case Some(_) -> fail(Some("blank data has no painted extent"))
+                        }
+                        assertEquals(5L, image.column)
+                    }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun pixelAspectUsesReducedDecRatiosAndChecksTheScaledArea() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                SixelDecoder(memory, palette, macro = 2L)
+                    .use { decoder ->
+                        pushSixel(decoder, "@")
+                        decoder.finish().use { result -> assertEquals(5L, result.scaleY) }
+                    }
+                decodeSixel(memory, palette, "\"4;6;2;2@", true)
+                    .use { image ->
+                        assertEquals(3L, image.scaleX)
+                        assertEquals(2L, image.scaleY)
+                        assertEquals(TerminalImageSize(2, 2), image.plane!!.size)
+                    }
+                decodeSixel(memory, palette, "@\"6;3", true)
+                    .use { image ->
+                        assertEquals(1L, image.scaleX)
+                        assertEquals(2L, image.scaleY)
+                    }
+                assertSixelFailure(memory, palette, "\"1;1;16385;1", TerminalImageFailure.Limit)
+                assertSixelFailure(memory, palette, "\"16385;1@", TerminalImageFailure.Limit)
+                assertSixelFailure(memory, palette, "\"1;1;4096;4097", TerminalImageFailure.Limit)
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun linefeedReachIsIndependentOfTrailingBlankPixelsAndTheFinalBand() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                decodeSixel(memory, palette, "~", true)
+                    .use { image ->
+                        assertEquals(0L, image.lineFeedPixels)
+                        assertEquals(0L, image.row)
+                        assertEquals(6, image.plane!!.size.height)
+                    }
+                decodeSixel(memory, palette, "~--?", true)
+                    .use { image ->
+                        assertEquals(6L, image.lineFeedPixels)
+                        assertEquals(12L, image.row)
+                        assertEquals(6, image.plane!!.size.height)
+                    }
+                decodeSixel(memory, palette, "@-@-", true)
+                    .use { image ->
+                        assertEquals(7L, image.lineFeedPixels)
+                        assertEquals(7, image.plane!!.size.height)
+                    }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun parameterBoundariesAndColorOnlyEndOfStringKeepVersions() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                val payload = "\"1;1;2;7#2;2;100;0;0!2@-#3;1;240;50;100A"
+                for (cut in 0L..payload.charLength) {
+                    SixelDecoder(memory, palette, true)
+                        .use { decoder ->
+                            pushSixel(decoder, payload.slice(0L, cut))
+                            pushSixel(decoder, payload.slice(cut, payload.charLength))
+                            decoder
+                                .finish()
+                                .use { image ->
+                                    assertEquals(2, image.plane!!.index(1L, 0L))
+                                    assertEquals(3, image.plane!!.index(0L, 7L))
+                                }
+                        }
+                }
+                val old = palette.snapshot()
+                decodeSixel(memory, palette, "#2;2;0;0;100", true).close()
+                palette
+                    .snapshot()
+                    .use { latest ->
+                        assertEquals(255, imageByte(old.bytes, 8L))
+                        assertEquals(0, imageByte(latest.bytes, 8L))
+                        assertEquals(255, imageByte(latest.bytes, 10L))
+                    }
+                old.close()
+                decodeSixel(memory, palette, "# 2 ; 2 ; 100 ; 0 ; 0\n!\t2@", true)
+                    .use { image -> assertEquals(2, image.plane!!.index(1L, 0L)) }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun invalidCancelledAndOverBudgetImagesReleaseTheirPartialTiles() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                for (
+                    bad in [
+                        "#",
+                        "#1;2;10",
+                        "#1;3;0;0;0",
+                        "#1;2;101;0;0",
+                        "!",
+                        "!12",
+                        "!-",
+                        "\"1;1;1;1;1"
+                    ]
+                )
+                    assertSixelFailure(memory, palette, "@" + bad, TerminalImageFailure.InvalidData)
+                for (bad in ["#1024@", "!16385~", "!92233720368547758080~"])
+                    assertSixelFailure(memory, palette, bad, TerminalImageFailure.Limit)
+                val baseline = memory.bytes
+                val canceled = SixelDecoder(memory, palette)
+                pushSixel(canceled, "!100~")
+                canceled.close()
+                canceled.close()
+                assertEquals(baseline, memory.bytes)
+            }
+        assertEquals(0L, memory.bytes)
+        for (
+            limits in [
+                TerminalImageLimits(maxCpuBytes = 24000L),
+                TerminalImageLimits(maxSixelPixelWrites = 2L),
+                TerminalImageLimits(maxEncodedBytes = 2L)
+            ]
+        ) {
+            val restricted = ImageMemory(limits)
+            SixelRegisters(restricted)
+                .use { palette ->
+                    assertSixelFailure(restricted, palette, "@@@", TerminalImageFailure.Limit)
+                }
+            assertEquals(0L, restricted.bytes)
+        }
+    }
+}
+
+private fun decodeSixel(
+    memory: ImageMemory,
+    palette: SixelRegisters,
+    payload: String,
+    transparent: Boolean
+): SixelDecoded = SixelDecoder(memory, palette, transparent, 7L)
+    .use { decoder ->
+        pushSixel(decoder, payload)
+        decoder.finish()
+    }
+
+private fun pushSixel(decoder: SixelDecoder, value: String) {
+    for (byte in value.toByteArray())
+        decoder.push(byte.toInt() and 255)
+}
+
+private fun assertSixelFailure(
+    memory: ImageMemory,
+    palette: SixelRegisters,
+    value: String,
+    kind: TerminalImageFailure
+) {
+    val before = memory.bytes
+    val error = assertFailsWith<TerminalImageException> {
+        decodeSixel(memory, palette, value, true).close()
+    }
+    assertEquals(kind, error.kind)
+    assertEquals(before, memory.bytes)
+}

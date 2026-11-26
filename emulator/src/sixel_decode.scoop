@@ -1,0 +1,222 @@
+package scoop.terminal.emulator
+
+/** Complete indexed pixels and the independent graphics-cursor/linefeed state. */
+internal class SixelDecoded(
+    val plane: ImageIndexedPlane?,
+    val scaleX: Long,
+    val scaleY: Long,
+    val column: Long,
+    val row: Long,
+    val lineFeedPixels: Long
+) : Closeable {
+    public override fun close() {
+        plane?.close()
+    }
+}
+
+/** Incremental payload decoder. Its caller selects private or shared color registers. */
+internal class SixelDecoder(
+    private val memory: ImageMemory,
+    private val registers: SixelRegisters,
+    transparent: Boolean = false,
+    macro: Long = 0L
+) : Closeable {
+    private val pixels = ImageIndexedBuilder(memory, if (transparent) -1 else 0)
+    private var scaleX = 1L
+    private var scaleY = when (macro) {
+        case 2L -> 5L
+        case 3L -> 3L
+        case 4L -> 3L
+        case 7L -> 1L
+        case 8L -> 1L
+        case 9L -> 1L
+        else -> 2L
+    }
+    private var column = 0L
+    private var row = 0L
+    private var lineFeedPixels = 0L
+    private var selected = if (registers.count > 3L) 3 else 0
+    // 0 data, 1 repeat, 2 color, 3 raster. Parameter storage is fixed and bounded.
+    private var command = 0
+    private val parameters = MutableArray<Long>(5L) { -1L }
+    private var parameterCount = 0L
+    private var number = -1L
+    private var received = 0L
+    private var writes = 0L
+    private var ended = false
+
+    fun push(byte: Int) {
+        if (ended) throw IllegalStateException(Some("Sixel decoder is closed"))
+        try {
+            if (received >= memory.limits.maxEncodedBytes)
+                imageFailure(TerminalImageFailure.Limit, "encoded Sixel payload exceeds limit")
+            received += 1L
+            if (byte == 0 || byte == 32 || (byte >= 9 && byte <= 13)) return
+            if (command != 0 && byte >= 48 && byte <= 57) {
+                val current = if (number < 0L) 0L else number
+                val digit = (byte - 48).toLong()
+                if (current > (Long.MAX_VALUE - digit) / 10L)
+                    imageFailure(TerminalImageFailure.Limit, "Sixel parameter overflow")
+                number = current * 10L + digit
+                return
+            }
+            if (command == 1) {
+                if (byte < 63 || byte > 126)
+                    imageFailure(
+                        TerminalImageFailure.InvalidData,
+                        "Sixel repeat requires a pixel character"
+                    )
+                val repeat = if (number <= 0L) 1L else number
+                command = 0
+                draw(byte - 63, repeat)
+                return
+            }
+            if (command != 0) {
+                parameter()
+                if (byte == 59) return
+                applyCommand()
+            }
+            when (byte) {
+                case 33 -> begin(1)
+                case 34 -> begin(3)
+                case 35 -> begin(2)
+                case 36 -> column = 0L
+
+                case 45 -> {
+                    val next = row + 6L
+                    if (next > (memory.limits.maxDimension + 5L) / 6L * 6L)
+                        imageFailure(TerminalImageFailure.Limit, "Sixel graphics row exceeds limit")
+                    val reached = (if (next < pixels.height) next else pixels.height) * scaleY
+                    if (reached > lineFeedPixels) lineFeedPixels = reached
+                    row = next
+                    column = 0L
+                }
+
+                else -> if (byte >= 63 && byte <= 126) draw(byte - 63, 1L)
+            }
+        } catch (error: Throwable) {
+            close()
+            throw error
+        }
+    }
+
+    private fun begin(value: Int) {
+        command = value
+        parameterCount = 0L
+        number = -1L
+    }
+
+    private fun parameter() {
+        val maximum = if (command == 2) 5L else 4L
+        if (parameterCount >= maximum)
+            imageFailure(TerminalImageFailure.InvalidData, "too many Sixel parameters")
+        parameters[parameterCount] = number
+        parameterCount += 1L
+        number = -1L
+    }
+
+    private fun applyCommand() {
+        if (command == 2) {
+            if (parameterCount != 1L && parameterCount != 5L)
+                imageFailure(TerminalImageFailure.InvalidData, "incomplete Sixel color definition")
+            val index = parameters[0L]
+            if (index < 0L)
+                imageFailure(TerminalImageFailure.InvalidData, "missing Sixel color register")
+            if (index >= registers.count)
+                imageFailure(TerminalImageFailure.Limit, "Sixel color register exceeds limit")
+            if (parameterCount == 5L)
+                registers
+                    .define(index, parameters[1L], parameters[2L], parameters[3L], parameters[4L])
+            selected = index.toInt()
+        } else if (command == 3) {
+            val numerator = if (parameters[0L] <= 0L) 1L else parameters[0L]
+            val denominator = if (parameterCount < 2L || parameters[1L] <= 0L)
+                1L
+            else
+                parameters[1L]
+            val divisor = sixelGcd(numerator, denominator)
+            val nextX = denominator / divisor
+            val nextY = numerator / divisor
+            val width = if (parameterCount >= 3L && parameters[2L] > pixels.width)
+                parameters[2L]
+            else
+                pixels.width
+            val height = if (parameterCount >= 4L && parameters[3L] > pixels.height)
+                parameters[3L]
+            else
+                pixels.height
+            checkExtent(width, height, nextX, nextY)
+            pixels.extent(width, height)
+            scaleX = nextX
+            scaleY = nextY
+        }
+        command = 0
+    }
+
+    private fun draw(bits: Int, repeat: Long) {
+        if (repeat > memory.limits.maxDimension - column)
+            imageFailure(
+                TerminalImageFailure.Limit,
+                "Sixel repeat or graphics column exceeds limit"
+            )
+        val end = column + repeat
+        if (bits != 0) {
+            var high = 0L
+            var count = 0L
+            for (bit in 0L..<6L)
+                if ((bits and (1 shl bit)) != 0) {
+                    high = bit + 1L;
+                    count += 1L
+                }
+            if (repeat > (memory.limits.maxSixelPixelWrites - writes) / count)
+                imageFailure(TerminalImageFailure.Limit, "Sixel pixel-write limit exceeded")
+            writes += repeat * count
+            val width = if (end > pixels.width) end else pixels.width
+            val height = if (row + high > pixels.height) row + high else pixels.height
+            checkExtent(width, height, scaleX, scaleY)
+            pixels.extent(width, height)
+            for (x in column..<end)
+                for (bit in 0L..<high)
+                    if ((bits and (1 shl bit)) != 0) pixels.set(x, row + bit, selected)
+        }
+        column = end
+    }
+
+    private fun checkExtent(width: Long, height: Long, x: Long, y: Long) {
+        if (width > memory.limits.maxDimension / x || height > memory.limits.maxDimension / y)
+            imageFailure(TerminalImageFailure.Limit, "scaled Sixel dimensions exceed limit")
+        if (width > 0L && height > 0L) imageSize(width * x, height * y, memory.limits)
+    }
+
+    fun finish(): SixelDecoded {
+        if (ended) throw IllegalStateException(Some("Sixel decoder is closed"))
+        try {
+            if (command == 1)
+                imageFailure(TerminalImageFailure.InvalidData, "unfinished Sixel repeat")
+            if (command != 0) {
+                parameter();
+                applyCommand()
+            }
+            return SixelDecoded(pixels.finish(), scaleX, scaleY, column, row, lineFeedPixels)
+        } finally {
+            close()
+        }
+    }
+
+    public override fun close() {
+        if (ended) return
+        ended = true
+        pixels.close()
+    }
+}
+
+private fun sixelGcd(first: Long, second: Long): Long {
+    var a = first
+    var b = second
+    while (b != 0L) {
+        val remainder = a % b;
+        a = b;
+        b = remainder
+    }
+    return a
+}

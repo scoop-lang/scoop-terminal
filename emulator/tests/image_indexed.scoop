@@ -1,0 +1,275 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashSet
+import scoop.platform.concurrent.Thread
+import scoop.test.*
+
+@Test
+private class TerminalIndexedImageTest {
+    @Test fun independentPlanesShareTilesAndSmallErasesPreserveOldPixels() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val builder = ImageIndexedBuilder(memory, -1)
+        builder.extent(130L, 70L)
+        builder.set(0L, 0L, 1)
+        builder.set(64L, 0L, 2)
+        builder.set(129L, 69L, 3)
+        val original = builder.finish()!!
+        val frozen = original.retain()
+        val before = memory.bytes
+        assertEquals(3L, original.tileCount)
+        assertEquals(-1, original.index(20L, 20L))
+        original
+            .erased(0L, 0L, 1L, 1L)
+            .use { edited ->
+                assertEquals(-1, edited.index(0L, 0L))
+                assertEquals(2, edited.index(64L, 0L))
+                assertEquals(3, edited.index(129L, 69L))
+                assertNotEquals(original.version, edited.version)
+                // One changed 16 KiB tile and a small map; the other two tiles are shared.
+                assertEquals(before + 16640L + 1280L, memory.bytes)
+                original.close()
+                assertEquals(1, frozen.index(0L, 0L))
+                assertEquals(2, frozen.index(64L, 0L))
+                edited
+                    .erased(500L, 500L, 600L, 600L)
+                    .use { unchanged -> assertEquals(edited.version, unchanged.version) }
+            }
+        assertEquals(before, memory.bytes)
+        frozen.close()
+        frozen.close()
+        assertEquals(0L, memory.bytes)
+        assertFailsWith<IllegalStateException> { frozen.index(0L, 0L) }
+    }
+
+    @Test fun opaqueBackgroundIsSparseAndFullErasureCreatesTransparentHoles() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val builder = ImageIndexedBuilder(memory, 0)
+        builder.extent(4096L, 4096L)
+        assertEquals(512L, memory.bytes)
+        builder
+            .finish()!!
+            .use { background ->
+                assertEquals(0L, background.tileCount)
+                assertTrue(memory.bytes < 1048576L)
+                assertEquals(0, background.index(4000L, 4000L))
+                background
+                    .erased(64L, 64L, 66L, 66L)
+                    .use { cleared ->
+                        assertEquals(1L, cleared.tileCount)
+                        assertEquals(-1, cleared.index(64L, 64L))
+                        assertEquals(0, cleared.index(63L, 64L))
+                        assertEquals(0, cleared.index(66L, 66L))
+                    }
+                background
+                    .erased(-1L, -1L, Long.MAX_VALUE, Long.MAX_VALUE)
+                    .use { cleared ->
+                        assertEquals(0L, cleared.tileCount)
+                        assertEquals(-1, cleared.index(4000L, 4000L))
+                    }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun freezingAndCopyFailuresReleaseOnlyNewStorage() {
+        val tight = ImageMemory(TerminalImageLimits(maxCpuBytes = 20000L))
+        val builder = ImageIndexedBuilder(tight, -1)
+        builder.extent(1L, 1L)
+        builder.set(0L, 0L, 2)
+        assertImagePlaneFailure { builder.finish() }
+        assertEquals(0L, tight.bytes)
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 60000L))
+        val source = ImageIndexedBuilder(memory, -1)
+        source.extent(128L, 1L)
+        source.set(0L, 0L, 1)
+        source.set(64L, 0L, 2)
+        source
+            .finish()!!
+            .use { image ->
+                val before = memory.bytes
+                assertImagePlaneFailure { image.erased(0L, 0L, 65L, 1L) }
+                assertEquals(before, memory.bytes)
+                assertEquals(1, image.index(0L, 0L))
+                assertEquals(2, image.index(64L, 0L))
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun workersShareImmutableTilesAndReleaseEachVersionOnce() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val builder = ImageIndexedBuilder(memory, -1)
+        builder.extent(2L, 1L)
+        builder.set(0L, 0L, 1)
+        builder.set(1L, 0L, 1)
+        val source = builder.finish()!!
+        val sharedClose = source.retain()
+        val registers = SixelRegisters(memory)
+        registers.define(1L, 2L, 100L, 0L, 0L)
+        val palette = registers.snapshot()
+        val versions = [ArrayList<Long>(), ArrayList<Long>()]
+        val work: (Long) -> Unit = { worker ->
+            for (iteration in 0L..<100L) {
+                source
+                    .retain()
+                    .use { retained ->
+                        retained
+                            .erased(0L, 0L, 1L, 1L)
+                            .use { edited ->
+                                versions[worker].add(edited.version)
+                                palette
+                                    .retain()
+                                    .use { colors ->
+                                        edited
+                                            .rgba(colors)
+                                            .use { rgba ->
+                                                assertIndexedRgba(
+                                                    [0, 0, 0, 0, 255, 0, 0, 255],
+                                                    rgba.pixels.bytes
+                                                )
+                                            }
+                                    }
+                                assertEquals(1, retained.index(0L, 0L))
+                            }
+                    }
+            }
+            sharedClose.close()
+        }
+        try {
+            val first = Thread.start { work(0L) }
+            try {
+                val second = Thread.start { work(1L) }
+                try {
+                    first.join()
+                    second.join()
+                } finally {
+                    second.dispose()
+                }
+            } finally {
+                first.dispose()
+            }
+            val unique = HashSet<Long>()
+            for (worker in versions)
+                for (version in worker)
+                    assertTrue(unique.add(version))
+            assertEquals(200L, unique.size)
+            assertEquals(1, source.index(0L, 0L))
+        } finally {
+            sharedClose.close()
+            source.close()
+            palette.close()
+            registers.close()
+        }
+        assertEquals(0L, memory.bytes)
+    }
+}
+
+@Test
+private class TerminalSixelPaletteTest {
+    @Test fun rgbVersionsKeepTheirOriginalColorsAndDoNotBakeTheIndexPlane() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                assertEquals(1024L, palette.count)
+                assertTrue(palette.define(7L, 2L, 100L, 0L, 0L))
+                val red = palette.snapshot()
+                val version = palette.version
+                assertFalse(palette.define(7L, 2L, 100L, 0L, 0L))
+                assertEquals(version, palette.version)
+                val builder = ImageIndexedBuilder(memory, -1)
+                builder.extent(2L, 1L)
+                builder.set(0L, 0L, 7)
+                builder
+                    .finish()!!
+                    .use { image ->
+                        palette.define(7L, 2L, 0L, 100L, 0L)
+                        assertNotEquals(version, palette.version)
+                        image
+                            .rgba(red)
+                            .use { rgba ->
+                                assertIndexedRgba([255, 0, 0, 255, 0, 0, 0, 0], rgba.pixels.bytes)
+                            }
+                        palette
+                            .snapshot()
+                            .use { green ->
+                                image
+                                    .rgba(green)
+                                    .use { rgba ->
+                                        assertIndexedRgba(
+                                            [0, 255, 0, 255, 0, 0, 0, 0],
+                                            rgba.pixels.bytes
+                                        )
+                                    }
+                            }
+                        assertEquals(7, image.index(0L, 0L))
+                    }
+                red.close()
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun hlsStartsAtBlueAndPercentRoundingIncludesAchromaticEndpoints() {
+        val memory = ImageMemory(TerminalImageLimits())
+        SixelRegisters(memory)
+            .use { palette ->
+                for (index in 0L..<6L)
+                    palette.define(index, 1L, index * 60L, 50L, 100L)
+                palette.define(6L, 1L, 360L, 50L, 100L)
+                palette.define(7L, 1L, 12L, 50L, 0L)
+                palette.define(8L, 1L, 34L, 0L, 100L)
+                palette.define(9L, 1L, 56L, 100L, 100L)
+                val expected = [
+                    [0, 0, 255],
+                    [255, 0, 255],
+                    [255, 0, 0],
+                    [255, 255, 0],
+                    [0, 255, 0],
+                    [0, 255, 255],
+                    [0, 0, 255],
+                    [128, 128, 128],
+                    [0, 0, 0],
+                    [255, 255, 255]
+                ]
+                palette
+                    .snapshot()
+                    .use { snapshot ->
+                        for (index in 0L..<expected.size)
+                            for (channel in 0L..<3L)
+                                assertEquals(
+                                    expected[index][channel],
+                                    imageByte(snapshot.bytes, index * 4L + channel)
+                                )
+                    }
+                assertFailsWith<TerminalImageException> { palette.define(1024L, 2L, 0L, 0L, 0L) }
+                assertFailsWith<TerminalImageException> { palette.define(0L, 2L, 101L, 0L, 0L) }
+                assertFailsWith<TerminalImageException> { palette.define(0L, 1L, 361L, 0L, 0L) }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun registerAllocationFailureLeavesItsPreviousGenerationAvailable() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 4352L))
+        SixelRegisters(memory)
+            .use { palette ->
+                val version = palette.version
+                assertImagePlaneFailure { palette.define(0L, 2L, 100L, 100L, 100L) }
+                assertEquals(version, palette.version)
+                palette
+                    .snapshot()
+                    .use { value ->
+                        assertEquals(0, imageByte(value.bytes, 0L))
+                        assertEquals(255, imageByte(value.bytes, 3L))
+                    }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+}
+
+private fun assertImagePlaneFailure(action: () -> Unit) {
+    val error = assertFailsWith<TerminalImageException>(block = action)
+    assertEquals(TerminalImageFailure.Limit, error.kind)
+}
+
+private fun assertIndexedRgba(expected: Array<Int>, actual: Array<Byte>) {
+    assertEquals(expected.size, actual.size)
+    for (index in 0L..<expected.size)
+        assertEquals(expected[index], imageByte(actual, index))
+}

@@ -1,0 +1,115 @@
+package scoop.terminal.emulator
+
+/** Copy-on-write register generations; a committed image never observes a later shared edit. */
+internal class SixelRegisters(private val memory: ImageMemory) : Closeable {
+    private var current: ImageBytes? = Some(initialSixelPalette(memory))
+    val count: Long get() = memory.limits.colorRegisters
+    val version: Long get() = available().version
+    private fun available(): ImageBytes = current ?:
+        throw IllegalStateException(Some("Sixel registers are closed"))
+
+    fun snapshot(): ImageBytes = available().retain()
+
+    fun define(index: Long, space: Long, first: Long, second: Long, third: Long): Boolean {
+        if (index < 0L || index >= count)
+            imageFailure(TerminalImageFailure.Limit, "Sixel color register exceeds limit")
+        val color = sixelColor(space, first, second, third)
+        val previous = available().bytes
+        val offset = index * 4L
+        if (imageByte(previous, offset) ==
+            color[0L] &&
+            imageByte(previous, offset + 1L) ==
+            color[1L] &&
+            imageByte(previous, offset + 2L) ==
+            color[2L]
+        )
+            return false
+        val updated = ImageBytes
+            .create(memory, previous.size) {
+                Array<Byte>(previous.size) { position ->
+                    if (position >= offset && position < offset + 3L)
+                        color[position - offset].toByte()
+                    else
+                        previous[position]
+                }
+            }
+        val old = available()
+        current = Some(updated)
+        old.close()
+        return true
+    }
+
+    public override fun close() {
+        current?.close()
+        current = None
+    }
+}
+
+// The VT340 register defaults. Remaining configurable registers start at black.
+private val sixelInitialColors = [
+    [0, 0, 0],
+    [20, 20, 80],
+    [80, 13, 13],
+    [20, 80, 20],
+    [80, 20, 80],
+    [20, 80, 80],
+    [80, 80, 20],
+    [53, 53, 53],
+    [26, 26, 26],
+    [33, 33, 60],
+    [60, 26, 26],
+    [33, 60, 33],
+    [60, 33, 60],
+    [33, 60, 60],
+    [60, 60, 33],
+    [80, 80, 80]
+]
+
+private fun initialSixelPalette(memory: ImageMemory): ImageBytes = ImageBytes
+    .create(memory, memory.limits.colorRegisters * 4L) {
+        Array<Byte>(memory.limits.colorRegisters * 4L) { index ->
+            if (index % 4L == 3L)
+                255.toByte()
+            else if (index / 4L >= 16L)
+                0.toByte()
+            else
+                percentChannel(sixelInitialColors[index / 4L][index % 4L].toLong()).toByte()
+        }
+    }
+
+private fun percentChannel(value: Long): Int = ((value * 255L + 50L) / 100L).toInt()
+
+private fun sixelColor(space: Long, first: Long, second: Long, third: Long): Array<Int> {
+    if (first < 0L || second < 0L || third < 0L || second > 100L || third > 100L)
+        imageFailure(TerminalImageFailure.InvalidData, "invalid Sixel color coordinates")
+    if (space == 2L && first <= 100L)
+        return [percentChannel(first), percentChannel(second), percentChannel(third)]
+    if (space != 1L || first > 360L)
+        imageFailure(TerminalImageFailure.InvalidData, "invalid Sixel color space or coordinates")
+    // DEC's HLS hue starts at blue (0), red is 120 and green is 240. Compute percent
+    // channels first, including their rounding, before converting to the RGBA8 palette.
+    if (third == 0L) {
+        val channel = percentChannel(second)
+        return [channel, channel, channel]
+    }
+    val hue = (first + 240L) % 360L
+    val lightness = second.toDouble() / 100.0
+    val saturation = third.toDouble() / 100.0
+    val distance = if (lightness * 2.0 - 1.0 < 0.0) 1.0 - lightness * 2.0 else lightness * 2.0 - 1.0
+    val chroma = (1.0 - distance) * saturation
+    val segment = hue % 120L
+    val span = if (segment < 60L) segment else 120L - segment
+    val secondary = span.toDouble() / 60.0 * chroma
+    val minimum = lightness - chroma / 2.0
+    val channels = when (hue / 60L) {
+        case 0L -> [chroma, secondary, 0.0]
+        case 1L -> [secondary, chroma, 0.0]
+        case 2L -> [0.0, chroma, secondary]
+        case 3L -> [0.0, secondary, chroma]
+        case 4L -> [secondary, 0.0, chroma]
+        else -> [chroma, 0.0, secondary]
+    }
+    return Array<Int>(3L) { index ->
+        percentChannel(((channels[index] + minimum) * 100.0 + 0.5).toLong())
+    }
+}
