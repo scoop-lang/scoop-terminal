@@ -1,0 +1,248 @@
+package scoop.terminal.emulator
+
+import scoop.text.split
+import scoop.text.startsWith
+import scoop.text.substring
+import scoop.text.toIntOrNone
+
+/** Uncomposited 16-bit RGB components, as used by OSC color replies. */
+public struct TerminalRgb(val red: Int, val green: Int, val blue: Int)
+
+/** A complete immutable host theme or resolved palette. Input arrays are copied. */
+public class TerminalColors public constructor(
+    palette: List<TerminalRgb> = defaultTerminalPalette(),
+    public val foreground: TerminalRgb = TerminalRgb(57671, 58982, 60292),
+    public val background: TerminalRgb = TerminalRgb(5243, 5898, 7209),
+    public val cursor: TerminalRgb = TerminalRgb(55049, 57671, 60948)
+) {
+    public val palette: Array<TerminalRgb> = palette.toArray()
+    init {
+        if (palette.size != 256L)
+            throw IllegalArgumentException(Some("terminal palette requires 256 colors"))
+        for (color in this.palette)
+            checkColor(color)
+        checkColor(foreground)
+        checkColor(background)
+        checkColor(cursor)
+    }
+}
+
+private fun checkColor(color: TerminalRgb) {
+    for (value in [color.red, color.green, color.blue]) {
+        if (value < 0 || value > 65535)
+            throw IllegalArgumentException(Some("terminal color component out of range"))
+    }
+}
+
+private val ansiColors: Array<Int> = [
+    0x101218,
+    0xcc5c63,
+    0x7dbd78,
+    0xd4b36d,
+    0x6b9be4,
+    0xb78bcd,
+    0x64b8c0,
+    0xd4d8df,
+    0x596170,
+    0xf78187,
+    0xa2d898,
+    0xf5d489,
+    0x92b9ff,
+    0xd4a8ec,
+    0x8bd8dd,
+    0xffffff
+]
+
+public fun defaultTerminalPalette(): Array<TerminalRgb> = Array<TerminalRgb>(256L) { index ->
+    if (index < 16L) {
+        val packed = ansiColors[index]
+        TerminalRgb(
+            ((packed shr 16L) and 255) * 257,
+            ((packed shr 8L) and 255) * 257,
+            (packed and 255) * 257
+        )
+    } else if (index >= 232L) {
+        val value = (8 + (index.toInt() - 232) * 10) * 257
+        TerminalRgb(value, value, value)
+    } else {
+        val value = index.toInt() - 16
+        TerminalRgb(cubeLevel(value / 36), cubeLevel((value / 6) % 6), cubeLevel(value % 6))
+    }
+}
+
+private fun cubeLevel(index: Int): Int = (if (index == 0) 0 else 55 + index * 40) * 257
+
+internal class TerminalColorState(private var defaults: TerminalColors) {
+    private val overrides = MutableArray<TerminalRgb?>(259L) { None }
+    private var resolved: TerminalColors? = Some(defaults)
+    val current: TerminalColors
+        get() {
+            when (resolved) {
+                case Some(val value) -> return value
+                case None -> {}
+            }
+            val value = TerminalColors(
+                Array<TerminalRgb>(256L) { index -> color(index) },
+                color(256L), color(257L), color(258L)
+            )
+            resolved = Some(value)
+            return value
+        }
+
+    fun color(index: Long): TerminalRgb = overrides[index] ?:
+        when (index) {
+            case 256L -> defaults.foreground
+            case 257L -> defaults.background
+            case 258L -> defaults.cursor
+            case _ -> defaults.palette[index]
+        }
+
+    fun set(index: Long, value: TerminalRgb?): Boolean {
+        if (overrides[index] == value) return false
+        overrides[index] = value
+        resolved = None
+        return true
+    }
+
+    fun reset(): Boolean {
+        var changed = false
+        for (index in 0L..<259L) {
+            if (set(index, None)) changed = true
+        }
+        return changed
+    }
+
+    fun setDefaults(colors: TerminalColors): Boolean {
+        if (defaults === colors) return false
+        defaults = colors
+        resolved = None
+        return true
+    }
+}
+
+internal fun colorOsc(terminal: TerminalState, selector: Int, bytes: Array<Byte>): Boolean {
+    if (selector !=
+        4 &&
+        (selector < 10 || selector > 12) &&
+        selector !=
+        104 &&
+        (selector < 110 || selector > 112)
+    )
+        return false
+    val text = String.fromUtf8OrNone(bytes) ?: return true
+    val colors = terminal.colorState
+    var changed = false
+    if (selector == 104) {
+        if (text == "") {
+            for (index in 0L..<256L) {
+                if (colors.set(index, None)) changed = true
+            }
+        } else
+            for (part in text.split(';')) {
+                val index = colorIndex(part) ?: continue
+                if (colors.set(index, None)) changed = true
+            }
+    } else if (selector >= 110) {
+        if (text == "") changed = colors.set(256L + selector.toLong() - 110L, None)
+    } else {
+        val fields = text.split(';')
+        var index = 0L
+        while (index < fields.size) {
+            val slot: Long? = if (selector == 4)
+                colorIndex(fields[index])
+            else
+                Some(256L + selector.toLong() - 10L + index)
+            val payload = if (selector == 4) index + 1L else index
+            if (payload >= fields.size) break
+            when (slot) {
+                case Some(val slot) ->
+                    if (slot >= 0L && slot < 259L) {
+                        val value = fields[payload]
+                        if (value == "?") {
+                            val code = if (selector == 4) f"4;${slot}" else (slot - 246L).toString()
+                            terminal
+                                .reply(
+                                    "\u001b]" +
+                                        code +
+                                        ";" +
+                                        colorReply(colors.color(slot)) +
+                                        "\u001b\\"
+                                )
+                        } else {
+                            val color = parseOscColor(value)
+                            when (color) {
+                                case Some(_) -> if (colors.set(slot, color)) changed = true
+                                case None -> {}
+                            }
+                        }
+                    }
+                case None -> {}
+            }
+            index += if (selector == 4) 2L else 1L
+        }
+    }
+    if (changed) terminal.presentationChanged()
+    return true
+}
+
+private fun colorIndex(text: String): Long? {
+    if (text == "") return None
+    for (character in text) {
+        if (character < '0' || character > '9') return None
+    }
+    val value = text.toIntOrNone() ?: return None
+    return if (value >= 0 && value <= 255) Some(value.toLong()) else None
+}
+
+internal fun parseOscColor(text: String): TerminalRgb? {
+    var components: List<String> = []
+    val scaled = text.startsWith("rgb:")
+    if (scaled)
+        components = text.substring(4L).split('/')
+    else if (text.startsWith('#')) {
+        val size = text.charLength - 1L
+        if (size < 3L || size > 12L || size % 3L != 0L) return None
+        val width = size / 3L
+        components = [
+            text.substring(1L, 1L + width),
+            text.substring(1L + width, 1L + 2L * width),
+            text.substring(1L + 2L * width)
+        ]
+    } else
+        return None
+    if (components.size != 3L) return None
+    val values = MutableArray<Int>(3L) { 0 }
+    for (index in 0L..<3L) {
+        val part = components[index]
+        if (part.charLength == 0L || part.charLength > 4L) return None
+        var value = 0
+        var maximum = 0
+        for (character in part) {
+            val digit = hexDigit(character)
+            if (digit < 0) return None
+            value = value * 16 + digit
+            maximum = maximum * 16 + 15
+        }
+        // X11 #RGB specifies high bits; rgb:r/g/b scales each component to 16 bits.
+        values[index] = if (scaled)
+            (value.toLong() * 65535L / maximum.toLong()).toInt()
+        else
+            value shl ((4L - part.charLength) * 4L)
+    }
+    return Some(TerminalRgb(values[0L], values[1L], values[2L]))
+}
+
+internal fun colorReply(color: TerminalRgb): String = "rgb:" +
+    colorHex(color.red) +
+    "/" +
+    colorHex(color.green) +
+    "/" +
+    colorHex(color.blue)
+
+private fun colorHex(value: Int): String {
+    val digits = "0123456789abcdef"
+    val text = StringBuilder()
+    for (shift in [12L, 8L, 4L, 0L])
+        text.append(digits.getCharAt(((value shr shift) and 15).toLong()))
+    return text.toString()
+}

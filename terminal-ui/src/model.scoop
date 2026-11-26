@@ -1,0 +1,308 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.AsyncCloseable
+import scoop.collections.ArrayDeque
+import scoop.collections.HashMap
+import scoop.concurrent.*
+import scoop.terminal.emulator.*
+
+private enum TerminalModelOutcome {
+    Published(TerminalModelPublication), Failed(Throwable)
+}
+
+private struct TerminalModelRequest(
+    val command: TerminalModelCommand,
+    val bytes: Long,
+    val completion: Channel<TerminalModelOutcome>?
+)
+
+/** Window-owned FIFO with one synchronous command at a time on a dedicated model worker. */
+internal class TerminalModel private constructor(
+    state: TerminalModelState,
+    internal val executor: MultiThreadExecutor,
+    private val maxOperations: Long,
+    private val maxBytes: Long
+) : AsyncCloseable {
+    private var state: TerminalModelState? = Some(state)
+    private val requests = ArrayDeque<TerminalModelRequest>()
+    private val ready = Channel<Unit>(1L)
+    private val space = Channel<Unit>(1L)
+    private val tracked = HashMap<Long, TerminalModelTrackedRange>()
+    private var released = ArrayList<Long>()
+    private var nextTracking = -1L
+    private var operations = 0L
+    private var bytes = 0L
+    private var closing = false
+    private var started = false
+    private var driver: Job? = None
+    private var retiring = false
+    private var imagesReleased = false
+    private val stopped = Channel<Unit>(0L)
+    private var value = state.initial
+    val current: TerminalModelPublication get() = value
+    val isClosing: Boolean get() = closing
+
+    companion object {
+        suspend fun create(
+            maxOperations: Long = 1024L,
+            maxBytes: Long = 8388608L,
+            create: () -> Terminal
+        ): TerminalModel {
+            if (maxOperations <= 0L || maxBytes < 256L)
+                throw IllegalArgumentException(Some("invalid terminal model queue limits"))
+            val executor = multiThreadExecutor {
+                workers = 1;
+                blocking { threads = 1 }
+            }
+            try {
+                val state = nonCancellableScope {
+                    withExecutor(executor) {
+                        val terminal = create()
+                        try {
+                            TerminalModelState(terminal)
+                        } catch (error: Throwable) {
+                            terminal.close()
+                            throw error
+                        }
+                    }
+                }
+                return TerminalModel(state, executor, maxOperations, maxBytes)
+            } catch (error: Throwable) {
+                nonCancellableScope {
+                    executor.requestShutdown()
+                    executor.awaitTermination()
+                    executor.join()
+                }
+                throw error
+            }
+        }
+    }
+
+    fun start(
+        scope: CoroutineScope,
+        publish: suspend (TerminalModelPublication) -> Unit = {},
+        failed: (Throwable) -> Unit = {}
+    ) {
+        if (started || closing)
+            throw IllegalStateException(Some("terminal model cannot be started"))
+        started = true
+        val model = this
+        driver = Some(scope.launch { model.run(publish, failed) })
+    }
+
+    /** Ordinary UI calls are bounded and never wait for the model worker. */
+    fun post(command: TerminalModelCommand) {
+        enqueue(command, None)
+    }
+
+    /** PTY reads wait for admission and publication, so a slow decoder backpressures further reads. */
+    suspend fun submit(command: TerminalModelCommand): TerminalModelPublication {
+        val cost = modelCommandBytes(command)
+        if (cost > maxBytes)
+            throw IllegalArgumentException(Some("terminal model request exceeds byte limit"))
+        while (!closing && (operations >= maxOperations || cost > maxBytes - bytes))
+            space.receive()
+        val completed = Channel<TerminalModelOutcome>(1L)
+        enqueue(command, Some(completed))
+        return when (val outcome = completed.receive()) {
+            case Published(val publication) -> publication
+            case Failed(val error) -> throw error
+        }
+    }
+
+    private fun enqueue(command: TerminalModelCommand, completion: Channel<TerminalModelOutcome>?) {
+        if (closing) throw IllegalStateException(Some("terminal model is closed"))
+        val cost = modelCommandBytes(command)
+        if (operations >= maxOperations || cost > maxBytes - bytes)
+            throw IllegalStateException(Some("terminal model queue limit exceeded"))
+        requests.addLast(TerminalModelRequest(command, cost, completion))
+        operations += 1L
+        bytes += cost
+        ready.trySend(Unit)
+    }
+
+    fun track(
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        source: TerminalReading
+    ): TerminalTrackedRange {
+        val model = this
+        val id = nextTracking
+        nextTracking -= 1L
+        val handle = TerminalModelTrackedRange(
+            id,
+            range,
+            source,
+            { value -> model.releaseTracking(value) }
+        )
+        if (closing) {
+            handle.close();
+            return handle
+        }
+        if (tracked.size >= 16384L)
+            throw IllegalStateException(Some("terminal model tracking limit exceeded"))
+        tracked[id] = handle
+        try {
+            post(
+                TerminalModelCommand
+                    .Track(TerminalModelTrackRequest(id, range, kind, source, handle.closed))
+            )
+        } catch (error: Throwable) {
+            tracked.remove(id)
+            handle.close()
+            throw error
+        }
+        return handle
+    }
+
+    private fun releaseTracking(id: Long) {
+        when (tracked[id]) {
+            case None -> return;
+            case Some(_) -> {}
+        }
+        tracked.remove(id)
+        if (closing) return
+        released.add(id)
+        ready.trySend(Unit)
+    }
+
+    private suspend fun run(
+        publish: suspend (TerminalModelPublication) -> Unit,
+        failed: (Throwable) -> Unit
+    ) {
+        val model = this
+        val core = state!!
+        var failure: Throwable = IllegalStateException(Some("terminal model is closed"))
+        try {
+            while (true) {
+                ensureActive()
+                if (released.size > 0L) {
+                    val ids = released.toArray()
+                    released = ArrayList<Long>()
+                    val result = apply(core, TerminalModelCommand.Untrack(ids))
+                    publish(result)
+                }
+                if (requests.size == 0L) {
+                    if (closing) break
+                    ready.receive()
+                    continue
+                }
+                val request = requests.removeFirst()
+                try {
+                    val result = apply(core, request.command)
+                    publish(result)
+                    request.completion?.trySend(TerminalModelOutcome.Published(result))
+                } catch (error: Throwable) {
+                    request.completion?.trySend(TerminalModelOutcome.Failed(error))
+                    throw error
+                } finally {
+                    operations -= 1L
+                    bytes -= request.bytes
+                    space.trySend(Unit)
+                }
+            }
+        } catch (error: CancellationException) {
+            failure = error
+        } catch (error: Throwable) {
+            failure = error
+            closing = true
+            failed(error)
+        } finally {
+            closeFrontend(failure)
+            nonCancellableScope { model.retire() }
+        }
+    }
+
+    private fun closeFrontend(failure: Throwable) {
+        closing = true
+        while (requests.size > 0L)
+            requests.removeFirst().completion?.trySend(TerminalModelOutcome.Failed(failure))
+        operations = 0L
+        bytes = 0L
+        released.clear()
+        val handles = ArrayList<TerminalModelTrackedRange>()
+        for (handle in tracked.values)
+            handles.add(handle)
+        for (handle in handles)
+            handle.close()
+        tracked.clear()
+        ready.close()
+        space.close()
+    }
+
+    private fun accept(result: TerminalModelPublication) {
+        val previous = value
+        value = result
+        previous.imageLease.close()
+        when (result.binding) {
+            case Some(val binding) -> tracked[binding.id]?.bind(binding)
+            case None -> {}
+        }
+    }
+
+    /** Cancellation cannot drop a worker-produced lease before the window adopts it. */
+    private suspend fun apply(
+        core: TerminalModelState,
+        command: TerminalModelCommand
+    ): TerminalModelPublication {
+        val model = this
+        return nonCancellableScope {
+            val result = withExecutor(model.executor) { core.apply(command) }
+            model.accept(result)
+            result
+        }
+    }
+
+    private suspend fun retire() {
+        if (retiring) {
+            stopped.receiveOrNone();
+            return
+        }
+        retiring = true
+        val core = state!!
+        try {
+            try {
+                apply(core, TerminalModelCommand.Finish)
+            } finally {
+                withExecutor(executor) { core.close() }
+            }
+        } finally {
+            try {
+                executor.requestShutdown()
+                executor.awaitTermination()
+                executor.join()
+            } finally {
+                state = None
+                stopped.close()
+            }
+        }
+    }
+
+    public override suspend fun close() {
+        closing = true
+        ready.trySend(Unit)
+        val model = this
+        nonCancellableScope {
+            try {
+                model.driver?.join()
+            } finally {
+                // A cancelled parent may prevent the driver's body (and its finally) from starting.
+                model.closeFrontend(IllegalStateException(Some("terminal model is closed")))
+                try {
+                    model.retire()
+                } finally {
+                    model.driver = None
+                    model.releaseImages()
+                }
+            }
+        }
+    }
+
+    private fun releaseImages() {
+        if (imagesReleased) return
+        imagesReleased = true
+        val previous = value
+        value = previous.withoutImages()
+        previous.imageLease.close()
+    }
+}

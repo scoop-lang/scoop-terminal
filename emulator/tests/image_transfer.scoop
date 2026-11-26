@@ -1,0 +1,233 @@
+package scoop.terminal.emulator
+
+import scoop.compression.*
+import scoop.io.encoding.Base64
+import scoop.test.*
+
+@Test
+private class TerminalImageTransferTest {
+    @Test fun pagesAreLinearAndFinalizationCountsBothOldAndNewStorage() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 2000L))
+        val pages = ImageAccumulator(memory, 8L)
+        pages.append(4L) { "abcd".toByteArray() }
+        pages.append(4L) { "efgh".toByteArray() }
+        assertEquals(1032L, memory.bytes)
+        val rejected = ImageBytes.create(memory, 1L) { "z".toByteArray() }
+        assertTransferFailure(TerminalImageFailure.Limit) { pages.appendOwned(rejected) }
+        assertTrue(rejected.isClosed)
+        assertEquals(1032L, memory.bytes)
+        pages
+            .finish()
+            .use { bytes ->
+                assertEquals("abcdefgh", String.fromUtf8(bytes.bytes))
+                assertEquals(264L, memory.bytes)
+                assertTrue(pages.isClosed)
+            }
+        assertEquals(0L, memory.bytes)
+        val tight = ImageMemory(TerminalImageLimits(maxCpuBytes = 1150L))
+        val pending = ImageAccumulator(tight, 8L)
+        pending.append(4L) { "abcd".toByteArray() }
+        pending.append(4L) { "efgh".toByteArray() }
+        assertTransferFailure(TerminalImageFailure.Limit) { pending.finish() }
+        assertTrue(pending.isClosed)
+        assertEquals(0L, tight.bytes)
+        pending.close()
+    }
+
+    @Test fun chunksHaveOneCumulativeLimitAndReleaseOnFinalCancelAndFailure() {
+        val memory = ImageMemory(TerminalImageLimits(maxEncodedBytes = 8L))
+        val transfer = ImageBase64Transfer(memory)
+        when (transfer.push("Zm9v", true)) {
+            case None -> {}
+
+            case Some(val premature) -> {
+                premature.close()
+                fail(Some("non-final chunk published an image"))
+            }
+        }
+        transfer
+            .push("YmFy", false)!!
+            .use { bytes ->
+                assertEquals("foobar", String.fromUtf8(bytes.bytes))
+                assertEquals(8L, transfer.encodedBytes)
+                assertTrue(transfer.isClosed)
+                assertEquals(262L, memory.bytes)
+            }
+        assertEquals(0L, memory.bytes)
+        assertFailsWith<IllegalStateException> { transfer.push("", false) }
+        val tooMuch = ImageBase64Transfer(memory)
+        tooMuch.push("Zm9v", true)
+        assertTransferFailure(TerminalImageFailure.Limit) { tooMuch.push("YmFyYmF6", false) }
+        assertTrue(tooMuch.isClosed)
+        assertEquals(0L, memory.bytes)
+        val canceled = ImageBase64Transfer(memory)
+        canceled.push("Zm9v", true)
+        canceled.close()
+        canceled.close()
+        assertEquals(0L, memory.bytes)
+        val bounded = ImageBase64Transfer(memory, 2L)
+        assertTransferFailure(TerminalImageFailure.Limit) { bounded.push("Zm9v", false) }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun base64UsesCanonicalBitsAndBoundedChunksWithoutEmptyPageGrowth() {
+        val memory = ImageMemory(TerminalImageLimits())
+        for (bad in ["A", "Zh==", "Zm9=", "AA=A", "Zm9v\n", "é"])
+            ImageBase64Transfer(memory)
+                .use { transfer ->
+                    assertTransferFailure(TerminalImageFailure.InvalidData) {
+                        transfer.push(bad, false)
+                    }
+                    assertEquals(0L, memory.bytes)
+                }
+        for (bad in ["Zg", "Zg=="])
+            ImageBase64Transfer(memory)
+                .use { transfer ->
+                    assertTransferFailure(TerminalImageFailure.InvalidData) {
+                        transfer.push(bad, true)
+                    }
+                }
+        ImageBase64Transfer(memory)
+            .use { transfer ->
+                transfer
+                    .push("Zg", false)!!
+                    .use { bytes -> assertEquals("f", String.fromUtf8(bytes.bytes)) }
+            }
+        val raw = Array<Byte>(3072L) { index -> (index % 251L).toByte() }
+        val full = Base64.Default.encode(raw)
+        assertEquals(4096L, full.byteLength)
+        ImageBase64Transfer(memory)
+            .use { transfer ->
+                transfer.push(full, true)
+                for (_ in 0L..<1000L)
+                    transfer.push("", true)
+                assertEquals(3840L, memory.bytes)
+                transfer
+                    .push("", false)!!
+                    .use { bytes ->
+                        for (index in 0L..<raw.size)
+                            assertEquals(raw[index], bytes.bytes[index])
+                    }
+            }
+        ImageBase64Transfer(memory)
+            .use { transfer ->
+                assertTransferFailure(TerminalImageFailure.Limit) {
+                    transfer.push(full + "A", false)
+                }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun zlibStreamsAcrossInputAndOutputPagesAndPreservesExactByteLength() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val raw = Array<Byte>(24000L) { index -> (index % 251L).toByte() }
+        val compressed = compress(raw, CompressionOptions.Zlib(DeflateOptions(level = 0)))
+        assertTrue(compressed.size > 8192L)
+        ImageBytes
+            .create(memory, compressed.size) { compressed }
+            .use { input ->
+                val before = memory.bytes
+                inflateImage(input, Some(raw.size))
+                    .use { decoded ->
+                        assertEquals(before + raw.size + ImageBytes.overhead, memory.bytes)
+                        assertEquals(raw.size, decoded.bytes.size)
+                        for (index in 0L..<raw.size)
+                            assertEquals(raw[index], decoded.bytes[index])
+                    }
+                assertEquals(before, memory.bytes)
+            }
+        val empty = compress([], CompressionOptions.Zlib(DeflateOptions()))
+        ImageBytes
+            .create(memory, empty.size) { empty }
+            .use { input ->
+                inflateImage(input, Some(0L))
+                    .use { decoded -> assertEquals(0L, decoded.bytes.size) }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun compressedBombTruncationTrailingDataAndSizeMismatchReleaseWork() {
+        val raw = Array<Byte>(20000L) { 0.toByte() }
+        val compressed = compress(raw, CompressionOptions.Zlib(DeflateOptions()))
+        val memory = ImageMemory(TerminalImageLimits(maxDecompressedBytes = 4096L))
+        ImageBytes
+            .create(memory, compressed.size) { compressed }
+            .use { input ->
+                val before = memory.bytes
+                assertTransferFailure(TerminalImageFailure.Limit) { inflateImage(input) }
+                assertTransferFailure(TerminalImageFailure.Limit) {
+                    inflateImage(input, Some(20000L))
+                }
+                assertTransferFailure(TerminalImageFailure.InvalidData) {
+                    inflateImage(input, Some(4096L))
+                }
+                assertEquals(before, memory.bytes)
+            }
+        val small = compress("data".toByteArray(), CompressionOptions.Zlib(DeflateOptions()))
+        for (length in [0L, 2L, small.size / 2L, small.size - 1L])
+            ImageBytes
+                .create(memory, length) { Array<Byte>(length) { index -> small[index] } }
+                .use { input ->
+                    val before = memory.bytes
+                    assertTransferFailure(TerminalImageFailure.InvalidData) { inflateImage(input) }
+                    assertEquals(before, memory.bytes)
+                }
+        for (trailer in [[0.toByte()], small]) {
+            val data = Array<Byte>(small.size + trailer.size) { index ->
+                if (index < small.size) small[index] else trailer[index - small.size]
+            }
+            ImageBytes
+                .create(memory, data.size) { data }
+                .use { input ->
+                    val before = memory.bytes
+                    assertTransferFailure(TerminalImageFailure.InvalidData) { inflateImage(input) }
+                    assertEquals(before, memory.bytes)
+                }
+        }
+        ImageBytes
+            .create(memory, small.size) { small }
+            .use { input ->
+                assertTransferFailure(TerminalImageFailure.InvalidData) {
+                    inflateImage(input, Some(5L))
+                }
+                assertTransferFailure(TerminalImageFailure.InvalidData) {
+                    inflateImage(input, Some(3L))
+                }
+                inflateImage(input, Some(4L))
+                    .use { decoded -> assertEquals("data", String.fromUtf8(decoded.bytes)) }
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun cpuLimitIncludesInflateWorkspaceAndFinalCopyWithoutSpendingOtherLeases() {
+        val raw = Array<Byte>(16384L) { index -> index.toByte() }
+        val compressed = compress(raw, CompressionOptions.Zlib(DeflateOptions(level = 0)))
+        val inputCost = compressed.size + ImageBytes.overhead
+        val limit = inputCost + 540672L + 512L + raw.size + 2048L + raw.size / 2L
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = limit))
+        ImageBytes
+            .create(memory, compressed.size) { compressed }
+            .use { input ->
+                assertTransferFailure(TerminalImageFailure.Limit) { inflateImage(input) }
+                assertEquals(inputCost, memory.bytes)
+                assertEquals(compressed[0L], input.bytes[0L])
+            }
+        assertEquals(0L, memory.bytes)
+        val tiny = ImageMemory(TerminalImageLimits(maxCpuBytes = 2000L))
+        ImageBytes
+            .create(tiny, compressed.size / 100L) {
+                Array<Byte>(compressed.size / 100L) { index -> compressed[index] }
+            }
+            .use { input ->
+                val before = tiny.bytes
+                assertTransferFailure(TerminalImageFailure.Limit) { inflateImage(input) }
+                assertEquals(before, tiny.bytes)
+            }
+        assertEquals(0L, tiny.bytes)
+    }
+}
+
+private fun assertTransferFailure(kind: TerminalImageFailure, action: () -> Unit) {
+    val error = assertFailsWith<TerminalImageException>(block = action)
+    assertEquals(kind, error.kind)
+}

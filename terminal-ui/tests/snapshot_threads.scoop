@@ -1,0 +1,158 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.concurrent.*
+import scoop.platform.concurrent.currentThreadId
+import scoop.platform.concurrent.ThreadId
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalSnapshotThreadTest {
+    @Test fun concurrentConsumersShareOneGenerationAndEnforceBothBudgets() {
+        val terminal = Terminal(1L, 1L)
+        val old = terminal.reading
+        terminal.feed("a".toByteArray())
+        val current = terminal.reading
+        val pool = TerminalSnapshotPool(TerminalSnapshotLimits(2L, 10000L))
+        val entered = Channel<ThreadId>(2L)
+        val releaseFirst = Channel<Unit>(1L)
+        val releaseSecond = Channel<Unit>(1L)
+        val owner = currentThreadId()
+        multiThreadExecutor {
+            workers = 2;
+            blocking { threads = 1 }
+        }
+            .use { executor ->
+                eventLoop()
+                    .run {
+                        val first = async(executor) {
+                            pool
+                                .acquire(old)
+                                .use {
+                                    entered.send(currentThreadId())
+                                    releaseFirst.receive()
+                                    assertEquals("", it.lines(0L, 1L)[0L].cells[0L].text)
+                                }
+                        }
+                        val second = async(executor) {
+                            pool
+                                .acquire(old)
+                                .use {
+                                    entered.send(currentThreadId())
+                                    releaseSecond.receive()
+                                    assertEquals("", it.lines(0L, 1L)[0L].cells[0L].text)
+                                }
+                        }
+                        val firstThread = entered.receive()
+                        val secondThread = entered.receive()
+                        assertNotEquals(owner, firstThread)
+                        assertNotEquals(owner, secondThread)
+                        assertFailsWith<IllegalStateException> {
+                            pool.acquire(old);
+                            Unit
+                        }
+                        assertFailsWith<IllegalStateException> {
+                            pool.acquire(current);
+                            Unit
+                        }
+                        releaseFirst.send(Unit)
+                        first.await()
+                        assertFailsWith<IllegalStateException> {
+                            pool.acquire(current);
+                            Unit
+                        }
+                        releaseSecond.send(Unit)
+                        second.await()
+                    }
+            }
+        pool
+            .acquire(current)
+            .use { snapshot -> assertEquals("a", snapshot.lines(0L, 1L)[0L].cells[0L].text) }
+    }
+
+    @Test fun concurrentCloseRetiresExactlyOneLeaseAndDoesNotSpendTheNextLease() {
+        val reading = Terminal(1L, 1L).reading
+        val pool = TerminalSnapshotPool(TerminalSnapshotLimits(1L, 10000L))
+        multiThreadExecutor {
+            workers = 2;
+            blocking { threads = 1 }
+        }
+            .use { executor ->
+                eventLoop()
+                    .run {
+                        for (iteration in 0L..<100L) {
+                            val lease = pool.acquire(reading)
+                            val first = async(executor) { lease.close() }
+                            val second = async(executor) { lease.close() }
+                            first.await()
+                            second.await()
+                            assertTrue(lease.isClosed)
+                            pool
+                                .acquire(reading)
+                                .use {
+                                    lease.close()
+                                    assertFailsWith<IllegalStateException> {
+                                        pool.acquire(reading);
+                                        Unit
+                                    }
+                                }
+                        }
+                    }
+            }
+        pool.acquire(reading).close()
+    }
+
+    @Test fun independentWorkerQueriesReleaseAllSharedLeasesAndWorkingReservations() {
+        val terminal = Terminal(16L, 2L)
+        terminal.feed("Straße Straße".toByteArray())
+        val reading = terminal.reading
+        val pool = TerminalSnapshotPool(TerminalSnapshotLimits(4L, 100000L))
+        multiThreadExecutor {
+            workers = 2;
+            blocking { threads = 1 }
+        }
+            .use { executor ->
+                eventLoop()
+                    .run {
+                        val first = async(executor) { repeatedSnapshotSearch(pool, reading) }
+                        val second = async(executor) { repeatedSnapshotSearch(pool, reading) }
+                        val generations = MutableArray<Boolean>(201L) { false }
+                        for (values in [first.await(), second.await()]) {
+                            for (generation in values) {
+                                assertFalse(generations[generation])
+                                generations[generation] = true
+                            }
+                        }
+                        for (generation in 1L..200L)
+                            assertTrue(generations[generation])
+                    }
+            }
+        // A different, much larger generation fits only after every old working lease is gone.
+        terminal.resize(200L, 2L)
+        pool.acquire(terminal.reading).close()
+    }
+}
+
+private fun repeatedSnapshotSearch(pool: TerminalSnapshotPool, reading: TerminalReading): Array<
+    Long
+> {
+    val generations = ArrayList<Long>()
+    for (iteration in 0L..<100L) {
+        val snapshot = pool.acquire(reading)
+        val search = try {
+            snapshot.search("STRASSE", TerminalSearchOptions(caseSensitive = false))
+        } finally {
+            snapshot.close()
+        }
+        try {
+            val page = search.nextPage()
+            assertEquals(TerminalSearchStatus.Complete, page.status)
+            assertEquals(2L, page.matches.size)
+            generations.add(page.generation)
+        } finally {
+            search.close()
+        }
+    }
+    return generations.toArray()
+}

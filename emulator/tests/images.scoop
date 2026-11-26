@@ -1,0 +1,206 @@
+package scoop.terminal.emulator
+
+import scoop.compiler.includeBytes
+import scoop.test.*
+
+@Test
+private class TerminalImageDecodeTest {
+    @Test fun dimensionsAndReservationsRejectBeforeAllocationAndRefundOnlyOnce() {
+        val limits = TerminalImageLimits(maxCpuBytes = 1024L)
+        val memory = ImageMemory(limits)
+        val first = memory.reserve(400L)
+        val second = memory.reserve(500L)
+        assertEquals(900L, memory.bytes)
+        assertImageFailure(TerminalImageFailure.Limit) { first.resize(600L) }
+        assertEquals(400L, first.bytes)
+        assertEquals(900L, memory.bytes)
+        first.resize(200L)
+        second.resize(800L)
+        assertEquals(1000L, memory.bytes)
+        first.close()
+        first.close()
+        assertEquals(800L, memory.bytes)
+        assertFailsWith<IllegalStateException> { first.resize(0L) }
+        second.close()
+        assertEquals(0L, memory.bytes)
+        assertEquals(TerminalImageSize(4096, 4096), imageSize(4096L, 4096L, limits))
+        assertImageFailure(TerminalImageFailure.Limit) {
+            imageSize(Long.MAX_VALUE, Long.MAX_VALUE, limits)
+        }
+        assertImageFailure(TerminalImageFailure.Limit) { imageSize(4096L, 4097L, limits) }
+        assertImageFailure(TerminalImageFailure.InvalidData) { imageSize(0L, 1L, limits) }
+        assertImageFailure(TerminalImageFailure.Limit) { imageByteSum(Long.MAX_VALUE, 1L) }
+        assertFailsWith<IllegalArgumentException> { ImageMemory(limits.{maxCpuBytes: -1L}) }
+    }
+
+    @Test fun sharedPixelsRetainTheirVersionAndReleaseOnTheLastLease() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 1024L))
+        val bytes = ImageBytes
+            .create(memory, 4L) { [1.toByte(), 2.toByte(), 3.toByte(), 4.toByte()] }
+        val version = bytes.version
+        val raster = decodeImageRgb(bytes, 1L, 1L, true)
+        val snapshot = raster.retain()
+        assertEquals(version, raster.pixels.version)
+        assertSame(bytes.bytes, raster.pixels.bytes)
+        assertEquals(260L, memory.bytes)
+        bytes.close()
+        raster.close()
+        assertEquals(260L, memory.bytes)
+        assertEquals(4.toByte(), snapshot.pixels.bytes[3L])
+        snapshot.close()
+        snapshot.close()
+        assertEquals(0L, memory.bytes)
+        assertFailsWith<IllegalStateException> { snapshot.pixels.bytes }
+        assertFailsWith<IllegalStateException> { bytes.retain() }
+        ImageBytes.create(memory, 0L) { [] }.use { next -> assertTrue(next.version > version) }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun rgbConversionAddsOpaqueAlphaAndCountsBothLiveBuffers() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 525L))
+        ImageBytes
+            .create(memory, 6L) {
+                [1.toByte(), 2.toByte(), 3.toByte(), 4.toByte(), 5.toByte(), 6.toByte()]
+            }
+            .use { input ->
+                assertImageFailure(TerminalImageFailure.Limit) {
+                    decodeImageRgb(input, 2L, 1L, false)
+                }
+                assertEquals(262L, memory.bytes)
+                assertImageFailure(TerminalImageFailure.InvalidData) {
+                    decodeImageRgb(input, 1L, 1L, true)
+                }
+            }
+        val ample = ImageMemory(TerminalImageLimits())
+        ImageBytes
+            .create(ample, 6L) {
+                [1.toByte(), 2.toByte(), 3.toByte(), 4.toByte(), 5.toByte(), 6.toByte()]
+            }
+            .use { input ->
+                decodeImageRgb(input, 2L, 1L, false)
+                    .use { image ->
+                        assertEquals(526L, ample.bytes)
+                        assertImageBytes([1, 2, 3, 255, 4, 5, 6, 255], image.pixels.bytes)
+                    }
+            }
+        assertEquals(0L, memory.bytes)
+        assertEquals(0L, ample.bytes)
+    }
+
+    @Test fun pngPreflightAcceptsRealFormatsAndRejectsFramingAndLimitsBeforeCodec() {
+        val limits = TerminalImageLimits()
+        assertEquals(
+            TerminalImageSize(3, 2),
+            inspectImagePng(includeBytes("data/images/rgba.png"), limits)
+        )
+        assertEquals(
+            TerminalImageSize(3, 2),
+            inspectImagePng(includeBytes("data/images/ancillary.png"), limits)
+        )
+        assertEquals(
+            TerminalImageSize(3, 1),
+            inspectImagePng(includeBytes("data/images/palette.png"), limits)
+        )
+        assertEquals(
+            TerminalImageSize(2, 1),
+            inspectImagePng(includeBytes("data/images/gray16.png"), limits)
+        )
+        assertEquals(
+            TerminalImageSize(5, 5),
+            inspectImagePng(includeBytes("data/images/adam7.png"), limits)
+        )
+        for (
+            bad in [
+                includeBytes("data/images/no-iend.png"),
+                includeBytes("data/images/bad-crc.png"),
+                includeBytes("data/images/unknown-critical.png"),
+                includeBytes("data/images/duplicate-ihdr.png"),
+                includeBytes("data/images/trailing.png"),
+                includeBytes("data/images/no-palette.png"),
+                includeBytes("data/images/bad-chunk-length.png")
+            ]
+        )
+            assertImageFailure(TerminalImageFailure.InvalidData) { inspectImagePng(bad, limits) }
+        assertImageFailure(TerminalImageFailure.Unsupported) {
+            inspectImagePng(includeBytes("data/images/animated.png"), limits)
+        }
+        assertImageFailure(TerminalImageFailure.Limit) {
+            inspectImagePng(includeBytes("data/images/huge.png"), limits)
+        }
+        assertImageFailure(TerminalImageFailure.Limit) {
+            inspectImagePng(includeBytes("data/images/rgba.png"), limits.{maxEncodedBytes: 16L})
+        }
+        val png = includeBytes("data/images/rgba.png")
+        for (length in 0L..<png.size)
+            assertImageFailure(TerminalImageFailure.InvalidData) {
+                inspectImagePng(Array<Byte>(length) { index -> png[index] }, limits)
+            }
+    }
+
+    @Test fun decoderPeakIsReservedAndFailureDoesNotKeepWorkOrPublishPartialPixels() {
+        val png = includeBytes("data/images/rgba.png")
+        val inputCost = png.size + ImageBytes.overhead
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = inputCost + 1256L))
+        val decoder = ImageTestDecoder(memory, inputCost)
+        ImageBytes
+            .create(memory, png.size) { png }
+            .use { input ->
+                assertImageFailure(TerminalImageFailure.Unsupported) { decodeImagePng(input, None) }
+                decoder.peak = 1001L
+                assertImageFailure(TerminalImageFailure.Limit) {
+                    decodeImagePng(input, Some(decoder))
+                }
+                assertEquals(0L, decoder.calls)
+                decoder.peak = 1000L
+                decodeImagePng(input, Some(decoder))
+                    .use { image ->
+                        assertEquals(inputCost + 280L, memory.bytes)
+                        assertEquals(24L, image.pixels.bytes.size)
+                    }
+                assertEquals(inputCost, memory.bytes)
+                decoder.fail = true
+                assertImageFailure(TerminalImageFailure.InvalidData) {
+                    decodeImagePng(input, Some(decoder))
+                }
+                assertEquals(inputCost, memory.bytes)
+                decoder.fail = false
+                decoder.wrongSize = true
+                assertImageFailure(TerminalImageFailure.InvalidData) {
+                    decodeImagePng(input, Some(decoder))
+                }
+                assertEquals(inputCost, memory.bytes)
+                decoder.peak = 0L
+                assertFailsWith<IllegalArgumentException> { decodeImagePng(input, Some(decoder)) }
+            }
+        assertEquals(0L, memory.bytes)
+        assertFailsWith<IllegalStateException> { ImageBytes.create(memory, 2L) { [] } }
+        assertEquals(0L, memory.bytes)
+    }
+}
+
+private class ImageTestDecoder(val memory: ImageMemory, val inputCost: Long) :
+    TerminalImageDecoder {
+    var peak = 1000L
+    var calls = 0L
+    var fail = false
+    var wrongSize = false
+    public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long = peak
+    public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
+        calls += 1L
+        assertEquals(inputCost + peak + ImageBytes.overhead, memory.bytes)
+        assertEquals(TerminalImageSize(3, 2), size)
+        if (fail) imageFailure(TerminalImageFailure.InvalidData, "fixture decoder failure")
+        return Array<Byte>(if (wrongSize) 1L else size.rgbaBytes) { 0.toByte() }
+    }
+}
+
+private fun assertImageFailure(kind: TerminalImageFailure, action: () -> Unit) {
+    val error = assertFailsWith<TerminalImageException>(block = action)
+    assertEquals(kind, error.kind)
+}
+
+private fun assertImageBytes(expected: Array<Int>, actual: Array<Byte>) {
+    assertEquals(expected.size, actual.size)
+    for (index in 0L..<expected.size)
+        assertEquals(expected[index], imageByte(actual, index))
+}

@@ -1,0 +1,146 @@
+package scoop.terminal.emulator
+
+internal fun kittyPlacement(
+    terminal: TerminalState,
+    control: KittyControl,
+    image: TerminalImage
+): TerminalImagePlacement {
+    val screen = terminal.screen
+    val store = terminal.images
+    val x = control.value('x')
+    val y = control.value('y')
+    val width = image.size.width.toLong() - x
+    val height = image.size.height.toLong() - y
+    if (width <= 0L || height <= 0L) kittyFailure("EINVAL", "image source rectangle is empty")
+    val requestedWidth = control.value('w')
+    val requestedHeight = control.value('h')
+    if (control.value('X') >= store.cellWidth || control.value('Y') >= store.cellHeight)
+        kittyFailure("EINVAL", "image pixel offset is outside the cell")
+    val anchor = screen
+        .anchorAt(screen.historySize + screen.row, screen.column, TerminalAffinity.Before)!!
+    val point = screen.resolve(anchor)!!
+    return TerminalImagePlacement(
+        store.key(), image.key,
+        if (image.imageId == 0L) 0L else control.value('p'), anchor,
+        TerminalImageRect(
+            x, y,
+            if (requestedWidth == 0L || requestedWidth > width) width else requestedWidth,
+            if (requestedHeight == 0L || requestedHeight > height) height else requestedHeight
+        ),
+        offsetX = control.value('X'), offsetY = control.value('Y'),
+        columns = control.value('c'), rows = control.value('r'), z = control.value('z'),
+        columnOffset = screen.column - point.column
+    )
+}
+
+internal fun kittyDisplay(
+    terminal: TerminalState,
+    control: KittyControl,
+    placement: TerminalImagePlacement
+) {
+    val screen = terminal.screen
+    val store = terminal.images
+    store.makeRoom(4096L, screen, placement.imageKey)
+    val entry = store.place(screen, placement)
+    if (control.value('C') == 1L) return
+    val area = store.geometry(entry)!!
+    val lastColumn = if (screen.column >= screen.left && screen.column <= screen.right)
+        screen.right
+    else
+        screen.columns - 1L
+    val lastRow = if (screen.row >= screen.top && screen.row <= screen.bottom)
+        screen.bottom
+    else
+        screen.rows - 1L
+    screen.moveColumn(clamp(screen.column + area.occupiedColumns, 0L, lastColumn))
+    // Kitty places the cursor on the image's last row, even for a one-row placement.
+    screen.row = clamp(screen.row + area.occupiedRows - 1L, 0L, lastRow)
+    terminal.presentationChanged()
+}
+
+/** Selector geometry is in terminal cells, including a requested c/r rectangle's empty margin. */
+private fun kittyPlacementCells(
+    store: TerminalImageStore,
+    entry: StoredImagePlacement
+): TerminalImageBounds? {
+    val point = store.position(entry) ?: return None
+    val area = store.geometry(entry) ?: return None
+    val record = entry.record
+    val cellWidth = store.cellWidth.toDouble()
+    val cellHeight = store.cellHeight.toDouble()
+    val x = (point.column + record.columnOffset).toDouble()
+    val y = (point.row + record.rowOffset).toDouble()
+    val left = if (record.clipLeft > 0.0) (area.visible.x / cellWidth).toLong().toDouble() else x
+    val top = if (record.clipTop > 0.0) (area.visible.y / cellHeight).toLong().toDouble() else y
+    val right = if (record.clipRight < 1.0)
+        imageCeil((area.visible.x + area.visible.width) / cellWidth).toDouble()
+    else
+        x + area.occupiedColumns.toDouble()
+    val bottom = if (record.clipBottom < 1.0)
+        imageCeil((area.visible.y + area.visible.height) / cellHeight).toDouble()
+    else
+        y + area.occupiedRows.toDouble()
+    return Some(TerminalImageBounds(left, top, right - left, bottom - top))
+}
+
+internal fun kittyDelete(terminal: TerminalState, control: KittyControl) {
+    val screen = terminal.screen
+    val store = terminal.images
+    val selector = control.value('d').toInt().toChar()
+    val freeData = selector >= 'A' && selector <= 'Z'
+    val kind = if (freeData) (selector.code + 32).toChar() else selector
+    val id = control.value('i')
+    val number = control.value('I')
+    val target = store.kitty(screen.bufferEpoch, id, number)?.key ?: 0L
+    val p = control.value('p')
+    val x = control.value('x')
+    val y = control.value('y')
+    if ((kind == 'i' && id == 0L) || (kind == 'n' && number == 0L))
+        kittyFailure("EINVAL", "delete selector requires an image identity")
+    if ((kittyContains("pqx", kind) && x == 0L) || (kittyContains("pqy", kind) && y == 0L))
+        kittyFailure("EINVAL", "delete coordinates are one based")
+    if (kind == 'r' && x > y) kittyFailure("EINVAL", "image id range is reversed")
+    val resources = if (freeData && p == 0L && kittyContains("inr", kind))
+        store.kittyResources(screen.bufferEpoch)
+    else
+        []
+    for (entry in store.entries(screen)) {
+        val image = store.get(entry.record.imageKey) ?: continue
+        if (image.protocol != TerminalImageProtocol.Kitty) continue
+        val cells = kittyPlacementCells(store, entry) ?: continue
+        val column = if (kind == 'c') screen.column else x - 1L
+        val row = screen.historySize + if (kind == 'c') screen.row else y - 1L
+        val atX = cells.x <= column.toDouble() && column.toDouble() < cells.x + cells.width
+        val atY = cells.y <= row.toDouble() && row.toDouble() < cells.y + cells.height
+        val selected = when (kind) {
+            case 'a' ->
+                imageIntersects(
+                    cells,
+                    TerminalImageBounds(
+                        0.0,
+                        screen.historySize.toDouble(),
+                        screen.columns.toDouble(),
+                        screen.rows.toDouble()
+                    )
+                )
+            case 'i' -> image.key == target && (p == 0L || entry.record.placementId == p)
+            case 'n' -> image.key == target && (p == 0L || entry.record.placementId == p)
+            case 'c' -> atX && atY
+            case 'p' -> atX && atY
+            case 'q' -> atX && atY && entry.record.z == control.value('z')
+            case 'r' -> image.imageId > 0L && image.imageId >= x && image.imageId <= y
+            case 'x' -> atX
+            case 'y' -> atY
+            case 'z' -> entry.record.z == control.value('z')
+            case _ -> false
+        }
+        if (selected) store.removePlacement(entry.record.key, freeData)
+    }
+    for (image in resources) {
+        val selected = if (kind == 'r')
+            image.imageId > 0L && image.imageId >= x && image.imageId <= y
+        else
+            image.key == target
+        if (selected && !store.hasPlacements(image.key)) store.removeResource(image.key)
+    }
+}

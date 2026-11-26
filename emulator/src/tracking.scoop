@@ -1,0 +1,523 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+
+/** Content ranges retire on overwritten text; boundaries retire on erasure; positions follow edits. */
+public enum TerminalTrackingKind {
+    Content, Boundary, Position
+}
+
+public enum TerminalInvalidation {
+    Overwritten, Deleted, Evicted, Stale, Closed, Rejected
+}
+
+public enum TerminalTrackingState {
+    Available(TerminalRange), Invalidated(TerminalInvalidation)
+}
+
+public struct TerminalTrackingLimits(
+    val maxHandles: Long = 16384L,
+    val maxRowReferences: Long = 262144L
+)
+
+/** An owned registration; adapters may queue registration and closure on the terminal owner. */
+public interface TerminalTrackedRange : Closeable {
+    public val id: Long
+    public val isClosed: Boolean
+    public fun state(reading: TerminalReading): TerminalTrackingState
+}
+
+/** Its visible state always belongs to the supplied committed reading. */
+internal class CoreTrackedRange(
+    public override val id: Long,
+    owner: TerminalTracking,
+    private val initial: TerminalTrackingState,
+    private val presentation: Long
+) : TerminalTrackedRange {
+    private var owner: TerminalTracking? = Some(owner)
+    private var closed = false
+    public override val isClosed: Boolean get() = closed
+    public override fun state(reading: TerminalReading): TerminalTrackingState {
+        if (closed) return TerminalTrackingState.Invalidated(TerminalInvalidation.Closed)
+        return when (val value = reading.trackedRange(id)) {
+            case Some(val state) -> state
+            case None ->
+                if (reading.presentationVersion == presentation)
+                    initial
+                else
+                    TerminalTrackingState.Invalidated(TerminalInvalidation.Stale)
+        }
+    }
+    public override fun close() {
+        if (closed) return
+        closed = true
+        val tracking = owner
+        owner = None
+        tracking?.remove(id)
+    }
+}
+
+internal struct TrackedPoint(val row: ScreenRow, val column: Long, val affinity: TerminalAffinity) {
+    fun anchor(epoch: Long): TerminalAnchor = TerminalAnchor(
+        epoch, row.logical.id,
+        row.logicalOffset + row.logicalColumn(column), affinity
+    )
+}
+
+internal class TrackedEntry(
+    val id: Long,
+    val epoch: Long,
+    val kind: TerminalTrackingKind,
+    start: TrackedPoint,
+    end: TrackedPoint,
+    var rows: Array<ScreenRow>,
+    val followTextEdits: Boolean = true
+) {
+    private var firstPoint: TrackedPoint? = Some(start)
+    private var lastPoint: TrackedPoint? = Some(end)
+    var start: TrackedPoint
+        get() = firstPoint!!
+        set(value) {
+            firstPoint = Some(value)
+        }
+    var end: TrackedPoint
+        get() = lastPoint!!
+        set(value) {
+            lastPoint = Some(value)
+        }
+    fun releasePoints() {
+        firstPoint = None;
+        lastPoint = None
+    }
+    var invalid: TerminalInvalidation? = None
+    var dirty = false
+    var onChange: (() -> Unit)? = None
+    fun state(): TerminalTrackingState = when (invalid) {
+        case Some(val reason) -> TerminalTrackingState.Invalidated(reason)
+        case None ->
+            TerminalTrackingState.Available(TerminalRange(start.anchor(epoch), end.anchor(epoch)))
+    }
+}
+
+internal class TrackingReading(
+    private val root: SnapshotIndex<TerminalTrackingState>?,
+    val count: Long,
+    val version: Long
+) {
+    fun get(id: Long): TerminalTrackingState? = indexValue(root, id)
+}
+
+/** Sparse row subscribers, not a history of every edit. Old snapshots retain only immutable results. */
+internal class TerminalTracking(
+    private val limits: TerminalTrackingLimits = TerminalTrackingLimits()
+) {
+    private val entries = HashMap<Long, TrackedEntry>()
+    private val dirty = ArrayList<TrackedEntry>()
+    private var root: SnapshotIndex<TerminalTrackingState>? = None
+    private var nextId = 1L
+    private var rowReferences = 0L
+    private var pending = false
+    private var version = 0L
+    init {
+        if (limits.maxHandles < 0L || limits.maxRowReferences < 0L)
+            throw IllegalArgumentException(Some("negative terminal tracking limit"))
+    }
+
+    fun takeChanged(): Boolean {
+        val value = pending;
+        pending = false;
+        return value
+    }
+
+    fun snapshot(): TrackingReading {
+        for (entry in dirty) {
+            if (entry.dirty) {
+                root = Some(indexUpdated(root, entry.id, entry.state()))
+                entry.dirty = false
+            }
+        }
+        dirty.clear()
+        return TrackingReading(root, entries.size, version)
+    }
+
+    fun register(
+        screen: Screen,
+        reading: TerminalReading,
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        presentation: Long
+    ): TerminalTrackedRange {
+        if (entries.size >= limits.maxHandles)
+            throw IllegalStateException(Some("terminal tracking handle limit exceeded"))
+        val first = screen.resolve(range.start)
+        val last = screen.resolve(range.end)
+        val oldFirst = reading.resolve(range.start)
+        val oldLast = reading.resolve(range.end)
+        var valid = reading.bufferEpoch ==
+            screen.bufferEpoch &&
+            range.start.bufferEpoch ==
+            range.end.bufferEpoch
+        if (first == None || last == None || oldFirst == None || oldLast == None) valid = false
+        if (valid) {
+            if (before(last!!, first!!) || before(oldLast!!, oldFirst!!))
+                valid = false
+            else {
+                // Reflow is safe. Changed text from an older displayed frame is explicitly stale.
+                for (index in oldFirst!!.row..oldLast!!.row) {
+                    val old = reading.lines(index, 1L)[0L]
+                    val point = TerminalAnchor(
+                        reading.bufferEpoch,
+                        old.logicalLineId,
+                        old.logicalOffset
+                    )
+                    val current = screen.resolve(point)
+                    if (current ==
+                        None ||
+                        screen.rowAt(current!!.row).logical.version !=
+                        old.textVersion
+                    ) {
+                        valid = false
+                        break
+                    }
+                }
+            }
+        }
+        return create(screen, range, kind, first, last, valid, presentation)
+    }
+
+    fun registerLive(
+        screen: Screen,
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        presentation: Long,
+        followTextEdits: Boolean = true
+    ): TerminalTrackedRange {
+        val first = screen.resolve(range.start)
+        val last = screen.resolve(range.end)
+        return create(
+            screen,
+            range,
+            kind,
+            first,
+            last,
+            first != None && last != None,
+            presentation,
+            followTextEdits
+        )
+    }
+
+    fun current(id: Long): TerminalTrackingState? = entries[id]?.state()
+    fun watch(id: Long, changed: () -> Unit) {
+        entries[id]!!.onChange = Some(changed)
+    }
+
+    private fun create(
+        screen: Screen,
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        first: TerminalPosition?,
+        last: TerminalPosition?,
+        valid: Boolean,
+        presentation: Long,
+        followTextEdits: Boolean = true
+    ): TerminalTrackedRange {
+        if (entries.size >= limits.maxHandles)
+            throw IllegalStateException(Some("terminal tracking handle limit exceeded"))
+        val start = if (valid) first!! else TerminalPosition(0L, 0L)
+        val end = if (valid) last!! else start
+        val rows = if (valid)
+            Array<ScreenRow>(end.row - start.row + 1L) { index -> screen.rowAt(start.row + index) }
+        else
+            []
+        if (rows.size > limits.maxRowReferences - rowReferences)
+            throw IllegalStateException(Some("terminal tracking row-reference limit exceeded"))
+        val id = nextId
+        nextId += 1L
+        val entry = TrackedEntry(
+            id, screen.bufferEpoch, kind,
+            TrackedPoint(screen.rowAt(start.row), start.column, range.start.affinity),
+            TrackedPoint(screen.rowAt(end.row), end.column, range.end.affinity), rows,
+            followTextEdits
+        )
+        if (!valid) {
+            entry.invalid = Some(TerminalInvalidation.Stale);
+            entry.releasePoints()
+        }
+        entries[id] = entry
+        attach(entry)
+        mark(entry)
+        val initial = if (valid) TerminalTrackingState.Available(range) else entry.state()
+        return CoreTrackedRange(id, this, initial, presentation)
+    }
+
+    fun remove(id: Long) {
+        val entry = entries[id] ?: return
+        detach(entry)
+        entry.dirty = false
+        entry.onChange = None
+        entry.releasePoints()
+        entries.remove(id)
+        root = indexRemoved(root, id)
+        pending = true
+        version += 1L
+    }
+
+    private fun attach(entry: TrackedEntry) {
+        for (row in entry.rows)
+            row.tracked.add(entry)
+        rowReferences += entry.rows.size
+    }
+
+    private fun detach(entry: TrackedEntry) {
+        for (row in entry.rows) {
+            for (index in 0L..<row.tracked.size) {
+                if (row.tracked[index] === entry) {
+                    row.tracked.removeAt(index);
+                    break
+                }
+            }
+        }
+        rowReferences -= entry.rows.size
+        entry.rows = []
+    }
+
+    private fun mark(entry: TrackedEntry) {
+        if (!entry.dirty) {
+            entry.dirty = true;
+            dirty.add(entry)
+        }
+        pending = true
+        version += 1L
+        entry.onChange?.invoke()
+    }
+
+    private fun invalidate(entry: TrackedEntry, reason: TerminalInvalidation) {
+        entry.invalid = Some(reason)
+        detach(entry)
+        entry.releasePoints()
+        mark(entry)
+    }
+
+    fun rebased(row: ScreenRow) {
+        for (entry in row.tracked)
+            mark(entry)
+    }
+
+    fun takeWrap(row: ScreenRow): Array<TrackedEntry> {
+        val followers = ArrayList<TrackedEntry>()
+        for (entry in row.tracked.toArray()) {
+            if (!entry.followTextEdits) continue
+            if (entry.kind !=
+                TerminalTrackingKind.Content &&
+                entry.start.row ===
+                row &&
+                entry.end.row ===
+                row &&
+                entry.start.column ==
+                row.columns &&
+                entry.end.column ==
+                row.columns &&
+                entry.start.affinity ==
+                TerminalAffinity.After &&
+                entry.end.affinity ==
+                TerminalAffinity.After
+            ) {
+                detach(entry)
+                followers.add(entry)
+            }
+        }
+        return followers.toArray()
+    }
+
+    fun finishWrap(entries: Array<TrackedEntry>, row: ScreenRow) {
+        for (entry in entries) {
+            entry.start = TrackedPoint(row, 0L, TerminalAffinity.After)
+            entry.end = entry.start
+            entry.rows = [row]
+            attach(entry)
+            mark(entry)
+        }
+    }
+
+    fun replace(row: ScreenRow, start: Long, end: Long, erased: Boolean) {
+        if (row.tracked.size == 0L) return
+        for (entry in row.tracked.toArray()) {
+            if (entry.kind == TerminalTrackingKind.Position) continue
+            val left = if (entry.start.row === row) entry.start.column else 0L
+            val right = if (entry.end.row === row) entry.end.column else row.columns
+            val intersects = if (entry.kind == TerminalTrackingKind.Content)
+                left < end && right > start
+            else
+                pointInside(entry.start, row, start, end, erased) ||
+                    pointInside(entry.end, row, start, end, erased)
+            if (intersects) invalidate(entry, TerminalInvalidation.Overwritten)
+        }
+    }
+
+    fun shift(row: ScreenRow, start: Long, end: Long, count: Long, insert: Boolean) {
+        val deletedStart = if (insert) end - count else start
+        val deletedEnd = if (insert) end else start + count
+        for (entry in row.tracked.toArray()) {
+            if (!entry.followTextEdits) continue
+            val left = if (entry.start.row === row) entry.start.column else 0L
+            val right = if (entry.end.row === row) entry.end.column else row.columns
+            if (entry.kind ==
+                TerminalTrackingKind.Content &&
+                left <
+                deletedEnd &&
+                right >
+                deletedStart
+            ) {
+                invalidate(entry, TerminalInvalidation.Deleted)
+                continue
+            }
+            val first = shifted(entry.start, row, start, end, count, insert, entry.kind)
+            val last = shifted(entry.end, row, start, end, count, insert, entry.kind)
+            if (first?.column == None || last?.column == None)
+                invalidate(entry, TerminalInvalidation.Deleted)
+            else {
+                entry.start = first!!;
+                entry.end = last!!;
+                mark(entry)
+            }
+        }
+    }
+
+    fun crop(row: ScreenRow, columns: Long) {
+        replace(row, columns, row.columns + 1L, true)
+        for (entry in row.tracked.toArray()) {
+            if (entry.start.row === row && entry.start.column > columns)
+                entry.start = entry.start.{column: columns}
+            if (entry.end.row === row && entry.end.column > columns)
+                entry.end = entry.end.{column: columns}
+            mark(entry)
+        }
+    }
+
+    fun release(row: ScreenRow, reason: TerminalInvalidation) {
+        for (entry in row.tracked.toArray()) {
+            if (reason !=
+                TerminalInvalidation.Evicted ||
+                entry.kind !=
+                TerminalTrackingKind.Content ||
+                entry.rows.size ==
+                1L
+            ) {
+                invalidate(entry, reason)
+                continue
+            }
+            val first = entry.rows[0L] === row
+            val last = entry.rows[entry.rows.size - 1L] === row
+            if (!first && !last) {
+                invalidate(entry, reason);
+                continue
+            }
+            val previous = entry.rows
+            detach(entry)
+            entry.rows = Array<ScreenRow>(previous.size - 1L) { index ->
+                previous[index + if (first) 1L else 0L]
+            }
+            if (first)
+                entry.start = TrackedPoint(entry.rows[0L], 0L, TerminalAffinity.After)
+            else {
+                val tail = entry.rows[entry.rows.size - 1L]
+                entry.end = TrackedPoint(tail, tail.columns, TerminalAffinity.Before)
+            }
+            attach(entry)
+            mark(entry)
+        }
+    }
+
+    fun required(row: ScreenRow): Long {
+        var columns = 0L
+        for (entry in row.tracked) {
+            val end = if (entry.end.row === row) entry.end.column else row.columns
+            if (end > columns) columns = end
+            if (entry.start.row === row && entry.start.column > columns)
+                columns = entry.start.column
+        }
+        // Right-edge padding before a wrapped wide cell is never part of logical text.
+        return if (row.softWrapped && columns > row.usedColumns) row.usedColumns else columns
+    }
+
+    fun reflow(source: Array<ScreenRow>, packed: Array<ScreenRow>) {
+        val affected = HashMap<Long, TrackedEntry>()
+        val spans = HashMap<Long, LogicalSpan>()
+        for (index in 0L..<packed.size) {
+            val id = packed[index].logical.id
+            spans[id] = LogicalSpan(spans[id]?.first ?: index, index)
+        }
+        for (row in source)
+            for (entry in row.tracked)
+                affected[entry.id] = entry
+        for (key in affected.keys) {
+            val entry = affected[key]!!
+            val first = findPoint(packed, spans, entry.start.anchor(entry.epoch))
+            val last = findPoint(packed, spans, entry.end.anchor(entry.epoch))
+            if (first == None || last == None || before(last!!, first!!)) {
+                invalidate(entry, TerminalInvalidation.Deleted)
+                continue
+            }
+            val rows = Array<ScreenRow>(last!!.row - first!!.row + 1L) { index ->
+                packed[first!!.row + index]
+            }
+            if (rows.size - entry.rows.size > limits.maxRowReferences - rowReferences) {
+                invalidate(entry, TerminalInvalidation.Evicted)
+                continue
+            }
+            detach(entry)
+            entry.start = TrackedPoint(packed[first!!.row], first!!.column, entry.start.affinity)
+            entry.end = TrackedPoint(packed[last!!.row], last!!.column, entry.end.affinity)
+            entry.rows = rows
+            attach(entry)
+            mark(entry)
+        }
+    }
+}
+
+private fun before(a: TerminalPosition, b: TerminalPosition): Boolean = a.row <
+    b.row ||
+    (a.row == b.row && a.column < b.column)
+
+private fun pointInside(
+    point: TrackedPoint,
+    row: ScreenRow,
+    start: Long,
+    end: Long,
+    erased: Boolean
+): Boolean = point.row ===
+    row &&
+    point.column <
+    end &&
+    (point.column > start || (point.column == start && erased))
+
+private fun shifted(
+    point: TrackedPoint,
+    row: ScreenRow,
+    start: Long,
+    end: Long,
+    count: Long,
+    insert: Boolean,
+    kind: TerminalTrackingKind
+): TrackedPoint? {
+    if (point.row !== row || point.column < start || point.column > end) return Some(point)
+    val column = point.column
+    if (column == start && point.affinity == TerminalAffinity.Before) return Some(point)
+    if (column == end && point.affinity == TerminalAffinity.After) return Some(point)
+    val lost = if (insert) column > end - count else column < start + count
+    if (lost)
+        return if (kind == TerminalTrackingKind.Position)
+            Some(point.{column: if (insert) end else start})
+        else
+            None
+    return Some(point.{column: column + if (insert) count else -count})
+}
+
+private fun findPoint(
+    rows: Array<ScreenRow>,
+    spans: HashMap<Long, LogicalSpan>,
+    anchor: TerminalAnchor
+): TerminalPosition? {
+    val span = spans[anchor.logicalLineId] ?: return None
+    return resolveInLines(anchor, span, { index -> rows[index].snapshot() })
+}

@@ -1,0 +1,363 @@
+package scoop.ui.terminal
+
+import scoop.collections.HashMap
+import scoop.graphics.Image
+import scoop.platform.concurrent.currentThreadId
+import scoop.terminal.emulator.*
+
+/** Native pixel/texture estimates include leased old frames; entries bound cache metadata. */
+public struct TerminalImageCacheLimits(
+    val maxBytes: Long = 134217728L,
+    val maxEntries: Long = 4096L,
+    val maxFrameTiles: Long = 8192L
+)
+
+/** All native objects and refcounts stay on the graphics owner. CPU readings may come from workers. */
+internal class TerminalImageCache(limits: TerminalImageCacheLimits = TerminalImageCacheLimits()) :
+    Closeable {
+    private val budget = TerminalNativeImageBudget(limits)
+    private val entries = HashMap<TerminalImageTileKey, TerminalImageCacheEntry>()
+    private var oldest: TerminalImageCacheEntry? = None
+    private var newest: TerminalImageCacheEntry? = None
+    private var closed = false
+    private var uploads = 0L
+    val retainedBytes: Long get() = budget.bytes
+    val cachedCount: Long get() = entries.size
+    val uploadCount: Long get() = uploads
+    val maxFrameTiles: Long get() = budget.limits.maxFrameTiles
+
+    // A one-pixel gutter on each side makes an interior RGBA upload exactly 256x256.
+    // Sixel keeps its independently versioned sparse 64x64 storage tiles.
+    fun tileSide(image: TerminalImage): Long = if (image.protocol == TerminalImageProtocol.Kitty)
+        254L
+    else
+        image.tileSide
+
+    fun configure(limits: TerminalImageCacheLimits) {
+        ensureOpen()
+        checkImageCacheLimits(limits)
+        budget.limits = limits
+        while (
+            entries.size >
+                0L &&
+                (entries.size > limits.maxEntries || budget.bytes > limits.maxBytes)
+        )
+            evictOldest()
+    }
+
+    fun acquire(image: TerminalImage, column: Long, row: Long): TerminalImageTileLease? {
+        ensureOpen()
+        val side = tileSide(image)
+        val width = image.size.width.toLong()
+        val height = image.size.height.toLong()
+        if (column <
+            0L ||
+            row <
+            0L ||
+            column >=
+            (width + side - 1L) /
+            side ||
+            row >=
+            (height + side - 1L) /
+            side
+        )
+            throw IndexOutOfBoundsException()
+        val tile = if (image.protocol == TerminalImageProtocol.Kitty) {
+            // RGBA content is immutable as a whole; its first storage tile verifies the lease
+            // and supplies the shared content identity without coupling upload and storage grids.
+            val base = image.tile(0L, 0L)
+            val x = column * side
+            val y = row * side
+            TerminalImageTile(
+                TerminalImageRect(
+                    x, y, clamp(width - x, 1L, side),
+                    clamp(height - y, 1L, side)
+                ), base.contentVersion, base.paletteVersion,
+                base.background, base.transparent
+            )
+        } else
+            image.tile(column, row)
+        if (tile.transparent) return None
+        val gutter = if (image.protocol == TerminalImageProtocol.Kitty) 1L else 0L
+        val left = clamp(tile.source.x - gutter, 0L, image.size.width.toLong())
+        val top = clamp(tile.source.y - gutter, 0L, image.size.height.toLong())
+        val right = clamp(tile.source.x + tile.source.width + gutter, 0L, image.size.width.toLong())
+        val bottom = clamp(
+            tile.source.y + tile.source.height + gutter,
+            0L,
+            image.size.height.toLong()
+        )
+        val region = TerminalImageRect(left, top, right - left, bottom - top)
+        val key = TerminalImageTileKey(
+            image.namespace, tile.contentVersion, tile.paletteVersion,
+            tile.background, region.x, region.y, region.width, region.height
+        )
+        when (entries[key]) {
+            case Some(val cached) -> {
+                touch(cached)
+                return Some(lease(cached.resource, region, tile.source))
+            }
+
+            case None -> {}
+        }
+        // One CPU native copy plus a possible texture, with conservative native object metadata.
+        val cost = region.width * region.height * 8L + 1024L
+        makeRoom(cost + 256L, true)
+        val reservation = budget.reserve(cost)
+        val native = try {
+            image
+                .pixels(region)
+                .use { pixels ->
+                    Image.fromRgba(pixels.size.width, pixels.size.height, pixels.bytes)
+                }
+        } catch (error: Throwable) {
+            reservation.close()
+            throw error
+        }
+        val resource = TerminalNativeImage(native, reservation)
+        val entry = TerminalImageCacheEntry(key, resource)
+        entries[key] = entry
+        append(entry)
+        uploads += 1L
+        return Some(lease(resource, region, tile.source))
+    }
+
+    private fun lease(
+        resource: TerminalNativeImage,
+        region: TerminalImageRect,
+        tile: TerminalImageRect
+    ): TerminalImageTileLease {
+        resource.retain()
+        try {
+            // Eviction may remove this cache owner, but the new frame reference is already held.
+            makeRoom(256L, false)
+            return TerminalImageTileLease(resource, budget.reserve(256L), region, tile)
+        } catch (error: Throwable) {
+            resource.release()
+            throw error
+        }
+    }
+
+    private fun makeRoom(bytes: Long, addingEntry: Boolean) {
+        val limits = budget.limits
+        if (bytes > limits.maxBytes) imageCacheLimit()
+        while (
+            entries.size >
+                0L &&
+                (
+                    bytes >
+                        limits.maxBytes -
+                        budget.bytes ||
+                        (addingEntry && entries.size >= limits.maxEntries)
+                )
+        )
+            evictOldest()
+        if (bytes > limits.maxBytes - budget.bytes) imageCacheLimit()
+    }
+
+    private fun append(entry: TerminalImageCacheEntry) {
+        entry.previous = newest
+        when (newest) {
+            case Some(val last) -> last.next = Some(entry)
+            case None -> oldest = Some(entry)
+        }
+        newest = Some(entry)
+    }
+
+    private fun detach(entry: TerminalImageCacheEntry) {
+        when (entry.previous) {
+            case Some(val previous) -> previous.next = entry.next
+            case None -> oldest = entry.next
+        }
+        when (entry.next) {
+            case Some(val next) -> next.previous = entry.previous
+            case None -> newest = entry.previous
+        }
+        entry.previous = None
+        entry.next = None
+    }
+
+    private fun touch(entry: TerminalImageCacheEntry) {
+        when (newest) {
+            case Some(val last) -> if (last === entry) return
+            case None -> {}
+        }
+        detach(entry)
+        append(entry)
+    }
+
+    private fun evictOldest() {
+        val entry = oldest ?: return
+        detach(entry)
+        entries.remove(entry.key)
+        entry.resource.release()
+    }
+
+    fun clear() {
+        ensureOpen()
+        while (entries.size > 0L)
+            evictOldest()
+    }
+
+    private fun ensureOpen() {
+        budget.checkOwner()
+        if (closed) throw IllegalStateException(Some("terminal image cache is closed"))
+    }
+
+    public override fun close() {
+        budget.checkOwner()
+        if (closed) return
+        clear()
+        closed = true
+    }
+}
+
+private fun checkImageCacheLimits(limits: TerminalImageCacheLimits) {
+    if (limits.maxBytes < 0L || limits.maxEntries < 1L || limits.maxFrameTiles < 1L)
+        throw IllegalArgumentException(Some("invalid terminal native image limits"))
+}
+
+private fun imageCacheLimit(): Nothing = throw TerminalImageException(
+    TerminalImageFailure.Limit, "terminal native image budget exceeded"
+)
+
+internal class TerminalNativeImageBudget(var limits: TerminalImageCacheLimits) {
+    private val owner = currentThreadId()
+    private var used = 0L
+    val bytes: Long
+        get() {
+            checkOwner();
+            return used
+        }
+    init {
+        checkImageCacheLimits(limits)
+    }
+    fun checkOwner() {
+        if (currentThreadId() != owner)
+            throw IllegalStateException(Some("terminal native image accessed from another owner"))
+    }
+    fun reserve(bytes: Long): TerminalNativeImageReservation {
+        checkOwner()
+        if (bytes < 0L || bytes > limits.maxBytes - used) imageCacheLimit()
+        used += bytes
+        return TerminalNativeImageReservation(this, bytes)
+    }
+    fun release(bytes: Long) {
+        checkOwner()
+        if (bytes < 0L || bytes > used)
+            throw IllegalStateException(Some("native image budget underflow"))
+        used -= bytes
+    }
+}
+
+internal class TerminalNativeImageReservation(
+    private val budget: TerminalNativeImageBudget,
+    private val bytes: Long
+) : Closeable {
+    private var closed = false
+    fun checkOwner() {
+        budget.checkOwner()
+    }
+    public override fun close() {
+        checkOwner()
+        if (closed) return
+        closed = true
+        budget.release(bytes)
+    }
+}
+
+internal class TerminalNativeImage(
+    val image: Image,
+    private val reservation: TerminalNativeImageReservation
+) {
+    private var references = 1L
+    fun retain() {
+        reservation.checkOwner()
+        if (references == 0L) throw IllegalStateException(Some("native image was released"))
+        references += 1L
+    }
+    fun release() {
+        reservation.checkOwner()
+        if (references <= 0L) throw IllegalStateException(Some("native image reference underflow"))
+        references -= 1L
+        if (references == 0L) {
+            try {
+                image.close()
+            } finally {
+                reservation.close()
+            }
+        }
+    }
+}
+
+/** A prepared frame owns native pixels only, not the CPU store or a whole history reading. */
+internal class TerminalImageTileLease(
+    private val resource: TerminalNativeImage,
+    private val reservation: TerminalNativeImageReservation,
+    val source: TerminalImageRect,
+    val tile: TerminalImageRect
+) : Closeable {
+    private var closed = false
+    val image: Image
+        get() {
+            reservation.checkOwner()
+            if (closed) throw IllegalStateException(Some("terminal image tile lease is closed"))
+            return resource.image
+        }
+    public override fun close() {
+        reservation.checkOwner()
+        if (closed) return
+        closed = true
+        try {
+            resource.release()
+        } finally {
+            reservation.close()
+        }
+    }
+}
+
+private class TerminalImageCacheEntry(
+    val key: TerminalImageTileKey,
+    val resource: TerminalNativeImage
+) {
+    var previous: TerminalImageCacheEntry? = None
+    var next: TerminalImageCacheEntry? = None
+}
+
+private struct TerminalImageTileKey(
+    val namespace: Long,
+    val content: Long,
+    val palette: Long,
+    val background: Int,
+    val x: Long,
+    val y: Long,
+    val width: Long,
+    val height: Long
+) : Equals<TerminalImageTileKey>, Hash {
+    public override operator fun equals(other: TerminalImageTileKey): Boolean = namespace ==
+        other.namespace &&
+        content ==
+        other.content &&
+        palette ==
+        other.palette &&
+        background ==
+        other.background &&
+        x ==
+        other.x &&
+        y ==
+        other.y &&
+        width ==
+        other.width &&
+        height ==
+        other.height
+    public override fun hash(): Long {
+        var result = namespace.hash()
+        result = result * 31L + content.hash()
+        result = result * 31L + palette.hash()
+        result = result * 31L + background.hash()
+        result = result * 31L + x.hash()
+        result = result * 31L + y.hash()
+        result = result * 31L + width.hash()
+        return result * 31L + height.hash()
+    }
+}

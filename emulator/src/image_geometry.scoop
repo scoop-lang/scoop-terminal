@@ -1,0 +1,126 @@
+package scoop.terminal.emulator
+
+/** Device-pixel rectangle relative to the oldest retained terminal row. */
+public struct TerminalImageBounds(
+    val x: Double,
+    val y: Double,
+    val width: Double,
+    val height: Double
+)
+
+public struct TerminalImageGeometry(
+    val destination: TerminalImageBounds,
+    val visible: TerminalImageBounds,
+    val source: TerminalImageRect,
+    val occupiedColumns: Long,
+    val occupiedRows: Long
+)
+
+/** Resolve only the placement anchor; reflow never splits the image itself into text lines. */
+public fun TerminalImagePlacement.geometry(
+    reading: TerminalReading,
+    cellWidth: Double,
+    cellHeight: Double
+): TerminalImageGeometry? {
+    val point = reading.resolve(anchor) ?: return None
+    return Some(imageGeometry(this, point, cellWidth, cellHeight))
+}
+
+internal fun imageGeometry(
+    placement: TerminalImagePlacement,
+    point: TerminalPosition,
+    cellWidth: Double,
+    cellHeight: Double
+): TerminalImageGeometry {
+    if (!(cellWidth > 0.0) || !(cellHeight > 0.0) || !cellWidth.isFinite() || !cellHeight.isFinite()
+    )
+        throw IllegalArgumentException(Some("image cell dimensions must be positive"))
+    if (placement.source.width <=
+        0L ||
+        placement.source.height <=
+        0L ||
+        placement.scaleX <=
+        0L ||
+        placement.scaleY <=
+        0L ||
+        placement.columns <
+        0L ||
+        placement.rows <
+        0L
+    )
+        throw IllegalArgumentException(Some("invalid image placement dimensions"))
+    val rawWidth = placement.source.width.toDouble() * placement.scaleX.toDouble()
+    val rawHeight = placement.source.height.toDouble() * placement.scaleY.toDouble()
+    // A pending UI layout can precede the model's accepted pixel-size update.
+    val offsetX = imageCellOffset(placement.offsetX, cellWidth)
+    val offsetY = imageCellOffset(placement.offsetY, cellHeight)
+    val requestedWidth = placement.columns.toDouble() * cellWidth - offsetX
+    val requestedHeight = placement.rows.toDouble() * cellHeight - offsetY
+    var scale = 1.0
+    if (placement.columns > 0L) scale = requestedWidth / rawWidth
+    if (placement.rows > 0L) {
+        val heightScale = requestedHeight / rawHeight
+        if (placement.columns == 0L || heightScale < scale) scale = heightScale
+    }
+    val width = rawWidth * scale
+    val height = rawHeight * scale
+    val x = (point.column + placement.columnOffset).toDouble() * cellWidth + offsetX
+    val y = (point.row + placement.rowOffset).toDouble() * cellHeight + offsetY
+    return TerminalImageGeometry(
+        TerminalImageBounds(x, y, width, height),
+        TerminalImageBounds(
+            x + width * placement.clipLeft, y + height * placement.clipTop,
+            width * (placement.clipRight - placement.clipLeft),
+            height * (placement.clipBottom - placement.clipTop)
+        ),
+        placement.source,
+        if (placement.columns > 0L) placement.columns else imageCeil((offsetX + width) / cellWidth),
+        if (placement.rows > 0L) placement.rows else imageCeil((offsetY + height) / cellHeight)
+    )
+}
+
+private fun imageCellOffset(offset: Long, cell: Double): Double {
+    val maximum = if (cell > 1.0) cell - 1.0 else 0.0
+    return if (offset <= 0L)
+        0.0
+    else if (offset.toDouble() > maximum) maximum else offset.toDouble()
+}
+
+internal fun imageCeil(value: Double): Long {
+    val integer = value.toLong()
+    return integer + if (value > integer.toDouble()) 1L else 0L
+}
+
+internal fun imageIntersects(a: TerminalImageBounds, b: TerminalImageBounds): Boolean = a.width >
+    0.0 &&
+    a.height >
+    0.0 &&
+    b.width >
+    0.0 &&
+    b.height >
+    0.0 &&
+    a.x <
+    b.x +
+    b.width &&
+    b.x <
+    a.x +
+    a.width &&
+    a.y <
+    b.y +
+    b.height &&
+    b.y <
+    a.y +
+    a.height
+
+internal fun imageInside(a: TerminalImageBounds, b: TerminalImageBounds): Boolean = a.x >=
+    b.x &&
+    a.y >=
+    b.y &&
+    a.x +
+    a.width <=
+    b.x +
+    b.width &&
+    a.y +
+    a.height <=
+    b.y +
+    b.height

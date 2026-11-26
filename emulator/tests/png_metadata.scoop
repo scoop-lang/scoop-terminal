@@ -1,0 +1,109 @@
+package scoop.terminal.emulator
+
+import scoop.compiler.includeBytes
+import scoop.test.*
+
+@Test
+private class TerminalPngMetadataTest {
+    @Test fun compressedTextAndOrientationNeverReachTheCodecAndNormalizationIsBudgeted() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 131072L))
+        val expected = includeBytes("data/images/rgba.png")
+        val original = includeBytes("data/images/metadata-text.png")
+        val decoder = PngMetadataDecoder(expected, memory)
+        ImageBytes
+            .create(memory, original.size) { original }
+            .use { input ->
+                decodeImagePng(input, Some(decoder))
+                    .use { image ->
+                        assertEquals(TerminalImageSize(3, 2), image.size)
+                        assertEquals(1L, decoder.calls)
+                        assertTrue(decoder.liveBytes >= original.size + expected.size)
+                    }
+                assertEquals(original.size + ImageBytes.overhead, memory.bytes)
+            }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun profilesPreserveColorDataButMustFitAnIndependentInflationLimit() {
+        val original = includeBytes("data/images/icc-text.png")
+        val expected = includeBytes("data/images/icc.png")
+        val profile = includeBytes("data/images/icc.profile")
+        val memory = ImageMemory(TerminalImageLimits(maxPngProfileBytes = profile.size))
+        val decoder = PngMetadataDecoder(expected, memory)
+        ImageBytes
+            .create(memory, original.size) { original }
+            .use { input ->
+                decodeImagePng(input, Some(decoder)).close()
+                assertEquals(1L, decoder.calls)
+                assertTrue(decoder.liveBytes >= original.size + expected.size + profile.size * 4L)
+            }
+        assertEquals(0L, memory.bytes)
+        val limited = ImageMemory(TerminalImageLimits(maxPngProfileBytes = profile.size - 1L))
+        val rejected = PngMetadataDecoder(expected, limited)
+        ImageBytes
+            .create(limited, original.size) { original }
+            .use { input ->
+                val failure = assertFailsWith<TerminalImageException> {
+                    decodeImagePng(input, Some(rejected))
+                }
+                assertEquals(TerminalImageFailure.Limit, failure.kind)
+                assertEquals(0L, rejected.calls)
+                assertEquals(original.size + ImageBytes.overhead, limited.bytes)
+            }
+        assertEquals(0L, limited.bytes)
+    }
+
+    @Test fun damagedProfilesAndRejectedFinalReservationsReleaseOnlyTheirOwnBuffers() {
+        for (
+            bad in [
+                includeBytes("data/images/icc-tail.png"),
+                includeBytes("data/images/icc-duplicate.png")
+            ]
+        ) {
+            val memory = ImageMemory(TerminalImageLimits())
+            val decoder = PngMetadataDecoder([], memory)
+            ImageBytes
+                .create(memory, bad.size) { bad }
+                .use { input ->
+                    assertFailsWith<TerminalImageException> { decodeImagePng(input, Some(decoder)) }
+                    assertEquals(0L, decoder.calls)
+                    assertEquals(bad.size + ImageBytes.overhead, memory.bytes)
+                }
+            assertEquals(0L, memory.bytes)
+        }
+        val bytes = includeBytes("data/images/metadata-text.png")
+        val memory = ImageMemory(
+            TerminalImageLimits(maxCpuBytes = bytes.size + ImageBytes.overhead)
+        )
+        val decoder = PngMetadataDecoder([], memory)
+        ImageBytes
+            .create(memory, bytes.size) { bytes }
+            .use { input ->
+                val failure = assertFailsWith<TerminalImageException> {
+                    decodeImagePng(input, Some(decoder))
+                }
+                assertEquals(TerminalImageFailure.Limit, failure.kind)
+                assertEquals(0L, decoder.calls)
+                assertEquals(bytes.size + ImageBytes.overhead, memory.bytes)
+            }
+        assertEquals(0L, memory.bytes)
+    }
+}
+
+private class PngMetadataDecoder(
+    private val expected: Array<Byte>,
+    private val memory: ImageMemory
+) : TerminalImageDecoder {
+    var calls = 0L
+    var liveBytes = 0L
+    public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long = size
+        .rgbaBytes
+    public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
+        calls += 1L
+        liveBytes = memory.bytes
+        assertEquals(expected.size, encoded.size)
+        for (index in 0L..<expected.size)
+            assertEquals(expected[index], encoded[index])
+        return Array<Byte>(size.rgbaBytes) { 0.toByte() }
+    }
+}

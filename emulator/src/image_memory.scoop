@@ -1,0 +1,186 @@
+package scoop.terminal.emulator
+
+private val imageNamespaces = AtomicLong(0L)
+
+internal fun reserveImage(
+    memory: ImageMemory,
+    bytes: Long,
+    beforeAllocate: (Long) -> Unit
+): ImageReservation {
+    beforeAllocate(bytes)
+    return memory.reserve(bytes)
+}
+
+/** Shared by the model, immutable image versions and their cross-thread snapshot leases. */
+internal class ImageMemory(val limits: TerminalImageLimits) {
+    val namespace = imageNamespaces
+        .updateAndGet { previous ->
+            if (previous == Long.MAX_VALUE)
+                throw IllegalStateException(Some("image namespace space exhausted"))
+            previous + 1L
+        }
+    private val used = AtomicLong(0L)
+    private val serial = AtomicLong(0L)
+    val bytes: Long get() = used.load()
+
+    init {
+        checkImageLimits(limits)
+    }
+
+    fun reserve(amount: Long): ImageReservation {
+        add(amount)
+        return ImageReservation(this, amount)
+    }
+
+    internal fun add(amount: Long) {
+        if (amount < 0L) throw IllegalArgumentException(Some("negative image reservation"))
+        used
+            .updateAndGet { current ->
+                if (amount > limits.maxCpuBytes - current)
+                    imageFailure(TerminalImageFailure.Limit, "terminal CPU image budget exceeded")
+                current + amount
+            }
+    }
+
+    internal fun subtract(amount: Long) {
+        used
+            .updateAndGet { current ->
+                if (amount < 0L || amount > current)
+                    throw IllegalStateException(Some("image reservation accounting underflow"))
+                current - amount
+            }
+    }
+
+    fun nextVersion(): Long = serial
+        .updateAndGet { current ->
+            if (current == Long.MAX_VALUE)
+                imageFailure(TerminalImageFailure.Limit, "image version space exhausted")
+            current + 1L
+        }
+}
+
+/** Grow before allocating; shrinking/closing refunds once, including concurrent close. */
+internal class ImageReservation(private val memory: ImageMemory, amount: Long) : Closeable {
+    private val retained = AtomicLong(amount)
+    val bytes: Long
+        get() {
+            val value = retained.load()
+            return if (value < 0L) 0L else value
+        }
+    val isClosed: Boolean get() = retained.load() < 0L
+
+    fun resize(amount: Long) {
+        if (amount < 0L) throw IllegalArgumentException(Some("negative image reservation"))
+        while (true) {
+            val previous = retained.load()
+            if (previous < 0L) throw IllegalStateException(Some("image reservation is closed"))
+            if (amount == previous) return
+            val growth = if (amount > previous) amount - previous else 0L
+            memory.add(growth)
+            if (retained.compareAndSet(previous, amount)) {
+                if (amount < previous) memory.subtract(previous - amount)
+                return
+            }
+            memory.subtract(growth)
+        }
+    }
+
+    public override fun close() {
+        val previous = retained.exchange(-1L)
+        if (previous >= 0L) memory.subtract(previous)
+    }
+}
+
+private class ImageByteStorage(val value: Array<Byte>?)
+
+/** The last lease drops the array as well as the charge, even if closed handles remain reachable. */
+private class ImageByteAllocation(
+    val memory: ImageMemory,
+    val version: Long,
+    private val reservation: ImageReservation,
+    bytes: Array<Byte>
+) {
+    private val references = AtomicLong(1L)
+    private val storage = AtomicRef<ImageByteStorage>(ImageByteStorage(Some(bytes)))
+    val bytes: Array<Byte>
+        get() = storage.load().value ?:
+            throw IllegalStateException(Some("image bytes are released"))
+
+    fun retain() {
+        references
+            .updateAndGet { current ->
+                if (current == 0L || current == Long.MAX_VALUE)
+                    throw IllegalStateException(Some("image bytes cannot be retained"))
+                current + 1L
+            }
+    }
+
+    fun release() {
+        val remaining = references
+            .updateAndGet { current ->
+                if (current <= 0L) throw IllegalStateException(Some("image reference underflow"))
+                current - 1L
+            }
+        if (remaining == 0L) {
+            storage.exchange(ImageByteStorage(None))
+            reservation.close()
+        }
+    }
+}
+
+private class ImageByteReference(val value: ImageByteAllocation?)
+
+/** Immutable storage with explicit leases; reading bytes borrows them for the lease's lifetime. */
+internal class ImageBytes private constructor(allocation: ImageByteAllocation) : Closeable {
+    private val reference = AtomicRef<ImageByteReference>(ImageByteReference(Some(allocation)))
+    private fun available(): ImageByteAllocation = reference.load().value ?:
+        throw IllegalStateException(Some("image byte lease is closed"))
+    val bytes: Array<Byte> get() = available().bytes
+    val version: Long get() = available().version
+    val memory: ImageMemory get() = available().memory
+    val isClosed: Boolean
+        get() = when (reference.load().value) {
+            case None -> true
+            case Some(_) -> false
+        }
+
+    fun retain(): ImageBytes {
+        val allocation = available()
+        allocation.retain()
+        return ImageBytes(allocation)
+    }
+
+    public override fun close() {
+        val previous = reference.exchange(ImageByteReference(None)).value ?: return
+        previous.release()
+    }
+
+    companion object {
+        // Includes fixed array/allocation/lease metadata; payload capacity is charged separately.
+        const val overhead: Long = 256L
+
+        fun create(memory: ImageMemory, size: Long, produce: () -> Array<Byte>): ImageBytes {
+            val reservation = memory.reserve(imageByteSum(size, overhead))
+            try {
+                val bytes = produce()
+                if (bytes.size != size)
+                    throw IllegalStateException(Some("image producer returned a different size"))
+                return adopt(memory, reservation, bytes)
+            } catch (error: Throwable) {
+                reservation.close()
+                throw error
+            }
+        }
+
+        /** Takes ownership of an already reserved result; no additional pixel copy. */
+        fun adopt(
+            memory: ImageMemory,
+            reservation: ImageReservation,
+            bytes: Array<Byte>
+        ): ImageBytes {
+            if (reservation.isClosed || reservation.bytes != imageByteSum(bytes.size, overhead))
+                throw IllegalStateException(Some("image result was not reserved"))
+            return ImageBytes(ImageByteAllocation(memory, memory.nextVersion(), reservation, bytes))
+        }
+    }
+}

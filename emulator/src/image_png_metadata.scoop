@@ -1,0 +1,128 @@
+package scoop.terminal.emulator
+
+/** Only the already validated chunks required for pixels and color enter the native codec. */
+internal class ImagePngInput(val bytes: ImageBytes, val profileBytes: Long) : Closeable {
+    public override fun close() {
+        bytes.close()
+    }
+}
+
+internal fun prepareImagePng(input: ImageBytes, beforeAllocate: (Long) -> Unit): ImagePngInput {
+    val bytes = input.bytes
+    var offset = 8L
+    var kept = 8L
+    var profileBytes = 0L
+    var hasProfile = false
+    var data = false
+    while (offset < bytes.size) {
+        val length = pngLong(bytes, offset)
+        val type = offset + 4L
+        if (pngPixelChunk(bytes, type)) {
+            kept += length + 12L
+            if (pngChunk(bytes, type, "iCCP")) {
+                if (hasProfile || data) pngMetadataFailure("duplicate or misplaced ICC profile")
+                hasProfile = true
+                profileBytes = pngProfileBytes(input, offset + 8L, length, beforeAllocate)
+            } else if (pngChunk(bytes, type, "IDAT"))
+                data = true
+            else if (!pngMetadataLength(bytes, type, length))
+                pngMetadataFailure("invalid color chunk length")
+        }
+        offset += length + 12L
+    }
+    if (kept == bytes.size) return ImagePngInput(input.retain(), profileBytes)
+    beforeAllocate(kept + ImageBytes.overhead)
+    val cursor = PngPixelCursor(bytes)
+    val count = kept
+    val normalized = ImageBytes.create(input.memory, count) { Array<Byte>(count) { cursor.next() } }
+    return ImagePngInput(normalized, profileBytes)
+}
+
+private fun pngProfileBytes(
+    input: ImageBytes,
+    start: Long,
+    length: Long,
+    beforeAllocate: (Long) -> Unit
+): Long {
+    val encoded = input.bytes
+    val end = start + length
+    var cursor = start
+    while (cursor < end && imageByte(encoded, cursor) != 0) {
+        if (cursor - start >= 79L) pngMetadataFailure("ICC profile name exceeds limit")
+        cursor += 1L
+    }
+    if (cursor == start || cursor + 2L >= end || imageByte(encoded, cursor + 1L) != 0)
+        pngMetadataFailure("invalid ICC profile compression header")
+    val payload = cursor + 2L
+    val count = end - payload
+    beforeAllocate(count + ImageBytes.overhead)
+    return ImageBytes
+        .create(input.memory, count) { Array<Byte>(count) { index -> encoded[payload + index] } }
+        .use { compressed ->
+            inflateImage(
+                compressed,
+                beforeAllocate = beforeAllocate,
+                outputLimit = input.memory.limits.maxPngProfileBytes
+            )
+                .use { profile ->
+                    if (profile.bytes.size <
+                        132L ||
+                        pngLong(profile.bytes, 0L) !=
+                        profile.bytes.size
+                    )
+                        pngMetadataFailure("invalid ICC profile byte length")
+                    profile.bytes.size
+                }
+        }
+}
+
+private fun pngMetadataLength(bytes: Array<Byte>, type: Long, length: Long): Boolean {
+    if (pngChunk(bytes, type, "gAMA")) return length == 4L
+    if (pngChunk(bytes, type, "cHRM")) return length == 32L
+    if (pngChunk(bytes, type, "sRGB")) return length == 1L
+    if (pngChunk(bytes, type, "cICP")) return length == 4L
+    if (pngChunk(bytes, type, "sBIT")) return length > 0L && length <= 4L
+    if (pngChunk(bytes, type, "tRNS")) return length > 0L && length <= 256L
+    return true
+}
+
+private fun pngPixelChunk(bytes: Array<Byte>, type: Long): Boolean = pngChunk(
+    bytes,
+    type,
+    "IHDR"
+) ||
+    pngChunk(bytes, type, "PLTE") ||
+    pngChunk(bytes, type, "IDAT") ||
+    pngChunk(bytes, type, "IEND") ||
+    pngChunk(bytes, type, "tRNS") ||
+    pngChunk(bytes, type, "gAMA") ||
+    pngChunk(bytes, type, "cHRM") ||
+    pngChunk(bytes, type, "sRGB") ||
+    pngChunk(bytes, type, "iCCP") ||
+    pngChunk(bytes, type, "sBIT") ||
+    pngChunk(bytes, type, "cICP")
+
+/** Constant working storage, including a stream with millions of discarded empty chunks. */
+private class PngPixelCursor(private val bytes: Array<Byte>) {
+    private var offset = 0L
+    private var end = 8L
+    fun next(): Byte {
+        while (offset == end) {
+            val next = offset + pngLong(bytes, offset) + 12L
+            if (pngPixelChunk(bytes, offset + 4L))
+                end = next
+            else {
+                offset = next;
+                end = next
+            }
+        }
+        val result = bytes[offset]
+        offset += 1L
+        return result
+    }
+}
+
+private fun pngMetadataFailure(message: String): Nothing = imageFailure(
+    TerminalImageFailure.InvalidData,
+    "invalid PNG metadata: " + message
+)

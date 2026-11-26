@@ -284,6 +284,21 @@ kind = "sysroot"
 name = "scoop.charset"
 
 [[resolutions.nodes]]
+coordinate = "scoop:scoop.compression:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.compression"
+
+[[resolutions.nodes]]
 coordinate = "scoop:scoop.concurrent:0.1.0"
 kind = "library"
 dependencies = [
@@ -395,7 +410,9 @@ coordinate = "scoop:scoop.terminal.emulator:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.charset:0.1.0",
+    "scoop:scoop.compression:0.1.0",
     "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
     "scoop:scoop.std:0.1.0",
 ]
 test-dependencies = []
@@ -419,6 +436,7 @@ coordinate = "scoop:scoop.ui.terminal:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.charset:0.1.0",
     "scoop:scoop.concurrent:0.1.0",
     "scoop:scoop.core:0.1.0",
     "scoop:scoop.graphics.text:0.1.0",
@@ -501,6 +519,8 @@ dependencies = [
     "scoop:scoop.window:0.1.0",
 ]
 test-dependencies = [
+    "scoop:scoop.graphics:0.1.0",
+    "scoop:scoop.surface:0.1.0",
     "scoop:scoop.terminal.emulator:0.1.0",
     "scoop:scoop.test:0.1.0",
 ]
@@ -583,6 +603,21 @@ target = "aarch64-apple-darwin"
 root-coordinate = "scoop:scoop.terminal.emulator:0.1.0"
 
 [[resolutions.nodes]]
+coordinate = "scoop:scoop.asyncio:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.concurrent:0.1.0",
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.asyncio"
+
+[[resolutions.nodes]]
 coordinate = "scoop:scoop.charset:0.1.0"
 kind = "library"
 dependencies = [
@@ -595,6 +630,35 @@ test-dependencies = []
 [resolutions.nodes.source]
 kind = "sysroot"
 name = "scoop.charset"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.compression:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.compression"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.concurrent:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.concurrent"
 
 [[resolutions.nodes]]
 coordinate = "scoop:scoop.core:0.1.0"
@@ -634,7 +698,9 @@ coordinate = "scoop:scoop.terminal.emulator:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.charset:0.1.0",
+    "scoop:scoop.compression:0.1.0",
     "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
     "scoop:scoop.std:0.1.0",
 ]
 test-dependencies = ["scoop:scoop.test:0.1.0"]
@@ -889,6 +955,19 @@ target = "aarch64-apple-darwin"
 root-coordinate = "scoop:scoop.ui.terminal:0.1.0"
 
 [[resolutions.nodes]]
+coordinate = "scoop.tests:terminal-gpu-native:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "path"
+path = "terminal-ui/test-native"
+
+[[resolutions.nodes]]
 coordinate = "scoop:scoop.asyncio:0.1.0"
 kind = "library"
 dependencies = [
@@ -916,6 +995,21 @@ test-dependencies = []
 [resolutions.nodes.source]
 kind = "sysroot"
 name = "scoop.charset"
+
+[[resolutions.nodes]]
+coordinate = "scoop:scoop.compression:0.1.0"
+kind = "library"
+dependencies = [
+    "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
+    "scoop:scoop.std:0.1.0",
+]
+test-dependencies = []
+
+[resolutions.nodes.source]
+kind = "sysroot"
+name = "scoop.compression"
 
 [[resolutions.nodes]]
 coordinate = "scoop:scoop.concurrent:0.1.0"
@@ -1029,7 +1123,9 @@ coordinate = "scoop:scoop.terminal.emulator:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.charset:0.1.0",
+    "scoop:scoop.compression:0.1.0",
     "scoop:scoop.core:0.1.0",
+    "scoop:scoop.platform:0.1.0",
     "scoop:scoop.std:0.1.0",
 ]
 test-dependencies = []
@@ -1053,6 +1149,7 @@ coordinate = "scoop:scoop.ui.terminal:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.charset:0.1.0",
     "scoop:scoop.concurrent:0.1.0",
     "scoop:scoop.core:0.1.0",
     "scoop:scoop.graphics.text:0.1.0",
@@ -1065,7 +1162,10 @@ dependencies = [
     "scoop:scoop.window.asyncio:0.1.0",
     "scoop:scoop.window:0.1.0",
 ]
-test-dependencies = ["scoop:scoop.test:0.1.0"]
+test-dependencies = [
+    "scoop.tests:terminal-gpu-native:0.1.0",
+    "scoop:scoop.test:0.1.0",
+]
 
 [resolutions.nodes.source]
 kind = "path"

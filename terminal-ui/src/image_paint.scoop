@@ -1,0 +1,234 @@
+package scoop.ui.terminal
+
+import scoop.collections.sortedWith
+import scoop.comparisons.comparatorOf
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+
+private struct TerminalImagePaintTile(
+    val lease: TerminalImageTileLease,
+    val source: Rect,
+    val destination: Rect,
+    val clip: Rect,
+    val sampling: ImageSampling,
+    val layer: Int
+)
+
+private struct TerminalVisibleImage(
+    val image: TerminalImage,
+    val placement: TerminalImagePlacement,
+    val source: TerminalImageRect,
+    val destination: Rect,
+    val visible: Rect
+)
+
+/** A frame contains visible native tiles only; decoding and protocol state stay outside the view. */
+internal class TerminalImagePaint : Closeable {
+    private val tiles = ArrayList<TerminalImagePaintTile>()
+    private var work = 0L
+    private var reported = false
+    val tileCount: Long get() = tiles.size
+
+    fun prepare(geometry: GridGeometry, cache: TerminalImageCache, onError: (Throwable) -> Unit) {
+        val frame = this
+        geometry
+            .reading
+            .images
+            .retain()
+            .use { retained ->
+                val images = retained.images
+                val visible = ArrayList<TerminalVisibleImage>()
+                val scale = geometry.scaleFactor
+                val viewport = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
+                for (placement in images.placements(0L, images.placementCount)) {
+                    val image = images.image(placement.imageKey) ?: continue
+                    val area = placement
+                        .geometry(
+                            geometry.reading,
+                            geometry.metrics.width * scale, geometry.metrics.height * scale
+                        ) ?:
+                        continue
+                    val destination = imageScreenRect(area.destination, geometry)
+                    val clipped = imageRectIntersection(
+                        imageScreenRect(area.visible, geometry),
+                        viewport
+                    ) ?:
+                        continue
+                    if (destination.width <= 0.0 || destination.height <= 0.0) continue
+                    visible
+                        .add(
+                            TerminalVisibleImage(
+                                image,
+                                placement,
+                                area.source,
+                                destination,
+                                clipped
+                            )
+                        )
+                }
+                val order = comparatorOf<TerminalVisibleImage> { left, right ->
+                    if (left.placement.z != right.placement.z)
+                        left.placement.z.compareTo(right.placement.z)
+                    else if (left.image.imageId != right.image.imageId)
+                        left.image.imageId.compareTo(right.image.imageId)
+                    else
+                        left.placement.key.compareTo(right.placement.key)
+                }
+                for (image in visible.sortedWith(order)) {
+                    try {
+                        frame.prepareImage(image, cache)
+                    } catch (error: TerminalImageException) {
+                        frame.report(error, onError)
+                    } catch (error: GraphicsException) {
+                        frame.report(error, onError)
+                    }
+                }
+            }
+    }
+
+    private fun report(error: Throwable, onError: (Throwable) -> Unit) {
+        if (reported) return
+        reported = true
+        onError(error)
+    }
+
+    private fun prepareImage(image: TerminalVisibleImage, cache: TerminalImageCache) {
+        val source = image.source
+        val destination = image.destination
+        val visible = image.visible
+        val scaleX = destination.width / source.width.toDouble()
+        val scaleY = destination.height / source.height.toDouble()
+        val left = clamp(
+            (source.x.toDouble() + (visible.x - destination.x) / scaleX).toLong(),
+            source.x, source.x + source.width - 1L
+        )
+        val top = clamp(
+            (source.y.toDouble() + (visible.y - destination.y) / scaleY).toLong(),
+            source.y, source.y + source.height - 1L
+        )
+        val right = clamp(
+            imagePaintCeil(
+                source.x.toDouble() + (visible.x + visible.width - destination.x) / scaleX
+            ),
+            left + 1L,
+            source.x + source.width
+        )
+        val bottom = clamp(
+            imagePaintCeil(
+                source.y.toDouble() + (visible.y + visible.height - destination.y) / scaleY
+            ),
+            top + 1L,
+            source.y + source.height
+        )
+        val prepared = ArrayList<TerminalImagePaintTile>()
+        val side = cache.tileSide(image.image)
+        try {
+            for (row in top / side..<(bottom + side - 1L) / side) {
+                for (column in left / side..<(right + side - 1L) / side) {
+                    if (work >= cache.maxFrameTiles)
+                        throw TerminalImageException(
+                            TerminalImageFailure.Limit,
+                            "terminal frame image tile limit exceeded"
+                        )
+                    work += 1L
+                    val lease = cache.acquire(image.image, column, row) ?: continue
+                    val tile = lease.tile
+                    val rect = Rect(
+                        destination.x + (tile.x - source.x).toDouble() * scaleX,
+                        destination.y + (tile.y - source.y).toDouble() * scaleY,
+                        tile.width.toDouble() * scaleX, tile.height.toDouble() * scaleY
+                    )
+                    val clip = imageRectIntersection(rect, visible)
+                    when (clip) {
+                        case Some(val clipped) ->
+                            prepared
+                                .add(
+                                    TerminalImagePaintTile(
+                                        lease,
+                                        Rect(
+                                            0.0, 0.0,
+                                            lease.source.width.toDouble(), lease
+                                                .source
+                                                .height
+                                                .toDouble()
+                                        ),
+                                        // Draw through the gutter before clipping to the core tile.
+                                        // The hard core clip partitions device pixels; sampling
+                                        // can still read both neighboring source pixels.
+                                        Rect(
+                                            destination.x +
+                                                (lease.source.x - source.x).toDouble() *
+                                                scaleX,
+                                            destination.y +
+                                                (lease.source.y - source.y).toDouble() *
+                                                scaleY,
+                                            lease.source.width.toDouble() * scaleX,
+                                            lease.source.height.toDouble() * scaleY
+                                        ), clipped,
+                                        if (image.image.protocol == TerminalImageProtocol.Sixel)
+                                            ImageSampling.Nearest
+                                        else
+                                            ImageSampling.Linear,
+                                        if (image.placement.z < -1073741824L)
+                                            0
+                                        else if (image.placement.z < 0L) 1 else 2
+                                    )
+                                )
+                        case None -> lease.close()
+                    }
+                }
+            }
+            for (tile in prepared)
+                tiles.add(tile)
+        } catch (error: Throwable) {
+            for (tile in prepared)
+                tile.lease.close()
+            throw error
+        }
+    }
+
+    fun draw(canvas: Canvas, layer: Int) {
+        for (tile in tiles) {
+            if (tile.layer != layer) continue
+            canvas.save()
+            try {
+                canvas.clipRect(tile.clip, antiAlias = false)
+                canvas
+                    .drawImageRegion(tile.lease.image, tile.source, tile.destination, tile.sampling)
+            } finally {
+                canvas.restore()
+            }
+        }
+    }
+
+    public override fun close() {
+        for (tile in tiles)
+            tile.lease.close()
+        tiles.clear()
+    }
+}
+
+private fun imageScreenRect(bounds: TerminalImageBounds, geometry: GridGeometry): Rect = Rect(
+    bounds.x / geometry.scaleFactor,
+    bounds.y / geometry.scaleFactor - geometry.first.toDouble() * geometry.metrics.height,
+    bounds.width / geometry.scaleFactor, bounds.height / geometry.scaleFactor
+)
+
+private fun imageRectIntersection(left: Rect, right: Rect): Rect? {
+    val x = if (left.x > right.x) left.x else right.x
+    val y = if (left.y > right.y) left.y else right.y
+    val endX = if (left.x + left.width < right.x + right.width)
+        left.x + left.width
+    else
+        right.x + right.width
+    val endY = if (left.y + left.height < right.y + right.height)
+        left.y + left.height
+    else
+        right.y + right.height
+    return if (endX > x && endY > y) Some(Rect(x, y, endX - x, endY - y)) else None
+}
+
+private fun imagePaintCeil(value: Double): Long {
+    val integer = value.toLong()
+    return integer + if (value > integer.toDouble()) 1L else 0L
+}

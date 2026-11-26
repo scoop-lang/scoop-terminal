@@ -12,8 +12,23 @@ internal struct GridGeometry(
     val columns: Long,
     val requestedRows: Long,
     val screenRevision: Long,
-    val atBottom: Boolean
+    val atBottom: Boolean,
+    val reading: TerminalReading,
+    val scaleFactor: Double = 1.0
 ) {
+    fun withCommittedMetadata(current: TerminalReading): GridGeometry = if (screenRevision ==
+        current.screenRevision &&
+        reading.bufferEpoch ==
+        current.bufferEpoch &&
+        reading.columns ==
+        current.columns &&
+        reading.rows ==
+        current.rows
+    )
+        this.{reading: current}
+    else
+        this
+
     fun hit(point: Point): (Long, Long)? {
         if (point.x < 0.0 || point.y < 0.0 || point.x >= size.width || point.y >= size.height)
             return None
@@ -23,13 +38,34 @@ internal struct GridGeometry(
         return Some((row, column))
     }
 
+    fun linkAt(point: Point): TerminalLink? {
+        val(row, column) = hit(point) ?: return None
+        return reading.linkAt(first + row, column)
+    }
+
+    fun clampedHit(point: Point): (Long, Long)? {
+        if (rows.size == 0L || columns == 0L) return None
+        val row = clamp((point.y / metrics.height).toLong(), 0L, rows.size - 1L)
+        val last = clamp(columns, 0L, rows[row].cells.size) - 1L
+        if (last < 0L) return None
+        return Some((row, clamp((point.x / metrics.width).toLong(), 0L, last)))
+    }
+
     fun caret(cursor: TerminalCursor): Rect? = if (atBottom &&
         cursor.row <
         rows.size &&
         cursor.column <
         columns
     )
-        Some(rect(cursor.row, cursor.column))
+        Some(
+            rect(
+                cursor.row, cursor.column,
+                if (rows[cursor.row].cells[cursor.column].width > 0L)
+                    rows[cursor.row].cells[cursor.column].width
+                else
+                    1L
+            )
+        )
     else
         None
 
@@ -39,113 +75,219 @@ internal struct GridGeometry(
     )
 }
 
-private struct PaintCell(
-    val bounds: Rect,
-    val layout: TextLayout?,
-    val foreground: Color,
-    val background: Color,
-    val underline: Boolean,
-    val struck: Boolean
-)
-
 internal class TerminalFrame(
     val geometry: GridGeometry,
     val paintRevision: Long,
     val cursor: TerminalCursor,
     val inputRevision: Long,
     private val appearance: TerminalAppearance,
-    private val glyphs: TerminalGlyphCache
+    private val glyphs: TerminalGlyphCache,
+    private val commandSeparators: Boolean = false,
+    private val imageCache: TerminalImageCache? = None,
+    private val onImageError: (Throwable) -> Unit = {},
+    private val rowCache: TerminalRowCache? = None
 ) : Closeable {
-    private val cells = ArrayList<PaintCell>()
-    private val selection = ArrayList<Rect>()
+    private val colors = geometry.reading.colors
+    private val foreground = colors.foreground.color()
+    private val background = colors.background.color()
+    private val cursorColor = colors.cursor.color()
+    private val rows = ArrayList<TerminalRowLease>()
+    private var selection: Array<Rect> = []
+    private var separators: Array<Double> = []
+    private val images = TerminalImagePaint()
     private var preedit: TextLayout? = None
+    private var blinkingText = false
+    private var closed = false
+    val hasBlink: Boolean get() = blinkingText
 
     init {
         glyphs.retain()
     }
 
-    fun shape(range: SelectionRange?, composition: String) {
-        var index = 0L
-        for (line in geometry.rows) {
-            val last = clamp(line.cells.size, 0L, geometry.columns)
-            var column = 0L
-            while (column < last) {
-                val cell = line.cells[column]
-                if (cell.width != 0L && column + cell.width <= last) addCell(index, column, cell)
-                column += 1L
-            }
-            val selected = when (range) {
-                case Some(val value) -> value.onRow(geometry.first + index, line)
-                case None -> None
-            }
-            when (selected) {
-                case Some(val span) -> {
-                    val end = clamp(span.end, 0L, geometry.columns)
-                    if (end > span.start)
-                        selection.add(geometry.rect(index, span.start, end - span.start))
-                }
-
-                case None -> {}
-            }
-            index += 1L
+    fun shape(ranges: Array<SelectionRange>, composition: String) {
+        when (imageCache) {
+            case Some(val cache) -> images.prepare(geometry, cache, onImageError)
+            case None -> {}
         }
-        if (composition != "") preedit = Some(glyphs.shapePreedit(composition))
-    }
-
-    private fun addCell(row: Long, column: Long, cell: TerminalCell) {
-        val foreground = resolveColor(cell.style.foreground, appearance.foreground)
-        val background = resolveColor(cell.style.background, appearance.background)
-        val fullInk = if (cell.style.inverse) background else foreground
-        val paper = if (cell.style.inverse) foreground else background
-        val ink = if (cell.style.faint)
-            Color(
-                (fullInk.red + paper.red) / 2.0, (fullInk.green + paper.green) / 2.0,
-                (fullInk.blue + paper.blue) / 2.0, fullInk.alpha
-            )
-        else
-            fullInk
-        val visible = cell.text != "" && !cell.style.concealed
-        val glyph = if (visible) Some(glyphs.layout(cell, ink)) else None
-        if (visible || paper != appearance.background || cell.style.underlined || cell.style.struck)
-            cells
-                .add(
-                    PaintCell(
-                        geometry.rect(row, column, cell.width), glyph, ink, paper,
-                        cell.style.underlined, cell.style.struck
+        for (line in geometry.rows) {
+            val lease = when (rowCache) {
+                case Some(val cache) ->
+                    cache.acquire(line, geometry.columns, geometry.reading, geometry.metrics)
+                case None ->
+                    terminalRowWithoutCache(
+                        line,
+                        geometry.columns,
+                        glyphs,
+                        geometry.reading,
+                        geometry.metrics
                     )
-                )
+            }
+            rows.add(lease)
+            blinkingText = blinkingText || lease.layout.hasBlink
+        }
+        selection = terminalSelectionRects(geometry, ranges)
+        if (composition != "") preedit = Some(glyphs.shapePreedit(composition, foreground))
+        if (commandSeparators) separators = TerminalCommandSeparators().rows(geometry)
     }
 
     private val clip: Rect get() = Rect(0.0, 0.0, geometry.size.width, geometry.size.height)
 
-    fun drawScreen(canvas: Canvas) {
+    fun textCursorKey(cursor: TerminalCursor): Long = if (appearance.ligatures ==
+        TerminalLigatures.AtCursor &&
+        geometry.atBottom &&
+        cursor.visible &&
+        cursor.row <
+        geometry.rows.size &&
+        cursor.column <
+        geometry.columns
+    )
+        1L + cursor.row * 32768L + cursor.column
+    else
+        0L
+
+    fun drawScreen(
+        canvas: Canvas,
+        blinkVisible: Boolean = true,
+        activeCursor: TerminalCursor? = None
+    ) {
+        val current = activeCursor ?: cursor
+        val split = textCursorKey(current) != 0L
         canvas.save()
         canvas.clipRect(clip)
-        canvas.drawRect(clip, Paint(appearance.background))
-        for (cell in cells) {
-            if (cell.background != appearance.background)
-                canvas.drawRect(cell.bounds, Paint(cell.background))
+        canvas.drawRect(clip, Paint(background))
+        images.draw(canvas, 0)
+        for (index in 0L..<rows.size) {
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (cell in rows[index].layout.cells) {
+                if (cell.background != background)
+                    canvas.drawRect(cell.bounds, Paint(cell.background))
+            }
+            canvas.restore()
         }
-        for (highlight in selection)
-            canvas.drawRect(highlight, Paint(appearance.selection))
-        for (cell in cells)
-            drawGlyph(canvas, cell)
+        images.draw(canvas, 1)
+        for (index in 0L..<rows.size) {
+            val row = rows[index].layout
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (run in row.runs) {
+                if (!run.source.style.blink || blinkVisible)
+                    run
+                        .draw(
+                            canvas, geometry,
+                            if (split && index == current.row) Some(current.column) else None
+                        )
+            }
+            for (cell in row.cells) {
+                if (!cell.blink || blinkVisible) drawDecoration(canvas, cell)
+            }
+            canvas.restore()
+        }
+        images.draw(canvas, 2)
+        canvas.restore()
+        drawSelection(canvas, selection)
+        drawCommandSeparators(canvas, separators)
+    }
+
+    fun drawSelection(canvas: Canvas, rectangles: Array<Rect>) {
+        if (rectangles.size == 0L) return
+        canvas.save()
+        canvas.clipRect(clip)
+        for (rectangle in rectangles)
+            canvas.drawRect(rectangle, Paint(appearance.selection))
         canvas.restore()
     }
 
-    fun drawCursor(canvas: Canvas, rect: Rect, visible: Boolean, focused: Boolean) {
+    fun drawCommandSeparators(canvas: Canvas, rows: Array<Double>) {
+        if (rows.size == 0L) return
         canvas.save()
         canvas.clipRect(clip)
-        if (visible) {
-            val width = if (focused) 2.0 else 1.0
-            canvas.drawRect(Rect(rect.x, rect.y, width, rect.height), Paint(appearance.cursor))
+        val separator = Paint(Color(foreground.red, foreground.green, foreground.blue, 0.2))
+        for (y in rows)
+            canvas.drawRect(Rect(0.0, y, geometry.size.width, 1.0), separator)
+        canvas.restore()
+    }
+
+    fun drawSearchHighlights(canvas: Canvas, highlights: Array<TerminalHighlight>) {
+        canvas.save();
+        canvas.clipRect(clip)
+        for (highlight in highlights)
+            canvas
+                .drawRect(
+                    highlight.bounds,
+                    Paint(
+                        if (highlight.active)
+                            appearance.activeSearchHighlight
+                        else
+                            appearance.searchHighlight
+                    )
+                )
+        canvas.restore()
+    }
+
+    fun drawCursor(
+        canvas: Canvas,
+        rect: Rect,
+        cursor: TerminalCursor,
+        focused: Boolean,
+        blinkVisible: Boolean,
+        glyph: TerminalCursorGlyph? = None
+    ) {
+        canvas.save()
+        canvas.clipRect(clip)
+        if (cursor.visible && (!focused || !cursor.blink || blinkVisible)) {
+            if (!focused) {
+                canvas
+                    .drawRect(
+                        rect,
+                        Paint(cursorColor, style = PaintingStyle.Stroke, strokeWidth = 1.0)
+                    )
+            } else
+                when (cursor.shape) {
+                    case Bar ->
+                        canvas
+                            .drawRect(
+                                Rect(rect.x, rect.y, 2.0, rect.height),
+                                Paint(cursorColor)
+                            )
+                    case Underline ->
+                        canvas
+                            .drawRect(
+                                Rect(rect.x, rect.y + rect.height - 2.0, rect.width, 2.0),
+                                Paint(cursorColor)
+                            )
+
+                    case Block -> {
+                        canvas.drawRect(rect, Paint(cursorColor))
+                        when (glyph) {
+                            case Some(val value) -> {
+                                val text = value.layout
+                                canvas.save()
+                                canvas.clipRect(rect)
+                                canvas
+                                    .drawText(
+                                        text,
+                                        Point(
+                                            rect.x + value.offset,
+                                            rect.y +
+                                                geometry.metrics.baseline -
+                                                text.alphabeticBaseline
+                                        )
+                                    )
+                                canvas.restore()
+                            }
+
+                            case None -> {}
+                        }
+                    }
+                }
         }
         when (preedit) {
             case Some(val layout) -> {
                 canvas
                     .drawRect(
                         Rect(rect.x, rect.y, layout.maxIntrinsicWidth, rect.height),
-                        Paint(appearance.background)
+                        Paint(background)
                     )
                 canvas
                     .drawText(
@@ -158,7 +300,7 @@ internal class TerminalFrame(
                 canvas
                     .drawRect(
                         Rect(rect.x, rect.y + rect.height - 1.0, layout.maxIntrinsicWidth, 1.0),
-                        Paint(appearance.cursor)
+                        Paint(cursorColor)
                     )
             }
 
@@ -167,25 +309,56 @@ internal class TerminalFrame(
         canvas.restore()
     }
 
-    private fun drawGlyph(canvas: Canvas, cell: PaintCell) {
+    fun drawLinks(canvas: Canvas, hovered: TerminalLink?) {
+        val active = hovered ?: return
+        canvas.save()
+        canvas.clipRect(clip)
+        for (index in 0L..<rows.size) {
+            canvas.save()
+            canvas.translate(0.0, index.toDouble() * geometry.metrics.height)
+            for (link in rows[index].layout.links) {
+                if (active.sameGroup(link.link))
+                    drawUnderline(canvas, link.bounds, TerminalUnderline.Single, link.color)
+            }
+            canvas.restore()
+        }
+        canvas.restore()
+    }
+
+    // Recolor the same shaped fragment, then clip it to the cursor's unchanged grid cell.
+    fun cursorGlyph(cursor: TerminalCursor): TerminalCursorGlyph? {
+        if (cursor.shape !=
+            TerminalCursorShape.Block ||
+            !cursor.visible ||
+            cursor.row >=
+            geometry.rows.size ||
+            cursor.column >=
+            geometry.columns
+        )
+            return None
+        val cell = geometry.rows[cursor.row].cells[cursor.column]
+        if ((cell.width != 0L && cell.text == "") || cell.style.concealed) return None
+        val paper = if (cell.style.inverse)
+            resolveColor(cell.style.foreground, foreground, colors)
+        else
+            resolveColor(cell.style.background, background, colors)
+        for (run in rows[cursor.row].layout.runs) {
+            if (run.source.contains(cursor.column))
+                return Some(
+                    run
+                        .cursorGlyph(
+                            cursor.column, paper,
+                            textCursorKey(cursor) != 0L, geometry.metrics.width
+                        )
+                )
+        }
+        return None
+    }
+
+    private fun drawDecoration(canvas: Canvas, cell: TerminalRowCell) {
         val rect = cell.bounds
         val baseline = geometry.metrics.baseline
-        when (cell.layout) {
-            case Some(val text) -> {
-                canvas.save()
-                canvas.clipRect(rect)
-                canvas.drawText(text, Point(rect.x, rect.y + baseline - text.alphabeticBaseline))
-                canvas.restore()
-            }
-
-            case None -> {}
-        }
-        if (cell.underline)
-            canvas
-                .drawRect(
-                    Rect(rect.x, rect.y + rect.height - 1.0, rect.width, 1.0),
-                    Paint(cell.foreground)
-                )
+        drawUnderline(canvas, rect, cell.underline, cell.underlineColor)
         if (cell.struck)
             canvas
                 .drawRect(
@@ -195,10 +368,58 @@ internal class TerminalFrame(
     }
 
     public override fun close() {
+        if (closed) return
+        closed = true
         try {
             preedit?.close()
+            for (row in rows)
+                row.close()
+            rows.clear()
         } finally {
-            glyphs.release()
+            try {
+                images.close()
+            } finally {
+                glyphs.release()
+            }
+        }
+    }
+}
+
+private fun drawUnderline(canvas: Canvas, rect: Rect, kind: TerminalUnderline, color: Color) {
+    val y = rect.y + rect.height - 1.0
+    val paint = Paint(color)
+    when (kind) {
+        case None -> {}
+        case Single -> canvas.drawRect(Rect(rect.x, y, rect.width, 1.0), paint)
+
+        case Double -> {
+            canvas.drawRect(Rect(rect.x, y, rect.width, 1.0), paint)
+            canvas.drawRect(Rect(rect.x, y - 2.0, rect.width, 1.0), paint)
+        }
+
+        case Curly -> {
+            var x = rect.x
+            var low = true
+            while (x < rect.x + rect.width) {
+                val end = if (x + 2.0 < rect.x + rect.width) x + 2.0 else rect.x + rect.width
+                canvas
+                    .drawLine(
+                        Point(x, if (low) y else y - 2.0),
+                        Point(end, if (low) y - 2.0 else y), paint
+                    )
+                x = end
+                low = !low
+            }
+        }
+
+        case _ -> {
+            val width = if (kind == TerminalUnderline.Dotted) 1.0 else 3.0
+            var x = rect.x
+            while (x < rect.x + rect.width) {
+                val remaining = rect.x + rect.width - x
+                canvas.drawRect(Rect(x, y, if (remaining < width) remaining else width, 1.0), paint)
+                x += width + 2.0
+            }
         }
     }
 }

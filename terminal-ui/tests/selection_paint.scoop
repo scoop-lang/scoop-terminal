@@ -1,0 +1,67 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalSelectionPaintTest {
+    @Test fun rectangularSelectionPaintsWholeWideCellsWithoutFillingItsBoundingBox() {
+        val terminal = Terminal(8L, 3L, colors = TerminalColors(background = TerminalRgb(0, 0, 0)))
+        terminal.feed("\u001b[8ma中bc\r\n12xyzz".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            val reading = terminal.reading
+            viewport
+                .select(
+                    CellLocation(reading.lines(0L, 1L)[0L].id, 2L),
+                    mode = TerminalSelectionMode.Rectangular
+                )
+            viewport.extend(CellLocation(reading.lines(1L, 1L)[0L].id, 4L))
+            FontCollection()
+                .use { fonts ->
+                    val appearance = TerminalAppearance(
+                        background = Color(0.0, 0.0, 0.0),
+                        selection = Color(1.0, 0.0, 0.0)
+                    )
+                    val cache = TerminalGlyphCache(fonts, appearance)
+                    try {
+                        val geometry = GridGeometry(
+                            Size(80.0, 48.0), CellMetrics(10.0, 16.0, 12.0),
+                            0L, reading.lines(0L, 3L), 8L, 3L, reading.screenRevision, true, reading
+                        )
+                        TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                            .use { frame ->
+                                frame.shape(viewport.ranges(), "")
+                                RasterSurface(80, 48)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val pixels = surface.readPixels()
+                                        assertEquals(
+                                            255,
+                                            pixels[(8L * 80L + 15L) * 4L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            255,
+                                            pixels[(24L * 80L + 25L) * 4L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            0,
+                                            pixels[(24L * 80L + 15L) * 4L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            0,
+                                            pixels[(8L * 80L + 55L) * 4L].toInt() and 255
+                                        )
+                                    }
+                            }
+                    } finally {
+                        cache.release()
+                    }
+                }
+        } finally {
+            viewport.close()
+        }
+    }
+}

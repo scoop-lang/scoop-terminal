@@ -1,0 +1,168 @@
+# Terminal 组件实现进度
+
+已完成 [组件改进设计](terminal-component-design.md) 本轮 M1–M6 的实现与三平台验证。此文件保留各阶段的完成证据；最终兼容范围与测量限制见 [兼容性报告](compatibility.md) 和 [性能测量](performance.md)。
+
+实现分支：`codex/terminal-component-foundation`。每个可验证变更提交并推送后继续。先完成本机功能与验证，再集中进行 Linux / Windows 回归。
+
+## 工作清单
+
+| 阶段 | 工作 | 状态 |
+| --- | --- | --- |
+| M1 | 分页历史、行 ID 索引、复用不可变行内容 | 已实现，核心测试通过 |
+| M1 | 逻辑行、正文 reflow、宽字素、anchor 定位与淘汰/重置失效 | 已实现，核心及选择回归通过 |
+| M1 | VT 编辑的 anchor 迁移、覆盖通知及消费者失效 | 有界跟踪核心与 6 项回放已完成，控制器、选择、命令及图形消费者已接入 |
+| M1 | 已提交快照、变化集、session reading 与消费者迁移 | 已实现，快照与视图回归通过 |
+| M1 | 有界 OSC 分派、流式 DCS/APC 生命周期与解析恢复 | 已实现，解析器 6 项测试通过 |
+| M1 | 上下/左右边距、矩形滚动、宽字符编辑、DECSC/DECSTR/RIS | 已实现，核心 40 项测试通过 |
+| M1 | Unicode 17 字素/宽度、创建时 ambiguous 策略、变体序列与零宽前缀 | 已实现，核心 46 项测试通过 |
+| M1 | 运行中修改宽度策略的全量重排 | 已实现，7 项核心与 1 项视图用例通过，完整核心 112 项／UI 54 项通过 |
+| M1 | 传统键鼠、1016 像素鼠标、水平滚轮 | 已实现，5 项输入协议用例通过 |
+| M1 | 下划线类型/颜色、光标形状、独立闪烁 | 已实现，4 项协议及 3 项绘制/缓存用例通过 |
+| M1 | DECRQM/DECRQSS/XTGETTCAP、尺寸查询及共享 terminfo 能力表 | 已实现，5 项协议用例及生成一致性/语法检查通过；图形能力已按支持范围加入 |
+| M2 | 同步输出 2026、序列边界提交、独立硬期限 | 已实现；核心回放、独立事件循环期限、真实 PTY 退出及 Kitty／Ghostty 实际回包通过 |
+| M2 | 异步宿主效果的有序回复票据 | 已实现，虚拟期限/乱序完成/关闭回归通过 |
+| M2 | OSC 颜色查询/设置/重置 | 已实现，5 项协议、5 项快照及 4 项绘制/缓存用例通过 |
+| M2 | OSC 8 超链接与交互 | 核心 6 项及交互/光栅 3 项通过，controller 的已接受帧 point 查询已接入 |
+| M2 | OSC 52 与宿主剪贴板策略 | 已实现，4 项核心及 4 项桥接/队列用例通过；macOS／Linux／Windows 只读原生 adapter 验证通过 |
+| M2 | OSC 7 工作目录、9;4 进度事件 | 已实现，5 项核心用例及 UI 编译检查通过 |
+| M3 | controller、高级选择、拖动滚动、复制规则 | 已实现，9 项选择、2 项期限、1 项光栅及原视口 5 项通过；三平台的选择更新进入原生 Accepted 帧且不增加文字布局 |
+| M3 | 字面量搜索、casefold 映射、分页/取消/限额 | 核心 7 项通过，独立搜索 worker 与 4 项异步分页／关闭用例已完成 |
+| M3 | reveal、矩形、高亮与结果失效 | 已实现，6 项定位与 3 项高亮/光栅验证通过 |
+| M3 | OSC 133 命令块及可选分割线 | 已实现，7 项协议回放及默认开关/叠加像素验证通过 |
+| M4 | 独立字体副本、LRU 与帧排版租约 | 已实现，3 项淘汰/寿命/像素及原有 4 项绘制回归通过 |
+| M4 | 连字 run、逐列网格校验、字体 fallback 与装饰 | 已实现，8 项连字/退回用例通过；固定字体像素、字体来源关闭后旧帧绘制与延迟光标排版验证通过 |
+| M5 | 跨线程不可变快照租约与配额 | 已实现，3 项多线程用例与原快照 5 项／搜索 7 项通过 |
+| M5 | 独立搜索 worker、取消及退出 | 已实现，4 项异步用例通过；图片文本投影已验证不保留图片资源 |
+| M5 | 串行后台 model 与排队跟踪 | 已接入生产 session，后台 7 项、会话 6 项及完整 UI 72 项通过 |
+| M5 | 图片 store/decoder/cache、预算 | 已实现；Sixel 9 项、Kitty 绘制 4 项及 PNG 辅助数据 3 项通过；实际 RSS 和 Metal 帧后资源分配已分别测量 |
+| M5 | Sixel 编码、颜色、滚动、查询及生命周期 | 核心与视图已接入，桌面默认启用；8 项协议、相关核心回归及 UI 像素验证通过，xterm 407 的 7 项实际模式／光标回包一致 |
+| M5 | Kitty 静态 profile、分块、放置/删除/探测 | 已实现且桌面默认启用；18 项协议、4 项绘制、完整 UI 90 项及 macOS 真实窗口 PNG／PTY 用例通过 |
+| M6 | 帧调度、局部失效、缓存/批量处理及基准报告 | 存储、重排、下一帧调度、行缓存和独立装饰已接入；核心、字体/DPI、原生帧、搜索/重排/图形数据已记录 |
+| M6 | 本机窗口/PTY、实际应用、资源释放与错误路径 | 原生 resize/回包/图片/退出、独立装饰、八组实际应用、系统剪贴板及 Kitty／Ghostty／xterm 实际回包已验证 |
+| M6 | Linux 本轮完整回归 | 核心 186、UI 97、X11 原生窗口 2、只读剪贴板 1 项通过；应用 7 次及 xterm 回放通过 |
+| M6 | Windows 本轮完整回归 | 核心 186、UI 97、交互桌面原生窗口 2、只读剪贴板 1 项通过；ConPTY 参数失败已由 Scoop PR #232 修复闭合 |
+
+搜索框、标签页、分屏和会话管理等外围 UI 按设计留待后续 demo；Kitty 的后续扩展范围以设计第 9 节为准，不将其冒充为已支持。
+
+## 已执行验证
+
+以下按实现阶段保留当时的记录和测试数量；后续阶段已完成的工作以顶部清单及兼容性报告为准。
+
+- 工具链：`~/.scoop/bin/scoop`，`0.0.0-dev.20261126`，编译器 `bb295704d`。
+- `scoop --sysroot ../scoop/sysroot test --release emulator`：46/46 通过，包括 8 项边距/编辑/复位、6 项解析、3 项存储、11 项 reflow、5 项快照及 6 项 Unicode 宽度测试。
+- 同步输出改动后的完整 `emulator` 回归：65/65 通过。新增 5 项覆盖 feed 内多次 BSU/ESU、冻结期间查询与输入、重复 BSU 的同一期限代次、显式期限释放、EOF/resize/RIS 及旧历史快照隔离；UI 测试代码编译检查通过。
+- `scoop --sysroot ../scoop/sysroot test --release emulator --filter InputProtocolTest`：5/5 通过，覆盖 Ctrl 别名、修饰功能键/方向键、小键盘、X10/传统原始字节、跟踪/编码独立切换、1016 像素及横向滚轮。视图从已接受布局的设备缩放计算像素坐标；未接受尺寸或 DPI 不用于鼠标报告。
+- `scoop --sysroot ../scoop/sysroot test --release emulator --filter RenditionTest`：4/4 通过，覆盖 4:0..5、21/24、58/59、无效色彩空间、DECSCUSR、光标可见性/闪烁独立及保存恢复。
+- `scoop --sysroot ../scoop/sysroot test --release emulator --filter CapabilityQueryTest`：5/5 通过，覆盖流顺序中的真实模式、SGR 回包回放、分块/取消/上限、未知查询失败及像素变化保留边距。UI 测试代码编译检查通过。
+- `python3 tools/generate_capabilities.py --check` 与 `tic -x -c terminfo/scoop.terminfo`：通过；查询和安装 profile 来自同一能力表，生成临时文件自动清理。
+- `scoop --sysroot ../scoop/sysroot test --release emulator --filter OscColorTest`：5/5 通过；`SnapshotTest` 5/5 通过；绘制/缓存 4/4 通过。覆盖 16-bit 查询、X11 `#` 高位与 `rgb:` 比例转换、批量参数、当前主题重置、独立的显式 RGB、冻结颜色及实际像素；快照配额已计入完整调色板的保守占用。
+- OSC 52：核心 `ClipboardProtocolTest` 4/4、UI `ClipboardBridgeTest` 4/4 通过。覆盖默认拒绝读取、禁写、严格 Base64/UTF-8、空内容清空、字节限额、目标顺序、有序 PTY 票据、异步乱序完成、虚拟一秒期限、卸载/关闭后迟到结果、无服务、异常及最多 32 个待处理读取。已消费或取消的票据释放其输出字节。
+- `ShellMetadataTest` 5/5 通过，覆盖 OSC 7 的远端 host/百分号路径、无效 URI、OSC 9;4 缺省与保留百分比、0..100 限制、冻结期间事件顺序和 EOF/RIS 清理。元数据计入快照配额；组件没有目录访问、通知、任务栏或进度工具 UI。
+- OSC 8 核心 `HyperlinkTest` 6/6 通过；由于链接引用回收覆盖全部屏幕编辑路径，本次完整核心回归 85/85 通过。覆盖任意字节切分、参数保留、显式 ID 分组、宽格尾部、重排、矩形滚动、淘汰、保存光标与旧快照隔离；按记录数/字节限额拒绝新链接并产生诊断。链接记录保存在共享不可变索引中，单元格仅存 ID，已提交快照计入相应保守占用。
+- `TerminalLinkInteractionTest` 3/3 通过，覆盖已接受帧的链接命中、宽字符尾列、拖动阈值/取消/越界/不同链接不激活，以及显式 ID 多片段悬停的实际像素。`TerminalViewOptions` 提供 `onLinkActivated` / `onLinkHovered`，普通点击仍选择，Ctrl/Command 修饰点击只触发回调；应用鼠标模式优先，Shift 绕过。指针 claim、取消通知及不可取消的 release 清理已接入；真实窗口事件路径留集中验收验证。
+- `AnchorTrackingTest` 6/6、原有 `ReflowTest` 11/11 通过。`Terminal.track` 返回可关闭的有界注册，按受影响物理行订阅编辑；插删迁移、覆盖选区内部失效、提示符边界与显式擦除、逻辑行拆分、reflow、历史裁剪及同步冻结分别验证。已变更旧帧上的新注册明确返回 Stale；不把旧坐标套到新内容。快照保存不可变跟踪结果并计入预算；关闭/失效释放行引用，没有追加永久编辑日志。
+- OSC 133：`ShellCommandTest` 7/7、`TerminalCommandSeparatorTest` 1/1 通过，并重跑锚点 6/6。覆盖 A/B/C/D、可缺省退出状态、130 状态、孤立/丢失标记、次级提示符、擦除后跨 feed 重绘去重、pending-wrap、一行无历史、重排、冻结、主备屏及 EOF/RIS。`commandAt` / `commandsIn` / 分页 `commands` 返回已提交的命令块；`reading.text(range)` 读取原文。每个 buffer 最多保留一个没有可见锚点的提示符重绘上下文；它也受命令数量与字节预算约束。默认共保留 2048 个命令记录、8 MiB 元数据，旧快照和当前状态分别计费。
+- `TerminalViewOptions.commandSeparators` 默认 false；开启后只在后续主提示符所在物理行顶部画中性线，不增加行高、文字或光标移动。像素回归确认首条/次级提示符不新增线，关闭时没有线，绘制前后文字和光标相同。没有新增搜索框、命令工具栏或 shell hook 注入。
+- `LiteralSearchTest` 7/7 通过。`snapshot.search` 使用流式字面量匹配，分页同时限制命中数与扫描工作量；单个长字素和空行也分步推进。覆盖跨 soft wrap、硬行边界、重叠命中、`ß`/sigma/`İ` 完整 casefold、字素内部的精确原文 UTF-8 范围、无 normalization、部分历史前缀、冻结快照语义、取消、句柄/查询/工作内存/命中上限，以及 reflow 有效、改色有效、文字覆盖 Stale 和 reset Unavailable。关闭或完成会释放查询独立快照与工作数组，工作内存纳入快照总预算；每页返回源版本、查询代次与下一扫描位置。
+- 高级选择：`TerminalSelectionTest` 9/9、`TerminalSelectionScrollTest` 2/2、`TerminalSelectionPaintTest` 1/1，原视口 5/5、锚点 6/6 通过。覆盖 Unicode 词与额外路径字符、软换行逻辑行、宽字素矩形与重排后逐原行复制、显式空格/补齐策略、编辑迁移与覆盖通知、主备屏独立状态、历史裁剪后 Shift 扩展、冻结及过期帧拒绝。绝对单调期限随越界距离调速，不被连续指针移动推迟；光栅验证逐行选区而非整个包围框。`TerminalViewController` 支持显式选择、全选、滚动、复制及变更通知，关闭释放跟踪与订阅。修复旧 Accepted 帧在纯 reflow 后新注册的初始版本，以及跨宽字符软换行的跟踪范围错误保留补齐格的问题。
+- 搜索视图 API：`TerminalNavigationTest` 6/6、`TerminalSearchHighlightTest` 3/3、`TerminalAsyncSearchTest` 2/2，通过后选择 9/9 回归。覆盖 Nearest/Start/Center/End、未挂载/resize/旧帧等待、滚动取消、Stale/Unavailable、冻结历史定位且不提交隐藏输出、已接受帧的 anchor/link/command 命中、重排/字素扩展、部分淘汰、普通/当前匹配实际像素、复用同一 frame 清除高亮，以及协程公平性、强制页上限和取消释放。高亮使用按逻辑行版本的区间索引，只查询可见行并合并重叠；只请求绘制帧，不重新排版文字。新增 `SearchContentChanged` 作为查询源变化通知，各结果仍独立核对状态。没有增加搜索框、按钮或结果列表。
+- `scoop --sysroot ../scoop/sysroot test --release terminal-ui --filter TerminalGlyphCacheTest`：3/3 通过；新增 CPU 光栅验证检查双下划线颜色、文字隐藏阶段和光标闪烁互不混淆。文字和光标计时只请求帧，复用已经排版的内容，卸载时取消计时。
+- `scoop test --release terminal-ui --filter TerminalViewportTest`：5/5 通过，包括跨 reflow 保持选区、宽字符换行补齐不进入复制内容，以及已接受帧在 resize 后仍定位原字符。
+- `scoop test --release terminal-ui --filter TerminalGlyphCacheTest`：2/2 通过，包括一列宽字素的实际替代符排版。
+- `scoop test --release emulator --filter ParserTest`：6/6 通过，包括每个字节边界的切分、冒号子参数/中间字节、CAN/SUB/EOF、非法 DCS header、OSC 精确上限与超限整串丢弃。
+- `scoop check --release demo --tests`：通过；session 消费者已迁移到只读 `reading`。
+- 快照验证覆盖旧代次隔离、共享历史页及索引、同代次配额共享、关闭释放、文本/样式/光标版本分离；快照字节配额采用保守内容估算，不等同于进程实测 RSS。
+- 存储与 reflow 测试覆盖旧快照隔离、跨页淘汰/恢复、宽字素的一列占位、保存光标/样式、主备屏、逻辑边界 affinity、硬换行、实际空格及多次宽度变化。
+- Scoop 底层已补齐完整字素宽度、显式 ambiguous 策略及统一的 Unicode 17 字素分段，独立提交并合并 [PR #220](https://github.com/scoop-lang/scoop/pull/220) 和 [PR #221](https://github.com/scoop-lang/scoop/pull/221)。release clippy、charset 用例、原生 ABI 均通过。开发 sysroot 已使用安装编译器完整重建，后续命令显式传 `--sysroot ../scoop/sysroot`；没有修改编译器。
+- 无排版分词入口 `scoop.charset.wordBoundaries` 已在 Scoop 独立提交、推送并合并 [PR #223](https://github.com/scoop-lang/scoop/pull/223)，main 已回合并到该修复分支并推送。复用现有 ICU4X dictionary 数据，未下载新依赖；release Clippy、2 项适配、3 项原生 ABI、实际示例与 API 文档检索通过，开发 sysroot 已更新。本轮 PR 文本与局部文档临时目录已清理。
+
+- 字体缓存：`TerminalGlyphLruTest` 3/3，原 `TerminalGlyphCacheTest` 4/4 通过。验证 LRU 最近访问、缓存满后继续复用、条目/估算字节上限、超大布局不驻留、幂等租约关闭、缓存关闭后的独立绘制，以及旧帧在淘汰和字体来源关闭后的逐像素一致性。固定官方 Fira Code 6.2，字体来源、摘要和 OFL 许可随测试保存；下载使用指定代理，依赖压缩包留在 `~/repos/scoop-dep/terminal-fonts`。
+- `FontCollection.copy()` 已在 Scoop 独立分支提交并合并 [PR #224](https://github.com/scoop-lang/scoop/pull/224)，main 已回合并修复分支并推送。4 项字体集合用例、原生 `-Werror` 编译、局部 API 文档检索及关闭来源后延迟排版的实际示例通过。开发 sysroot 已更新；本轮探测程序、字体临时副本、PR 文本和局部 API 文档已清理。
+- 连字：`TerminalLigatureTest` 5/5、`TerminalRunFallbackTest` 3/3，通过后完整 `terminal-ui` 53/53。实际像素对照原生 Fira Code 排版，验证 Enabled/Disabled/显式 feature 优先级、所有 caret 列、组合字素、背景/链接/装饰/选择不打断兼容 run、跨行边界、原文复制和块光标裁剪重着色。AtCursor 计数验证只新排版当前片段，移开后原行像素恢复，重复绘制命中缓存；比例字体以“总宽一致、内部不同”的反例验证退回，固定 CJK 缺字 fallback 与双宽尾格、bidi 重排也有覆盖。Roboto/CJK 字体复用本地既有资料，许可证和摘要随测试保存，没有额外下载。
+
+运行时宽度切换已覆盖创建即 Wide、Narrow/Wide 往返、活动／保存光标及宽尾格、单列占位、历史限额、主备屏、同步输出、REP、分段 UTF-8、OSC 8/133 和既有样式。锚点使用固定 Narrow 列跨度，纯重排不增加文字版本，旧快照保留旧策略；选择与搜索原文保持，已接受帧在新布局完成前继续提供旧坐标。`RuntimeWidthPolicyTest` 7/7、`TerminalWidthPolicyViewTest` 1/1，随后完整核心 112/112、UI 54/54 通过。没有新增下载或本轮临时文件。
+
+- 后台迁移准备：`TerminalSnapshotPool` 将不可变 reading 的保留与可变终端分开；原子更新句柄／代次／工作内存配额，单个句柄的并发关闭只退还一次。`TerminalSnapshotThreadTest` 3/3 覆盖实际 worker 上同代次共享、句柄与字节限额、100 次并发重复关闭、200 个独立查询的唯一代次和完整预算回收；原 `SnapshotTest` 5/5、`LiteralSearchTest` 7/7 通过。测试闸门曾因共用接收队列而等待错误任务，已改为独立闸门并通过；没有底层库改动或临时文件遗留。
+
+- 搜索 worker：`TerminalAsyncSearchTest` 4/4 通过。扫描在独立单 worker 执行，每 4096 步检查取消；UI 在扫描期间只修改原子取消标志，核心查询独占交接。测试刻意阻塞 worker，确认窗口 owner 的其他任务继续推进、重复页请求被拒绝、取消后没有迟到命中，并检查闲置查询关闭、重复 shutdown、关闭后拒绝新查询及快照配额完整退还。会话关闭在不可取消的清理作用域等待查询退出与执行器停止；自然 EOF 后仍可搜索最终画面。
+
+- 串行后台模块：`TerminalBackgroundModelTest` 7/7，通过实际不同的线程创建和执行核心，发布回到窗口 owner。验证按序 feed／输入模式／DSR／resize、工作线程阻塞时 UI 仍推进、PTY 提交等待容量、活动请求计入字节／条目限额、注册未完成即关闭、核心配额拒绝、选择迁移／覆盖失效、重复 BSU 保留起始时刻、过时代次不能解冻、关闭提交尾部及回收 worker、发布回调失败会拒绝后续等待者；还覆盖父作用域在 driver 执行前取消的清理。`TerminalTrackedRange` 改为可由 adapter 实现的所有权接口，跨线程只发送不可变注册结果与原子取消位；可变核心句柄仍由后台持有。关闭后释放可变核心和回调引用，只保留最终不可变画面。原锚点 6 项与命令块 7 项回归通过。该提交只建立并验证后台模块，生产 session 在下一步迁移。
+
+- 生产会话已迁移到后台 model，UI 不再持有／访问可变终端；PTY I/O 和宿主回调维持窗口 owner，快照来自独立有界池。`TerminalWorkerSessionTest` 6/6：真实 PTY 验证立即退出的尾部数据及最终画面；可控 PTY 测试替身覆盖短写、OSC 52／DSR／用户输入顺序、重复 resize、持续 BSU 输出期间的独立期限、自然 EOF 提交冻结文字并继续搜索／重排、driver 开始前关闭及宿主回调异常。随后完整 `terminal-ui` 72/72、`scoop check --release demo --tests` 通过。本轮没有下载和临时文件；真实窗口、系统剪贴板、综合性能及 Linux／Windows 仍按后续集中验收执行。
+
+图片解码基础：`TerminalImageDecodeTest` 5/5、`TerminalCpuImageDecoderTest` 3/3 通过。先检查尺寸与乘法上限、PNG 分块／CRC／结束边界，RGB 补 alpha，RGBA 复用不可变像素；显式租约最后关闭时同时清掉数组引用并退还预算。PNG adapter 在后台调用内创建、使用和关闭原生对象，预留 encoded copy、codec 像素、raster surface、可变 readback 与返回数组的保守峰值；解码失败和大小不一致释放工作预算。固定本地生成的 RGBA／索引透明色／16-bit／Adam7 样本验证实际像素，多 worker 验证原生对象不跨 owner；fixture 生成一致性检查通过。此时尚未向 PTY 声明图形协议支持，store、帧寿命、压缩与绘制预算仍需后续集成验证。
+
+实际测试发现 `scoop.graphics.Image.decode()` 接受不完整 PNG 像素。已在独立分支 `codex/strict-image-decode` 修复并合并 [Scoop PR #226](https://github.com/scoop-lang/scoop/pull/226)：只接受 `SkCodec::kSuccess`，保留颜色／alpha 和 EXIF 方向。上游新增解码 3 项及原绘图 7 项通过，本地 main 已更新并回合并修复分支推送；开发 sysroot 完整更新后，组件的同组坏图回归通过。未下载外部依赖；PR 临时文件已清理。
+
+分块／压缩：`TerminalImageTransferTest` 6/6，连同前述核心解码 5 项共 11/11 通过。Base64 复用工具链库，逐块限制 4096 字节及非末块对齐／padding，并累计整次编码长度；空块不积累元数据，取消或任一块失败回收全部页。Zlib 复用工具链增量 decoder，固定 8 KiB 输入／输出缓冲，配置解压上限，严格拒绝截断、尾随字节、串联流和声明长度不符。测试覆盖跨输入和输出页、空流、小输入膨胀、工作预算以及最终合并时新旧数组共存的峰值，失败后已有像素租约保留。没有下载或临时文件；此变更提供传输原语，APC 协议接入仍在后续步骤。
+
+Sixel 像素基础：`TerminalSixelDecodeTest` 6/6、`TerminalSixelPaletteTest` 3/3、`TerminalIndexedImageTest` 4/4。增量处理六位像素、重复、回车／换带、透明或寄存器零背景、声明尺寸下界及实际绘制扩展、DEC 宏和 raster 像素比例；RGB／HLS 使用版本化颜色表。像素采用 64×64 索引块，空背景保持稀疏，局部擦除只复制相交块，旧快照保留原块／原颜色。测试覆盖跨参数边界、非法输入／取消／分配失败、共享块预算，以及两个实际线程的 200 个独立版本和重复关闭后的完整回收。绘制工作量另限 67108864 次像素写入，避免反复覆盖绕过面积限制。参考固定的 xterm `graphics_sixel.c` v1.66（2026-06-28）和 `graphics.c` v1.142（2026-10-11）核对游标算法并记录换带触达范围；尚未完成真实窗口对照。DCS、VT 滚动、协议查询和绘制尚未接入，因此仍不宣告图形能力。本轮没有下载或自建临时文件；协议参考文件继续用于后续集成。
+
+图片快照：`TerminalImageReadingTest` 4/4，原 `SnapshotTest` 5/5、`LiteralSearchTest` 7/7。`reading.images` 提供不可变资源／placement 视图，`TerminalImageLease` 支持独立帧交付所有权；显式快照自动保留图片，上传像素另有独立租约。资源、palette、索引块与元数据全部包含在 CPU 配额内，快照池另对保留内容作保守估算。失败的快照／图片表分配退还本次租约；双线程重复获取／关闭后完整回收。搜索使用共享行数据的文本投影，投影没有指向完整 reading 的反向引用：关闭原快照后 CPU 图片预算归零，搜索仍能返回正确命中。生产 model／view 的租约交接随后接入，本轮尚不启用协议能力。无下载或临时文件。
+
+图片 store 与屏幕：`TerminalImageStoreTest` 9/9，公共屏幕／跟踪修改后的完整核心 149/149。资源按 buffer 隔离 Kitty ID，image number 选择最新上传而非最近放置，显式 placement ID 替换旧位置；图片锚点参加 reflow，但普通文字插入不移动其网格原点。全屏滚动保留历史，淘汰时裁切仍存活的片段；边距滚动只移动完整落在区域内的图片。宽字符尾列保留单独网格偏移。Sixel 的同字重写与空白擦除也会清像素，共享 palette 更新及索引块修改不影响冻结帧；Kitty 一般文字擦除保留图片，ED 2 清除可见 placement。图片变化有独立 damage，2026 期间只推进解析状态，显式快照可跨核心关闭保留图片。
+
+资源策略已接入：优先回收无 placement 的资源，再回收最旧离屏资源；已冻结快照仍计入预算。若文字擦除所需的 Sixel 写时复制预算不足，退休受影响的当前 placement 并发出诊断，文字继续；旧快照不改变。若新图片表本身也无法在预算内建立，当前 buffer 的图片展示退休并诊断，避免图片耗尽预算阻断 VT／回包。`Terminal.close()` 释放可变 store 和借用的图片帧，已取得的快照／上传租约独立存活，最终文本仍可读。DCS/APC 与 UI 尚未接入，不宣告协议支持。本轮通过指定代理读取了固定 Kitty 提交 `3d5bb8e5359694593332a01b754891b53471239f` 的 `kitty/graphics.c` 作布局／滚动参考，没有下载依赖；该参考随后续协议工作继续保留。
+
+Sixel 协议：`TerminalSixelProtocolTest` 8/8，相关解码 6/6、store 9/9、能力查询 5/5。DCS 按字节流处理，CAN／SUB／EOF 释放未完成传输，超限后恢复文字与回包。80、1070、8452 与 DECRQM、DA、XTSMGRAPHICS 按显式 `TerminalGraphicsSupport` 配置响应；未实现的查询 item/action 明确失败。结尾换带的触达范围与最终像素高度分别计算，图像滚动和光标定位在随后 DSR 之前完成；display mode 保留原光标和 pending wrap。测试还覆盖私有／共享 palette、冻结快照、主备屏、接收期间 reflow、宽字符尾格及边距裁切。垂直全屏滚动不永久裁掉图片右侧；分配前优先回收旧的无 placement／离屏资源。
+
+核心默认为关闭图形；生产 session 在 UI 绘制完成后启用 Sixel。此处游标行为根据固定 xterm 源码核对并由回放锁定，尚未宣称真实窗口对照已完成。没有下载或新建临时文件，协议参考继续用于后续图形验证。
+
+生产图片交接：`TerminalModelImageTest` 2/2、原后台 model 7/7、真实／模拟 PTY 会话 6/6、核心图片快照 4/4。每次后台发布先取得图片租约，窗口接受新代次后退还旧租约；交接处不允许取消丢弃已产生的 owned 结果，下一请求仍检查取消。连续 100 次替换在 192 KiB CPU 配额内完成；实际 worker 被阻塞并在交接期间取消时，最后图片仍可读取。显式 `model/session.close()` 关闭核心资源并把当前 reading 换成无图片的共享文本投影；此前取得的图片／快照租约独立存活，自然 EOF 仍保留图片供最终画面使用。`reading.withoutImages()` 开放同一文本投影能力，不反向保留完整 reading。UI 依赖锁已更新为图形原语所需的 compression／platform；没有新增下载或临时文件。
+
+局部图片上传：`TerminalImageRegionTest` 3/3，索引块 4/4、Sixel 协议 8/8 回归。RGBA 子矩形按原图 stride 拷贝，Sixel 仅转换所需块，返回值独立计费和释放；越界与溢出矩形在分配前拒绝。4K×4K 的稀疏背景在 1 MiB CPU 配额下可上传 64×64 可见块，完整 RGBA 转换被限额拒绝且不遗留分配。部分擦除保持未变块版本，共享改色改变 palette 版本；进程内独立 namespace 防止多会话缓存键碰撞。没有下载或临时文件。
+
+原生图片与视图：`TerminalImageCacheTest` 4/4、`TerminalImagePaintTest` 5/5，随后完整 `terminal-ui` 86/86；`scoop check --release demo --tests` 通过。缓存只准备可见 64×64 块，未变索引块可跨擦除版本复用；共享 palette 或不同会话 namespace 会生成不同上传。实际 CPU 光栅验证最近邻像素、双倍 DPI、窗口裁剪、历史浏览、改色前后两个冻结帧，以及核心和缓存关闭后仍能绘制旧帧。选择、搜索、光标和 OSC 133 分割线在图片上保持可见。预算测试覆盖旧帧固定的资源、LRU 淘汰、配置缩小、重复释放和完整回收；实际 worker 不能使用或关闭窗口 owner 的原生资源。
+
+原生预算默认 128 MiB，保守计入 CPU native copy、可能的 GPU texture、对象和帧引用；另限 4096 缓存条目和 8192 tile／帧。若准备中途失败，该 placement 的临时帧引用全部撤回，避免半幅图片；每帧通过 `onImageError` 报告首次错误。缓存本身可保留已上传的块供重试，旧帧独立存活。此处为光栅与所有权验证，不等同于实际 GPU／RSS 测量；RGBA 邻边采样和 Kitty z 层在 Kitty 协议完成后补像素回归。桌面 `start()` 默认启用 Sixel，核心仍要求显式开启。本轮没有下载或临时文件。
+
+Kitty 静态核心：`TerminalKittyTransferTest` 6/6、`TerminalKittyLayoutTest` 6/6、`TerminalKittyDeleteTest` 4/4、`TerminalKittyQueryTest` 2/2，随后完整 `emulator` 178/178。APC 接入内联 RGB／RGBA／PNG、Base64 分块及 Zlib，普通查询实际验证完整数据且不回收已有图片；特性查询忽略 payload、不扰动待完成传输，只回显实现的非默认键。真实 PNG adapter 在桌面阶段接入，本组核心 PNG 使用确定性 decoder，并验证 CRC／长度错误不会调用它。每个字节边界回放验证图片发布、光标查询和 DA 回复顺序。
+
+布局／生命周期覆盖最后一块到达时的光标、c/r 保持比例、源裁剪、cell 偏移、缩小字体时夹紧偏移、C=1、image number／placement ID、替换、主备屏及同步输出。旧快照保留原像素与 placement；合法删除没有成功回包，大写选择器按剩余引用释放资源。后续块 q=0／省略继承先前 quiet，非零 q 更新 quiet；EOF、RIS 和真正的 buffer 切换取消未完成传输。小预算下连续 80 次上传优先回收无 placement 的资源，失败查询不改现存资源；取消、损坏数据和超限恢复 VT 并退还预算。本轮无下载和临时文件，固定 Kitty 源码参考继续用于绘制／兼容核对。
+
+Kitty 原生绘制：`TerminalKittyPaintTest` 4/4。真实 RGBA 光栅覆盖透明度、三个 z 区间及阈值、同 z 按 image ID 排序；四类 PNG 通过协议和生产 CPU decoder，删除协议资源／清空缓存后已准备帧仍能绘制。多块图像在缩小、放大、源裁剪和窗口裁剪下逐像素对比整幅线性绘制，允许至多 2/255 的插值舍入误差；重复帧没有新增上传。
+
+测试实际发现 `Canvas.clipRect` 固定的抗锯齿覆盖使非整数缩放的 tile 边界变暗。已在独立分支 `codex/graphics-hard-clip` 修复并合并 [Scoop PR #228](https://github.com/scoop-lang/scoop/pull/228)，增加 `antiAlias = false`，同步规范／声明／README／skill 导航。上游 14 项定向回归通过，main 已更新并回合并修复分支推送，开发 sysroot 完整增量更新。组件从扩展采样边缘绘制，再以硬裁剪分配 tile 的设备像素；上述接缝回归通过。没有新依赖，PR 临时文件已删除。
+
+PNG 辅助数据：`TerminalPngMetadataTest` 3/3、图片基础 27/27，Kitty 绘制 4/4，随后完整 `terminal-ui` 90/90。只把像素、透明度和颜色 chunks 送入 codec；按原编码跳过压缩文字、EXIF 与未知辅助数据，不先解压再丢弃。ICC 严格检查 Zlib 结束与长度，默认独立展开上限 1 MiB，验证临时空间和四份原生 profile 的保守成本分别计费；超限、损坏及规范化分配失败释放新资源且不调用 codec。生成的 RGB matrix ICC 保持颜色输出；含八段 7 MiB 文字的 PNG 在 4 MiB 图片预算内保持原像素。规范化采用两次线性扫描和常量工作状态，不按辅助 chunk 数量积累列表。生成 fixture 的一致性检查通过，无外部图片或依赖下载。
+
+桌面 `start()` 现在默认启用 Sixel／Kitty，并在 model worker 中配置 `TerminalCpuImageDecoder`。macOS `scoop test --release demo` 的真实窗口用例通过：子进程收到 CPR，再发送实际 PNG、收到 Kitty OK，窗口接受两次尺寸，PTY 最后尺寸与模型相同，子进程以 17 退出，中文最终画面保留；另验证等待输入的子进程显式关闭。PNG 的预算测试不等同于进程 RSS 硬上限，实测峰值及综合应用 smoke 仍列入 M6。本轮没有自建临时文件遗留。
+
+性能测量第一轮：新增 8 个仅手动执行的 release 场景与 `tools/benchmark_terminal.py`。基线 `d990f72`、M5 `89cdabb` 共 16 个独立测试进程完成；同一测量循环采集 feed／历史定位／reflow 耗时，以及运行时累计托管分配和实际峰值 RSS。结果和限制见 [性能测量](performance.md)。历史索引避免全表扫描，但短行空格存储和 reflow 分配明显偏高，作为 M6 优先优化项。基线没有正文 reflow，不将其 resize 耗时宣传为同功能对比；窗口和图形指标仍待后续测量。基线导出目录已自动删除，原始报告暂留供优化对照。
+
+紧凑行存储：尾部默认／样式 blank 按需表示，修改行扩展前缀、发布时冻结，并与历史／快照共享；后续编辑才复制。`TerminalLine.cells` 现在是不可变 `List<TerminalCell>`，保留物理列数和完整索引／迭代语义，需要数组时 `.toArray()`。新增 3 项回归覆盖全网格参考对照、跨代次读取、样式空白／宽尾修复和 6000 行短日志在 16 MiB 快照配额内保留；随后完整核心 184/184、UI 90/90 通过。相同基准中，10 万行历史峰值 RSS 从 6716.0 降至 213.8 MiB，240 列 ASCII 从 840.34 降至 567.12 ms；120 列 ASCII 累计分配上升，详细数据与限制一并保存在性能报告，继续优化 reflow 和空路径。没有新增外部依赖。
+
+重排／发布优化：新行直接构造，完整核心 184/184 再次通过；发布数组在最多 8 列空余时转移只读所有权，超出则收紧，旧代次和写时复制由紧凑行回归验证。无跟踪对象时跳过临时空注册数组。重测 8 个核心场景，1 万行的 24 次重排累计从 M5 的 4181.30 降至 2133.93 ms，p95 从 231.85 降至 97.13 ms；10 万行存储的累计分配从 3598.9 降至 549.4 MiB。所有权转移的宽松容量策略曾使峰值升高，已收紧后再测；最终指标随性能报告保存。
+
+视图基准：补充固定 Fira Code 6.2／14 pt、120×40 和 240×80、1×／2× CPU raster 的 4 项手动场景，和基线共 8 个进程均完成。当前 run 绘制 p95 为 1.80–4.74 ms，但每帧构造可见行使分配明显高于旧版，下一步复用行布局。测量明确不含真实窗口与 24/96 ms 调度等待，不以 CPU raster 替代端到端帧延迟；基线 API 适配和 cache miss 计数随脚本保存，临时导出目录自动清理。
+
+帧调度：移除 24/96 ms 静默／节流期限，普通输出请求 UI root 的下一可用帧；辅助功能文本每次布局生成一次、随 Accepted 帧更新。闪烁改为按需注册，运行状态、窗口可见／焦点／遮挡、区域/caret 可见性和 IME 状态决定是否启用，下一次 tick 由 Accepted 回调安排。真实 macOS 窗口/PTY 回归通过；新增手动 `windowFrames` 同时测基线及当前窗口，120 次交付的呈现样本从 11 增至 57，帧间隔 p50 从 99.54 降至 16.66 ms，模型交付到 Accepted p95 从 27.87 降至 8.61 ms。退出后最终闪烁文字静止 1.35 秒没有新帧。该数据不包含 PTY 子进程响应，不等同于显示扫描延迟；本机绘制／提交指标和基线适配均已保存。
+
+行布局缓存：完整 UI 94/94 通过，新增 4 项验证滚动／单格编辑的局部重建、改色／resize／网格变化、LRU 与超限、旧帧在缓存／字体来源关闭后仍可绘制，以及无可见内容时不启动文字 blink。Kitty 透明度回归发现缓存误用字体度量而非帧网格的问题，已修复。四组相同 raster 基准从每帧重建 40／80 行降至 2 行，累计分配从 684–1367 MiB 降至 96–165 MiB，p95 为 0.88–2.49 ms；详见性能报告。缓存默认 256 行／8 MiB 保守权重，帧租约独立于缓存淘汰。没有新增依赖，原始临时报告归档关键指标后删除。
+
+独立装饰：选择、清除选择和 OSC 133 分割线请求帧而不请求文字布局；辅助功能文字每布局只拼接一次，后续选择只计算 UTF-8 偏移。命令分割线按版本缓存逻辑行索引，跟踪边界迁移也推进版本；接受纯元数据帧后 command 命中同步更新。新增 3 项离屏验证旧帧／新重排坐标、矩形／宽格／实际像素／清除、同步输出与纯标记；完整 UI 97/97、命令协议 8/8 通过。新增 macOS 真实窗口用例通过，直接断言三类装饰更新进入 Accepted 帧且父布局次数不增加；关闭窗口绑定后关闭显式 controller 和 session。Linux／Windows 仍留集中验收，不将本机结果扩写为跨平台已通过。没有新增依赖或临时文件。
+
+资源基准：五项手动 release 场景全部完成；10 万行／1000 命中分页搜索 24.78 ms，128 次选择定位 p95 0.068 ms；带选择、高亮和图片的 24 次 reflow 为 2191.84 ms，内容与 anchor 每次验证。UHD PNG 只解码一次／准备 2040 tile；密集 UHD Sixel 只准备窗口可见块；1024 placements 共享一次解码和一个源 tile。重复帧无新增准备，清空 native cache 后权重归零、RIS 清掉所有 placements。修正了测试把屏幕擦除误当全图片重置的假设；屏外 Sixel 片段保留是正确行为。实际 RSS、分配、首次成本及缓存权重分别记录，CPU raster 不声称独立 GPU 显存测量。UHD fixture 按行生成，无外部图像；生成一致性检查通过，原始临时 JSON 的关键数据归档后已清理。
+
+实际应用：macOS 的 Bash/readline、Vim、Neovim、less、tmux、Kitty icat、libsixel img2sixel 和 OSC 9;4 进度脚本均通过生产 PTY/model 测试；Bash 与 Neovim 另通过 xterm-256color 回退。tmux 使用显式 direct graphics passthrough，图片像素允许 libsixel 的调色板量化。原生只读剪贴板 adapter、OSC 52 与后续 DSR 顺序验证通过，测试不改变或记录系统剪贴板。版本、参数、证据边界和复现步骤见 [兼容性报告](compatibility.md)。仅为测试下载的 libsixel／Meson 经指定代理置于依赖目录；应用临时配置／文件与专用 tmux server 自动清理，原始结果归档后删除。
+
+
+真实参考终端：Kitty 0.51.0、Ghostty 1.4.0 各录制 12 组字节与回包，使用其实际像素尺寸回放到核心。发现 Kitty 放置后光标多下移一行：固定实现与两个终端实际使用最后一行，已修复并明确记录与协议文字的取舍；Kitty 定向回归 19/19 通过，修复后的放置 ACK／CPR 完全相同。OSC 终止符、feature query 和 Sixel 支持范围的差异逐项写入 [兼容性报告](compatibility.md)，未将它们隐去或计为等价支持。原始输入及回复归档，专用窗口与进程结束，录制临时 JSON 清理；xterm 源码参考仍留到 Linux 对照结束。
+
+本机最终常规回归：核心 186/186、UI 97/97，能力表／图片 fixture 生成一致性与 terminfo 语法通过。完整 demo 发现两个独立用例重复创建进程唯一 Application；根据现有工具链的 `@Test(useProcess = true)` 合同标注窗口、剪贴板及窗口基准用例，恢复独立测试结构，完整 demo 2/2 和手动剪贴板 1/1 通过。窗口基准实跑确认隔离子进程与父进程各产生一份运行时统计，脚本分别记录，不混合 RSS 或分配。没有底层改动或新依赖。
+
+Metal 资源计量：新增仅 macOS 测试依赖的设备／纹理／计数桥接，复用现有 MetalContext，不修改生产 API 或运行依赖。UHD PNG、UHD Sixel 可见区与 1024 placements 三项分别通过实际 GPU 绘制、像素、重复准备和关闭回收验证。每帧等待 GPU 完成并释放本轮原生临时对象，记录 MTLDevice.currentAllocatedSize，与托管分配、进程 RSS 和组件缓存估算分别保存。结果见 [性能报告](performance.md)；64×64 PNG tile 导致约 203 MiB 帧后 GPU 分配，作为下一项局部优化的实测依据。
+
+RGBA 上传调优：不可变图片使用 254×254 正文加邻边形成最大 256×256 原生块，核心 64×64 tile API 和 Sixel 局部块版本不变。扩大接缝／源裁剪／窗口裁剪测试图片以跨越新边界，Kitty 绘制 4/4 通过。相同 UHD PNG 的 native 准备从 2040 降至 144，Metal 帧后分配从 202.55 降至 71.97 MiB、缓存帧 p95 从 17.46 降至 1.45 ms；CPU raster p95 为 2.20 ms。数据、首次成本、RSS 和预算边界分别记录于性能报告。
+
+Windows 命令参数：集中回归发现真实 ConPTY 的立即退出用例收到 1 而非预期的 7。根因是 Scoop 为 `/d`、`/c` 等所有参数添加引号，导致 `cmd.exe` 解释错误。已在独立分支修复并合并 [Scoop PR #232](https://github.com/scoop-lang/scoop/pull/232)，普通参数保持未加引号，空参数、空白和引号继续按 CRT 规则编码。Windows 8 项进程回归通过，规范、声明、skill 与示例同步；局部 API 文档查询及本机 `io/processes` 实际示例通过。main 已更新并回合并修复分支推送，本机和 Windows 的终端依赖按顺序增量重建；更新后的本机 demo 测试编译检查通过。继续使用发布编译器 `bb295704d`，本次没有编译器或 ABI 改动。
+
+集中跨平台验收完成：macOS、Linux GNU 与 Windows 均为核心 186、UI 97、原生窗口 2、只读剪贴板 1 项通过。Windows 在上述参数修复后重新运行完整 UI、demo 和剪贴板套件，核心结果复用修复前的独立记录。Linux 另完成七次应用运行和 xterm 407 的 15 组实际回包录制，其中七项 Sixel 模式／光标检查完全一致。各平台默认忽略数量保存在报告中，手动应用、基准和剪贴板场景另按实际执行平台记录；兼容性与性能数据分别见相应报告。
+
+收尾：Windows 临时桌面验证任务已注销，本次 SSH 控制连接已关闭；本机临时 API 文档、示例产物、传输归档及两台远端已归档的原始日志已清理。远端任务源码、构建配置、开发 sysroot 与可复用缓存保留，已下载依赖继续留在约定目录。
+
+## 后续执行约束
+
+外部依赖优先使用本地 `~/repos/scoop-dep`；需要下载时使用 `https_proxy=http://192.168.2.106:10809`。Linux 通过 `ssh nuc12`，在 `~/repos/` 创建本任务目录，依赖目录 `~/repos/scoop-deps`。Windows 通过 `/usr/bin/ssh 192.168.2.67`，在 `E:` 创建本任务目录，依赖目录 `E:/scoop-dep`。
+
+如实际遇到编译器/底层库缺口，先在该仓库独立分支修复、验证、提交、推送、开 PR 并合并，再更新本地 main、合并回相应工作分支并更新工具链。临时文件只在仍用于后续工作时保留；阶段结束清理不再需要的文件。

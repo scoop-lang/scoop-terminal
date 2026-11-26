@@ -1,0 +1,109 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class SynchronizedOutputTest {
+    @Test
+    fun freezesPresentationWhileQueriesAndInputObserveLatestState() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("old\r".toByteArray())
+        val previous = terminal.reading
+        terminal.feed("\u001b[?2026h".toByteArray())
+        val update = terminal.feed("new\u001b[?1h\u001b[6n\u001b[?2026$p".toByteArray())
+        assertTrue(!update.changed)
+        assertTrue(terminal.reading === previous)
+        assertTrue(update.revision > previous.revision)
+        assertEquals("\u001b[1;4R", synchronizedReply(update, 0L))
+        assertEquals("\u001b[?2026;1$y", synchronizedReply(update, 1L))
+        assertEquals(
+            "\u001bOA",
+            String
+                .fromUtf8(
+                    terminal.encodeInput(TerminalInput.Key(TerminalKey.Up, TerminalModifiers()))
+                )
+        )
+        val published = terminal.feed("\u001b[?2026l".toByteArray())
+        assertTrue(published.changed)
+        assertEquals("n", terminal.reading.lines(0L, 1L)[0L].cells[0L].text)
+        assertEquals("o", previous.lines(0L, 1L)[0L].cells[0L].text)
+        assertTrue(!terminal.synchronizedOutput)
+    }
+
+    @Test
+    fun multipleBoundariesWithinOneFeedPublishOnlyTheLastCompletedPrefix() {
+        val terminal = Terminal(8L, 3L)
+        val result = terminal.feed("A\u001b[?2026hB\u001b[?2026lC\u001b[?2026hD".toByteArray())
+        assertTrue(result.changed)
+        assertTrue(terminal.synchronizedOutput)
+        val line = terminal.reading.lines(0L, 1L)[0L]
+        assertEquals("A", line.cells[0L].text)
+        assertEquals("B", line.cells[1L].text)
+        assertEquals("C", line.cells[2L].text)
+        assertEquals("", line.cells[3L].text)
+        assertEquals(3L, terminal.reading.cursor.column)
+        terminal.releaseSynchronizedOutput()
+        assertEquals("D", terminal.reading.lines(0L, 1L)[0L].cells[3L].text)
+    }
+
+    @Test
+    fun repeatedBeginDoesNotExtendGenerationAndHostDeadlineReleasesOnce() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("\u001b[?2026hX".toByteArray())
+        val generation = terminal.synchronizationGeneration
+        terminal.feed("\u001b[?2026hY".toByteArray())
+        assertEquals(generation, terminal.synchronizationGeneration)
+        assertTrue(terminal.releaseSynchronizedOutput().changed)
+        val reading = terminal.reading
+        assertTrue(!terminal.releaseSynchronizedOutput().changed)
+        assertTrue(terminal.reading === reading)
+        terminal.feed("\u001b[?2026l\u001b[?2026h".toByteArray())
+        assertEquals(generation + 1L, terminal.synchronizationGeneration)
+    }
+
+    @Test
+    fun eofResizeAndResetCannotLeavePresentationFrozen() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("\u001b[?2026hX".toByteArray())
+        assertTrue(terminal.finishOutput().changed)
+        assertEquals("X", terminal.reading.lines(0L, 1L)[0L].cells[0L].text)
+        terminal.feed("\u001b[?2026hY".toByteArray())
+        terminal.resize(4L, 3L)
+        assertTrue(!terminal.synchronizedOutput)
+        assertEquals(4L, terminal.reading.columns)
+        assertEquals("Y", terminal.reading.lines(0L, 1L)[0L].cells[1L].text)
+        terminal.feed("\u001b[?2026hZ\u001bcQ".toByteArray())
+        assertTrue(!terminal.synchronizedOutput)
+        assertEquals("Q", terminal.reading.lines(0L, 1L)[0L].cells[0L].text)
+    }
+
+    @Test
+    fun effectsKeepStreamOrderAndFrozenSnapshotsKeepOldHistoryPages() {
+        val terminal = Terminal(4L, 2L, 100L)
+        terminal.feed("ab\r\ncd\r\nef".toByteArray())
+        val snapshot = terminal.snapshot()
+        try {
+            val result = terminal
+                .feed("\u001b[?2026h\u001b]2;title\u0007\u001b[6n\u0007\r\ngh\r\nij".toByteArray())
+            assertEquals(3L, result.effects.size)
+            when (result.effects[0L]) {
+                case Title(val title) -> assertEquals("title", title)
+                case _ -> fail(Some("missing title"))
+            }
+            assertEquals("\u001b[2;3R", synchronizedReply(result, 1L))
+            terminal.releaseSynchronizedOutput()
+            assertEquals(1L, snapshot.historySize)
+            assertEquals("a", snapshot.lines(0L, 1L)[0L].cells[0L].text)
+            assertEquals(3L, terminal.reading.historySize)
+        } finally {
+            snapshot.close()
+        }
+    }
+}
+
+private fun synchronizedReply(update: TerminalUpdate, index: Long): String = when (update
+    .effects[index]
+) {
+    case Reply(val bytes) -> String.fromUtf8(bytes)
+    case _ -> throw IllegalStateException(Some("expected query reply"))
+}

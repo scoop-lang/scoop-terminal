@@ -1,0 +1,156 @@
+package scoop.ui.terminal
+
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.graphics.text.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalRunFallbackTest {
+    @Test
+    fun matchingTotalWidthDoesNotHideProportionalInternalAdvances() {
+        FontCollection(false)
+            .use { fonts ->
+                fonts.register(includeBytes("data/Roboto-Regular.ttf"), "Proportional")
+                val appearance = terminalTestAppearance().{families: ["Proportional"]}
+                val cache = TerminalGlyphCache(fonts, appearance)
+                try {
+                    cache
+                        .acquire("Wi", false, false, Color.White)
+                        .use { candidate ->
+                            val width = candidate.layout.maxIntrinsicWidth / 2.0
+                            assertFalse(candidate.gridAligned([0L, 1L, 2L], width))
+                            val terminal = Terminal(24L, 3L)
+                            terminal.setColors(appearance.colorTheme())
+                            terminal.feed("Wi".toByteArray())
+                            val reading = terminal.reading
+                            val geometry = GridGeometry(
+                                Size(320.0, 100.0), cache.metrics.{width: width},
+                                0L, reading.lines(0L, 3L), 24L, 3L, reading.screenRevision, true,
+                                reading
+                            )
+                            TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                                .use { frame ->
+                                    frame.shape([], "")
+                                    assertEquals(3L, cache.shapeCount)
+                                    val actual = terminalRunPixels(frame)
+                                    val reference = RasterSurface(320, 100)
+                                        .use { surface ->
+                                            surface
+                                                .draw { canvas ->
+                                                    canvas.clear(Color.Black)
+                                                    for ((column, text) in [(0L, "W"), (1L, "i")]) {
+                                                        cache
+                                                            .acquire(
+                                                                text,
+                                                                false,
+                                                                false,
+                                                                Color.White
+                                                            )
+                                                            .use { glyph ->
+                                                                canvas.save()
+                                                                val rect = geometry.rect(0L, column)
+                                                                canvas.clipRect(rect)
+                                                                canvas
+                                                                    .drawText(
+                                                                        glyph.layout,
+                                                                        Point(
+                                                                            rect.x,
+                                                                            cache.metrics.baseline -
+                                                                                glyph
+                                                                                    .layout
+                                                                                    .alphabeticBaseline
+                                                                        )
+                                                                    )
+                                                                canvas.restore()
+                                                            }
+                                                    }
+                                                }
+                                            surface.readPixels()
+                                        }
+                                    assertTrue(sameTerminalPixels(actual, reference))
+                                }
+                        }
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
+    @Test
+    fun wideFallbackAndCombiningGraphemesStayOnTheTerminalGrid() {
+        terminalTestFonts()
+            .use { fonts ->
+                fonts.register(includeBytes("data/NotoSansCJK-VF-subset.otf.ttc"), "CJK")
+                val appearance = terminalTestAppearance().{families: ["Terminal Test Mono", "CJK"]}
+                val cache = TerminalGlyphCache(fonts, appearance)
+                try {
+                    val terminal = Terminal(24L, 3L)
+                    terminal.setColors(appearance.colorTheme())
+                    terminal.feed("!=是->e\u0301".toByteArray())
+                    val reading = terminal.reading
+                    val geometry = GridGeometry(
+                        Size(320.0, 100.0), cache.metrics, 0L,
+                        reading.lines(0L, 3L), 24L, 3L, reading.screenRevision, true, reading
+                    )
+                    TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                        .use { frame ->
+                            frame.shape([], "")
+                            assertEquals(3L, cache.shapeCount)
+                            assertEquals(7L, reading.cursor.column)
+                            cache
+                                .acquire(TerminalCell("是", 2L), Color.White)
+                                .use { glyph -> assertEquals(0, glyph.layout.unresolvedGlyphCount) }
+                            frame
+                                .cursorGlyph(reading.cursor.{row: 0L, column: 3L})!!
+                                .use { glyph ->
+                                    assertEquals("是", glyph.layout.text)
+                                    assertEquals(-cache.metrics.width, glyph.offset)
+                                }
+                            val viewport = testViewport(terminal)
+                            try {
+                                viewport
+                                    .select(
+                                        CellLocation(reading.lines(0L, 1L)[0L].id, 0L),
+                                        TerminalSelectionUnit.LogicalLine
+                                    )
+                                assertEquals(Some("!=是->e\u0301"), viewport.copy())
+                            } finally {
+                                viewport.close()
+                            }
+                            val pixels = terminalRunPixels(frame)
+                            assertTrue(pixels.size > 0L)
+                        }
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
+    @Test
+    fun directionalReorderingCannotPassGridValidation() {
+        terminalTestFonts()
+            .use { fonts ->
+                Paragraph(
+                    fonts,
+                    "\u202Eabc",
+                    textStyle {
+                        families = ["Terminal Test Mono"]
+                        fontSize = 20.0
+                    }
+                )
+                    .use { paragraph ->
+                        paragraph
+                            .layoutUnwrapped()
+                            .use { layout ->
+                                assertEquals(0, layout.unresolvedGlyphCount)
+                                val boundaries = layout.graphemeBoundaries
+                                val average = layout.maxIntrinsicWidth /
+                                    (boundaries.size - 1L).toDouble()
+                                assertFalse(terminalRunFitsGrid(layout, boundaries, average))
+                            }
+                    }
+            }
+    }
+}

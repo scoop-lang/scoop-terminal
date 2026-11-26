@@ -1,0 +1,142 @@
+package scoop.terminal.emulator
+
+/**
+ * Synchronous CPU PNG codec, called on the model owner. Return tightly packed immutable
+ * straight-alpha RGBA8 and close all native resources before returning or throwing.
+ */
+public interface TerminalImageDecoder {
+    /** Additional peak bytes, including returned pixels, encoded copies and codec work.
+     * The terminal separately reserves four expanded ICC-profile copies when present. */
+    public fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long
+    /** Input has passed framing/CRC/dimension checks and bounded metadata preparation.
+     * Only pixel/color chunks remain; the codec must reject incomplete pixels. */
+    public fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte>
+}
+
+internal class ImageRaster(val size: TerminalImageSize, val pixels: ImageBytes) : Closeable {
+    fun retain(): ImageRaster = ImageRaster(size, pixels.retain())
+    fun region(region: TerminalImageRect): ImageRaster {
+        checkImageRegion(size, region)
+        if (region.x ==
+            0L &&
+            region.y ==
+            0L &&
+            region.width ==
+            size.width.toLong() &&
+            region.height ==
+            size.height.toLong()
+        )
+            return retain()
+        val result = TerminalImageSize(region.width.toInt(), region.height.toInt())
+        val source = pixels.bytes
+        val stride = size.width.toLong() * 4L
+        val bytes = ImageBytes
+            .create(pixels.memory, result.rgbaBytes) {
+                Array<Byte>(result.rgbaBytes) { offset ->
+                    source[
+                        (region.y + offset / 4L / region.width) *
+                            stride +
+                            (region.x + offset / 4L % region.width) *
+                            4L +
+                            offset %
+                            4L
+                    ]
+                }
+            }
+        return ImageRaster(result, bytes)
+    }
+    public override fun close() {
+        pixels.close()
+    }
+}
+
+internal fun checkImageRegion(size: TerminalImageSize, region: TerminalImageRect) {
+    if (region.x <
+        0L ||
+        region.y <
+        0L ||
+        region.width <=
+        0L ||
+        region.height <=
+        0L ||
+        region.x >
+        size.width.toLong() ||
+        region.y >
+        size.height.toLong() ||
+        region.width >
+        size.width.toLong() -
+        region.x ||
+        region.height >
+        size.height.toLong() -
+        region.y
+    )
+        throw IllegalArgumentException(Some("image source rectangle is outside the image"))
+}
+
+internal fun decodeImageRgb(
+    input: ImageBytes,
+    width: Long,
+    height: Long,
+    alpha: Boolean,
+    beforeAllocate: (Long) -> Unit = {}
+): ImageRaster {
+    val memory = input.memory
+    val size = imageSize(width, height, memory.limits)
+    val bytes = input.bytes
+    val components = if (alpha) 4L else 3L
+    if (bytes.size != size.rgbaBytes / 4L * components)
+        imageFailure(
+            TerminalImageFailure.InvalidData,
+            "raw image byte count differs from dimensions"
+        )
+    if (alpha) return ImageRaster(size, input.retain())
+    beforeAllocate(size.rgbaBytes + ImageBytes.overhead)
+    val pixels = ImageBytes
+        .create(memory, size.rgbaBytes) {
+            Array<Byte>(size.rgbaBytes) { offset ->
+                if (offset % 4L == 3L) 255.toByte() else bytes[offset / 4L * 3L + offset % 4L]
+            }
+        }
+    return ImageRaster(size, pixels)
+}
+
+internal fun decodeImagePng(
+    input: ImageBytes,
+    decoder: TerminalImageDecoder?,
+    beforeAllocate: (Long) -> Unit = {}
+): ImageRaster {
+    val memory = input.memory
+    val encoded = input.bytes
+    val size = inspectImagePng(encoded, memory.limits)
+    val codec = decoder ?:
+        imageFailure(TerminalImageFailure.Unsupported, "PNG decoder is unavailable")
+    return prepareImagePng(input, beforeAllocate)
+        .use { prepared ->
+            val encoded = prepared.bytes.bytes
+            val peak = codec.peakBytes(size, encoded.size)
+            if (peak < size.rgbaBytes)
+                throw IllegalArgumentException(
+                    Some("PNG decoder peak must include its result pixels")
+                )
+            val profiles = imageByteSum(prepared.profileBytes, prepared.profileBytes)
+            val metadata = imageByteSum(profiles, profiles)
+            val reservation = reserveImage(
+                memory,
+                imageByteSum(imageByteSum(peak, metadata), ImageBytes.overhead),
+                beforeAllocate
+            )
+            try {
+                val result = codec.decodePng(encoded, size)
+                if (result.size != size.rgbaBytes)
+                    imageFailure(
+                        TerminalImageFailure.InvalidData,
+                        "PNG decoder returned a different pixel size"
+                    )
+                reservation.resize(imageByteSum(result.size, ImageBytes.overhead))
+                ImageRaster(size, ImageBytes.adopt(memory, reservation, result))
+            } catch (error: Throwable) {
+                reservation.close()
+                throw error
+            }
+        }
+}

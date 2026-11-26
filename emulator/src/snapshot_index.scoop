@@ -1,0 +1,132 @@
+package scoop.terminal.emulator
+
+/** Immutable AVL nodes keep row/page indices shared between published terminal generations. */
+internal class SnapshotIndex<T>(
+    val key: Long,
+    val value: T,
+    val left: SnapshotIndex<T>? = None,
+    val right: SnapshotIndex<T>? = None
+) {
+    val height: Int = 1 + maximum(left?.height ?: 0, right?.height ?: 0)
+    val size: Long = 1L + (left?.size ?: 0L) + (right?.size ?: 0L)
+}
+
+internal fun <T> indexAt(root: SnapshotIndex<T>?, position: Long): T? {
+    var current = root
+    var offset = position
+    while (true) {
+        val node = current ?: return None
+        val left = node.left?.size ?: 0L
+        if (offset == left) return Some(node.value)
+        if (offset < left)
+            current = node.left
+        else {
+            offset -= left + 1L;
+            current = node.right
+        }
+    }
+}
+
+internal fun <T> indexValue(root: SnapshotIndex<T>?, key: Long): T? {
+    var current = root
+    while (true) {
+        val node = current ?: return None
+        if (key == node.key) return Some(node.value)
+        current = if (key < node.key) node.left else node.right
+    }
+}
+
+internal fun <T> indexUpdated(root: SnapshotIndex<T>?, key: Long, value: T): SnapshotIndex<T> {
+    val node = root ?: return SnapshotIndex<T>(key, value)
+    if (key == node.key) return SnapshotIndex<T>(key, value, node.left, node.right)
+    val next = if (key < node.key)
+        SnapshotIndex<T>(
+            node.key,
+            node.value,
+            Some(indexUpdated(node.left, key, value)),
+            node.right
+        )
+    else
+        SnapshotIndex<T>(
+            node.key,
+            node.value,
+            node.left,
+            Some(indexUpdated(node.right, key, value))
+        )
+    return balanced(next)
+}
+
+internal fun <T> indexRemoved(root: SnapshotIndex<T>?, key: Long): SnapshotIndex<T>? {
+    val node = root ?: return None
+    if (key < node.key)
+        return Some(
+            balanced(
+                SnapshotIndex<T>(node.key, node.value, indexRemoved(node.left, key), node.right)
+            )
+        )
+    if (key > node.key)
+        return Some(
+            balanced(
+                SnapshotIndex<T>(node.key, node.value, node.left, indexRemoved(node.right, key))
+            )
+        )
+    val right = node.right ?: return node.left
+    val left = node.left ?: return node.right
+    var successor = right
+    while (true) {
+        val next = successor.left ?: break
+        successor = next
+    }
+    return Some(
+        balanced(
+            SnapshotIndex<T>(
+                successor.key,
+                successor.value,
+                Some(left),
+                indexRemoved(Some(right), successor.key)
+            )
+        )
+    )
+}
+
+private fun maximum(left: Int, right: Int): Int = if (left > right) left else right
+
+private fun <T> balance(node: SnapshotIndex<T>): Int = (node.left?.height ?: 0) -
+    (node.right?.height ?: 0)
+
+private fun <T> balanced(node: SnapshotIndex<T>): SnapshotIndex<T> {
+    val factor = balance(node)
+    if (factor > 1) {
+        val left = node.left!!
+        val prepared = if (balance(left) < 0)
+            SnapshotIndex<T>(node.key, node.value, Some(rotateLeft(left)), node.right)
+        else
+            node
+        return rotateRight(prepared)
+    }
+    if (factor < -1) {
+        val right = node.right!!
+        val prepared = if (balance(right) > 0)
+            SnapshotIndex<T>(node.key, node.value, node.left, Some(rotateRight(right)))
+        else
+            node
+        return rotateLeft(prepared)
+    }
+    return node
+}
+
+private fun <T> rotateLeft(node: SnapshotIndex<T>): SnapshotIndex<T> {
+    val right = node.right!!
+    return SnapshotIndex<T>(
+        right.key, right.value,
+        Some(SnapshotIndex<T>(node.key, node.value, node.left, right.left)), right.right
+    )
+}
+
+private fun <T> rotateRight(node: SnapshotIndex<T>): SnapshotIndex<T> {
+    val left = node.left!!
+    return SnapshotIndex<T>(
+        left.key, left.value,
+        left.left, Some(SnapshotIndex<T>(node.key, node.value, left.right, node.right))
+    )
+}

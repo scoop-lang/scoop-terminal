@@ -1,0 +1,116 @@
+package scoop.ui.terminal
+
+import scoop.concurrent.Channel
+import scoop.terminal.emulator.*
+
+/** Called by the window owner; bounded pages transfer exclusive scan ownership to a worker. */
+public class TerminalAsyncSearch internal constructor(
+    private val search: TerminalSearch,
+    private val executor: CoroutineExecutor,
+    private val onFinished: (TerminalAsyncSearch) -> Unit = {}
+) :
+    Closeable {
+    private var scanning = false
+    private val cancelled = AtomicBoolean(false)
+    private var currentStatus = search.status
+    private var retired = currentStatus != TerminalSearchStatus.Searching
+    private val finished = Channel<Unit>(0L)
+    init {
+        if (retired) finished.close()
+    }
+    public val query: String get() = search.query
+    public val generation: Long get() = search.generation
+    public val status: TerminalSearchStatus get() = currentStatus
+
+    /** Scans off the caller thread, capped at 65536 steps and 1024 matches; checks cancellation in batches. */
+    public suspend fun nextPage(
+        maxMatches: Long = 128L,
+        scanBudget: Long = 16384L
+    ): TerminalSearchPage {
+        if (maxMatches <= 0L || scanBudget <= 0L)
+            throw IllegalArgumentException(Some("search page limits must be positive"))
+        if (scanning)
+            throw IllegalStateException(Some("terminal search already has a pending page"))
+        if (currentStatus != TerminalSearchStatus.Searching) return emptyPage()
+        scanning = true
+        try {
+            yieldCoroutine()
+            val core = search
+            val stop = cancelled
+            val page = withExecutor(executor) {
+                scanPage(core, stop, clamp(maxMatches, 1L, 1024L), clamp(scanBudget, 1L, 65536L))
+            }
+            currentStatus = if (cancelled.load()) TerminalSearchStatus.Cancelled else page.status
+            return if (cancelled.load()) emptyPage() else page
+        } catch (error: Throwable) {
+            cancelled.store(true)
+            currentStatus = TerminalSearchStatus.Cancelled
+            throw error
+        } finally {
+            // withExecutor waits for worker cleanup even when the caller is cancelled.
+            scanning = false
+            if (cancelled.load()) search.cancel()
+            if (currentStatus != TerminalSearchStatus.Searching) retire()
+        }
+    }
+
+    public fun cancel() {
+        if (currentStatus != TerminalSearchStatus.Searching) return
+        cancelled.store(true)
+        currentStatus = TerminalSearchStatus.Cancelled
+        if (!scanning) {
+            search.cancel()
+            retire()
+        }
+    }
+    public override fun close() {
+        cancel()
+    }
+    internal suspend fun awaitIdle() {
+        finished.receiveOrNone()
+    }
+    private fun retire() {
+        if (retired) return
+        retired = true
+        finished.close()
+        onFinished(this)
+    }
+    private fun emptyPage(): TerminalSearchPage = TerminalSearchPage(
+        [], currentStatus, None, 0L, generation, search.textRevision, search.presentationVersion
+    )
+}
+
+private fun scanPage(
+    search: TerminalSearch,
+    cancelled: AtomicBoolean,
+    maxMatches: Long,
+    scanBudget: Long
+): TerminalSearchPage {
+    val found = ArrayList<TerminalSearchMatch>()
+    var scanned = 0L
+    try {
+        while (true) {
+            ensureActive()
+            if (cancelled.load()) {
+                search.cancel()
+                return search.nextPage(1L, 1L)
+            }
+            val page = search
+                .nextPage(maxMatches - found.size, clamp(scanBudget - scanned, 1L, 4096L))
+            scanned += page.scanned
+            for (match in page.matches)
+                found.add(match)
+            if (page.status !=
+                TerminalSearchStatus.Searching ||
+                found.size ==
+                maxMatches ||
+                scanned ==
+                scanBudget
+            )
+                return page.{matches: found.toArray(), scanned: scanned}
+        }
+    } catch (error: Throwable) {
+        search.cancel()
+        throw error
+    }
+}

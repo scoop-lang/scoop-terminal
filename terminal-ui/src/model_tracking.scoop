@@ -1,0 +1,84 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+
+/** The only shared mutable field is a cancellation bit; registration data is delivered as a value. */
+internal class TerminalModelTrackedRange(
+    public override val id: Long,
+    private val range: TerminalRange,
+    source: TerminalReading,
+    release: (Long) -> Unit
+) : TerminalTrackedRange {
+    private var release: ((Long) -> Unit)? = Some(release)
+    val closed = AtomicBoolean(false)
+    private var source: TerminalReading? = Some(source)
+    private var binding: TerminalModelBinding? = None
+    private var checked: TerminalReading? = None
+    private var checkedState: TerminalTrackingState? = None
+    public override val isClosed: Boolean get() = closed.load()
+
+    fun bind(value: TerminalModelBinding) {
+        if (isClosed) return
+        binding = Some(value)
+        source = None
+        checked = None
+        checkedState = None
+    }
+
+    public override fun state(reading: TerminalReading): TerminalTrackingState {
+        if (isClosed) return TerminalTrackingState.Invalidated(TerminalInvalidation.Closed)
+        when (val bound = binding) {
+            case Some(val value) -> {
+                if (value.coreId == 0L) return value.state
+                val visible = reading.trackedRange(value.coreId)
+                return visible ?:
+                    if (reading.presentationVersion == value.presentation)
+                        value.state
+                    else
+                        TerminalTrackingState.Invalidated(TerminalInvalidation.Stale)
+            }
+
+            case None -> {}
+        }
+        when (checked) {
+            case Some(val previous) -> if (previous === reading) return checkedState!!
+            case None -> {}
+        }
+        val valid = compatibleTrackingSource(source!!, reading, range)
+        val result = if (valid)
+            TerminalTrackingState.Available(range)
+        else
+            TerminalTrackingState.Invalidated(TerminalInvalidation.Stale)
+        checked = Some(reading)
+        checkedState = Some(result)
+        return result
+    }
+
+    public override fun close() {
+        if (closed.exchange(true)) return
+        source = None
+        checked = None
+        checkedState = None
+        val callback = release
+        release = None
+        callback?.invoke(id)
+    }
+}
+
+private fun compatibleTrackingSource(
+    source: TerminalReading,
+    current: TerminalReading,
+    range: TerminalRange
+): Boolean {
+    if (source.bufferEpoch != current.bufferEpoch) return false
+    val first = source.resolve(range.start) ?: return false
+    val last = source.resolve(range.end) ?: return false
+    if (current.resolve(range.start) == None || current.resolve(range.end) == None) return false
+    for (row in first.row..last.row) {
+        val old = source.lines(row, 1L)[0L]
+        val anchor = TerminalAnchor(source.bufferEpoch, old.logicalLineId, old.logicalOffset)
+        val now = current.resolve(anchor) ?: return false
+        if (current.lines(now.row, 1L)[0L].textVersion != old.textVersion) return false
+    }
+    return true
+}

@@ -1,0 +1,236 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalNavigationTest {
+    @Test fun localScrollCancelsAnOutstandingReveal() {
+        val terminal = Terminal(10L, 2L, 20L)
+        terminal.feed("a\r\nb\r\nc\r\nd\r\ne\r\nf".toByteArray())
+        val controller = TerminalViewController(testViewport(terminal))
+        val completions = ArrayList<TerminalRevealResult>()
+        controller.onChanged = { change ->
+            when (change) {
+                case RevealCompleted(val value) -> {
+                    completions.add(value);
+                    Unit
+                }
+
+                case _ -> {}
+            }
+        }
+        try {
+            assertEquals(
+                TerminalRevealResult.PendingLayout,
+                controller.reveal(searchMatches(terminal, "b")[0L])
+            )
+            controller.scroll(1L)
+            assertEquals(2L, controller.state.firstRow)
+            assertEquals(TerminalRevealResult.Cancelled, completions[0L])
+            acceptGrid(controller, terminal, 1L)
+            assertEquals(1L, completions.size)
+        } finally {
+            controller.close()
+        }
+    }
+    @Test fun revealWaitsForAcceptedGeometryAndAlignsWithoutAWidget() {
+        val terminal = Terminal(10L, 3L, 100L)
+        terminal
+            .feed(
+                "row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4\r\nrow5\r\nrow6\r\nrow7\r\nrow8\r\nrow9"
+                    .toByteArray()
+            )
+        val match = searchMatches(terminal, "row4")[0L]
+        val controller = TerminalViewController(testViewport(terminal))
+        val changes = ArrayList<TerminalViewChange>()
+        controller.onChanged = { value ->
+            changes.add(value);
+            Unit
+        }
+        try {
+            assertEquals(
+                TerminalRevealResult.PendingLayout,
+                controller.reveal(match, TerminalRevealAlignment.Center)
+            )
+            assertEquals(3L, controller.state.firstRow)
+            assertEquals(None, controller.rectsFor(match)?.frameVersion)
+            acceptGrid(controller, terminal, 1L)
+            assertEquals(
+                TerminalViewChange.RevealCompleted(TerminalRevealResult.Revealed),
+                changes[changes.size - 1L]
+            )
+            val rects = controller.rectsFor(match)!!
+            assertEquals(1L, rects.frameVersion)
+            assertEquals(terminal.reading.presentationVersion, rects.presentationVersion)
+            assertEquals(Rect(0.0, 16.0, 40.0, 16.0), rects.rects[0L])
+            assertEquals(TerminalRevealResult.Revealed, controller.reveal(match))
+            assertEquals(
+                TerminalRevealResult.PendingLayout,
+                controller.reveal(match, TerminalRevealAlignment.Start)
+            )
+            assertEquals(4L, controller.state.firstRow)
+            acceptGrid(controller, terminal, 2L)
+            assertEquals(
+                TerminalRevealResult.PendingLayout,
+                controller.reveal(match, TerminalRevealAlignment.End)
+            )
+            assertEquals(2L, controller.state.firstRow)
+            acceptGrid(controller, terminal, 3L)
+            assertEquals(TerminalRevealResult.Revealed, controller.reveal(match))
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun pendingResizeDoesNotReportOldRectsAsANewReveal() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("abcdefghij".toByteArray())
+        val match = searchMatches(terminal, "ef")[0L]
+        val controller = TerminalViewController(testViewport(terminal))
+        val changes = ArrayList<TerminalViewChange>()
+        controller.onChanged = { value ->
+            changes.add(value);
+            Unit
+        }
+        try {
+            acceptGrid(controller, terminal, 1L)
+            val old = testGrid(terminal.reading, controller.state.firstRow)
+            controller.layoutStarted(2L)
+            assertEquals(TerminalRevealResult.PendingLayout, controller.reveal(match))
+            assertEquals(1L, controller.rectsFor(match)!!.frameVersion)
+            controller.frameAccepted(old, 1L)
+            terminal.resize(4L, 3L)
+            controller.synchronize()
+            controller.frameAccepted(old, 1L)
+            assertEquals(1L, controller.rectsFor(match)!!.frameVersion)
+            acceptGrid(controller, terminal, 2L)
+            assertEquals(
+                TerminalViewChange.RevealCompleted(TerminalRevealResult.Revealed),
+                changes[changes.size - 1L]
+            )
+            assertEquals(2L, controller.rectsFor(match)!!.frameVersion)
+            assertEquals(Rect(0.0, 16.0, 20.0, 16.0), controller.rectsFor(match)!!.rects[0L])
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun changedSearchResultsNeverLocateReplacementText() {
+        val terminal = Terminal(12L, 2L)
+        terminal.feed("needle".toByteArray())
+        val match = searchMatches(terminal, "needle")[0L]
+        val controller = TerminalViewController(testViewport(terminal))
+        val changes = ArrayList<TerminalViewChange>()
+        controller.onChanged = { value ->
+            changes.add(value);
+            Unit
+        }
+        try {
+            assertEquals(TerminalRevealResult.PendingLayout, controller.reveal(match))
+            terminal.feed("\rXXXXXX".toByteArray())
+            controller.synchronize()
+            assertEquals(
+                TerminalViewChange.RevealCompleted(TerminalRevealResult.Stale),
+                changes[changes.size - 1L]
+            )
+            assertEquals(TerminalRevealResult.Stale, controller.reveal(match))
+            terminal.feed("\u001bcneedle".toByteArray())
+            assertEquals(TerminalRevealResult.Unavailable, controller.reveal(match))
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun synchronizedRevealUsesFrozenHistoryWithoutPublishingPendingOutput() {
+        val terminal = Terminal(6L, 2L, 3L)
+        terminal.feed("a\r\nb\r\nc\r\nd\r\ne\r\nf".toByteArray())
+        val match = searchMatches(terminal, "c")[0L]
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            controller.setSearchHighlights([match])
+            terminal.feed("\u001b[?2026h\u001b[3J\rX".toByteArray())
+            assertEquals(
+                TerminalRevealResult.PendingLayout,
+                controller.reveal(match, TerminalRevealAlignment.Start)
+            )
+            assertEquals(1L, controller.state.firstRow)
+            acceptGrid(controller, terminal, 1L)
+            assertEquals(TerminalRevealResult.Revealed, controller.reveal(match))
+            assertTrue(terminal.synchronizedOutput)
+            assertEquals(1L, controller.visibleHighlights(testGrid(terminal.reading, 1L)).size)
+            terminal.feed("\u001b[?2026l".toByteArray())
+            assertEquals(TerminalRevealResult.Unavailable, controller.reveal(match))
+            acceptGrid(controller, terminal, 2L)
+            assertEquals(None, controller.rectsFor(match)?.frameVersion)
+            assertEquals(
+                0L,
+                controller
+                    .visibleHighlights(testGrid(terminal.reading, controller.state.firstRow))
+                    .size
+            )
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun acceptedPointsExposeLinksCommandsAndWholeGraphemeAnchors() {
+        val terminal = Terminal(8L, 2L)
+        terminal
+            .feed(
+                "\u001b]133;A\u0007x\u001b]8;;https://example.test\u0007中\u001b]8;;\u0007"
+                    .toByteArray()
+            )
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            assertEquals(None, controller.anchorAt(Point(25.0, 8.0)))
+            acceptGrid(controller, terminal, 1L)
+            assertEquals(Some("https://example.test"), controller.linkAt(Point(25.0, 8.0))?.uri)
+            assertEquals(Some(1L), controller.anchorAt(Point(25.0, 8.0))?.cellOffset)
+            assertEquals(
+                Some(terminal.reading.commands(0L, 1L)[0L].id),
+                controller.commandAt(Point(25.0, 8.0))?.id
+            )
+            assertEquals(None, controller.linkAt(Point(-1.0, 8.0))?.key)
+        } finally {
+            controller.close()
+        }
+    }
+}
+
+internal fun searchMatches(terminal: Terminal, query: String): Array<TerminalSearchMatch> {
+    val snapshot = terminal.snapshot()
+    try {
+        val search = snapshot.search(query)
+        try {
+            val matches = ArrayList<TerminalSearchMatch>()
+            while (search.status == TerminalSearchStatus.Searching) {
+                val page = search.nextPage()
+                for (match in page.matches)
+                    matches.add(match)
+            }
+            return matches.toArray()
+        } finally {
+            search.close()
+        }
+    } finally {
+        snapshot.close()
+    }
+}
+
+internal fun testGrid(reading: TerminalReading, first: Long): GridGeometry = GridGeometry(
+    Size(reading.columns.toDouble() * 10.0, reading.rows.toDouble() * 16.0), CellMetrics(
+        10.0,
+        16.0,
+        12.0
+    ),
+    first, reading.lines(first, reading.rows), reading.columns, reading.rows, reading
+        .screenRevision,
+    first == reading.historySize, reading
+)
+
+internal fun acceptGrid(controller: TerminalViewController, terminal: Terminal, version: Long) {
+    controller.layoutStarted(version)
+    controller.frameAccepted(testGrid(terminal.reading, controller.state.firstRow), version)
+}

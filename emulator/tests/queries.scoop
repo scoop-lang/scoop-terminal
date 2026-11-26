@@ -1,0 +1,116 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+import scoop.text.substring
+
+@Test
+private class CapabilityQueryTest {
+    @Test
+    fun reportsActualModesAndDoesNotClaimUnknownExtensions() {
+        val terminal = Terminal(10L, 4L)
+        val update = terminal
+            .feed(
+                (
+                    "\u001b[?7$p\u001b[?7l\u001b[?7$p" +
+                        "\u001b[?9999$p\u001b[4h\u001b[4$p\u001b[?1000h\u001b[?1006$p\u001b[?1000$p"
+                )
+                    .toByteArray()
+            )
+        assertEquals(6L, update.effects.size)
+        assertEquals("\u001b[?7;1$y", queryReply(update, 0L))
+        assertEquals("\u001b[?7;2$y", queryReply(update, 1L))
+        assertEquals("\u001b[?9999;0$y", queryReply(update, 2L))
+        assertEquals("\u001b[4;1$y", queryReply(update, 3L))
+        assertEquals("\u001b[?1006;2$y", queryReply(update, 4L))
+        assertEquals("\u001b[?1000;1$y", queryReply(update, 5L))
+    }
+
+    @Test
+    fun statusRequestsSurviveFragmentationAndSerializeRendition() {
+        val terminal = Terminal(10L, 4L)
+        terminal.feed("\u001b[1;4:3;38:2::10:20:30;58;5;42m\u001b[2;3r\u001b[6 q".toByteArray())
+        val request = "\u001bP$qm\u001b\\".toByteArray()
+        var result = TerminalUpdate(false, [])
+        for (byte in request)
+            result = terminal.feed([byte])
+        val response = queryReply(result, 0L)
+        assertEquals("\u001bP1$r0;1;4:3;38:2::10:20:30;58:5:42m\u001b\\", response)
+        val second = Terminal(10L, 4L)
+        second
+            .feed(
+                ("\u001b[" + response.substring(5L, response.charLength - 2L) + "X").toByteArray()
+            )
+        terminal.feed("X".toByteArray())
+        assertEquals(
+            terminal.lines(0L, 1L)[0L].cells[0L].style,
+            second.lines(0L, 1L)[0L].cells[0L].style
+        )
+        val margins = terminal
+            .feed("\u001bP$qr\u001b\\\u001bP$q q\u001b\\\u001bP$qunknown\u001b\\".toByteArray())
+        assertEquals("\u001bP1$r2;3r\u001b\\", queryReply(margins, 0L))
+        assertEquals("\u001bP1$r6 q\u001b\\", queryReply(margins, 1L))
+        assertEquals("\u001bP0$r\u001b\\", queryReply(margins, 2L))
+    }
+
+    @Test
+    fun capabilityNamesAndInstalledProfileUseTheSameTable() {
+        val terminal = Terminal(10L, 4L)
+        val update = terminal.feed("\u001bP+q544e;436f;6b63757531\u001b\\".toByteArray())
+        assertEquals(
+            "\u001bP1+r544e=73636f6f702d7465726d696e616c;436f=323536;6b63757531=1b4f41\u001b\\",
+            queryReply(update, 0L)
+        )
+        val failed = terminal.feed("\u001bP+q544e;ffff;436f\u001b\\".toByteArray())
+        assertEquals(2L, failed.effects.size)
+        assertEquals("\u001bP0+r\u001b\\", queryReply(failed, 1L))
+        assertEquals("\u001b[4:%p1%dm", terminalCapability("Smulx")!!)
+        assertEquals(
+            "\u001bP0+r\u001b\\",
+            queryReply(terminal.feed("\u001bP+qG0\u001b\\".toByteArray()), 0L)
+        )
+    }
+
+    @Test
+    fun pixelMetadataChangesDoNotResetMarginsOrRewriteText() {
+        val terminal = Terminal(10L, 4L)
+        terminal.feed("\u001b[?69h\u001b[2;8s\u001b[2;3rX".toByteArray())
+        val previous = terminal.reading
+        val update = terminal
+            .resize(10L, 4L, pixels = Some(TerminalPixelSize(160L, 128L, 16L, 32L)))
+        assertTrue(update.damage.resized)
+        assertEquals(previous.textRevision, terminal.reading.textRevision)
+        assertEquals(None, previous.pixelSize)
+        val result = terminal
+            .feed(
+                "\u001b[14t\u001b[16t\u001b[18t\u001bP$qs\u001b\\\u001bP$qr\u001b\\".toByteArray()
+            )
+        assertEquals("\u001b[4;128;160t", queryReply(result, 0L))
+        assertEquals("\u001b[6;32;16t", queryReply(result, 1L))
+        assertEquals("\u001b[8;4;10t", queryReply(result, 2L))
+        assertEquals("\u001bP1$r2;8s\u001b\\", queryReply(result, 3L))
+        assertEquals("\u001bP1$r2;3r\u001b\\", queryReply(result, 4L))
+        terminal.resize(10L, 4L)
+        assertEquals("\u001b[4;0;0t", queryReply(terminal.feed("\u001b[14t".toByteArray()), 0L))
+    }
+
+    @Test
+    fun boundedOrCancelledQueriesNeverLeakIntoScreenOrReplyOutOfOrder() {
+        val terminal = Terminal(10L, 4L)
+        terminal.feed("\u001bP$q".toByteArray())
+        for (index in 0L..<4100L)
+            terminal.feed(['m'.code.toByte()])
+        val result = terminal.feed("\u001b\\\u001b[6n".toByteArray())
+        assertEquals("\u001bP0$r\u001b\\", queryReply(result, 0L))
+        assertEquals("\u001b[1;1R", queryReply(result, 1L))
+        terminal.feed("\u001bP+q544e".toByteArray())
+        assertEquals(0L, terminal.finishOutput().effects.size)
+        val cancelled = terminal.feed("\u001bP$qm\u0018X".toByteArray())
+        assertEquals(0L, cancelled.effects.size)
+        assertEquals("X", terminal.lines(0L, 1L)[0L].cells[0L].text)
+    }
+}
+
+private fun queryReply(update: TerminalUpdate, index: Long): String = when (update.effects[index]) {
+    case Reply(val bytes) -> String.fromUtf8(bytes)
+    case _ -> throw IllegalStateException(Some("expected query reply"))
+}

@@ -1,31 +1,178 @@
 package scoop.ui.terminal
 
-import scoop.graphics.Color
+import scoop.graphics.*
 import scoop.graphics.text.FontCollection
 import scoop.terminal.emulator.TerminalCell
 import scoop.terminal.emulator.TerminalStyle
+import scoop.terminal.emulator.Terminal
+import scoop.terminal.emulator.TerminalCursorShape
 import scoop.test.*
 
 @Test
 private class TerminalGlyphCacheTest {
+    @Test
+    fun paletteUpdatesRepaintIndexedBackgroundsAndRetainedFramesKeepOldColors() {
+        val terminal = Terminal(2L, 1L)
+        terminal.feed("\u001b]4;1;rgb:f/0/0\u0007\u001b[41m \u001b[48;2;0;0;255m ".toByteArray())
+        val old = terminal.reading
+        terminal.feed("\u001b]4;1;rgb:0/f/0\u0007".toByteArray())
+        FontCollection()
+            .use { fonts ->
+                val appearance = TerminalAppearance()
+                val cache = TerminalGlyphCache(fonts, appearance)
+                try {
+                    for (reading in [old, terminal.reading]) {
+                        val geometry = GridGeometry(
+                            Size(20.0, 16.0), CellMetrics(10.0, 16.0, 12.0),
+                            0L, reading.lines(0L, 1L), 2L, 1L, reading.screenRevision, true, reading
+                        )
+                        TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                            .use { frame ->
+                                frame.shape([], "")
+                                RasterSurface(20, 16)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val pixels = surface.readPixels()
+                                        val first = (8L * 20L + 5L) * 4L
+                                        assertEquals(
+                                            if (reading === old) 255 else 0,
+                                            pixels[first].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            if (reading === old) 0 else 255,
+                                            pixels[first + 1L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            255,
+                                            pixels[(8L * 20L + 15L) * 4L + 2L].toInt() and 255
+                                        )
+                                    }
+                            }
+                    }
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
+    @Test
+    fun coloredUnderlineAndCursorBlinkAreIndependentRasterLayers() {
+        val terminal = Terminal(2L, 1L)
+        terminal.feed("\u001b[4:2;58;2;255;0;0;5m \u001b[0m\r".toByteArray())
+        val appearance = TerminalAppearance(background = Color.Black, cursor = Color.White)
+        terminal.setColors(appearance.colorTheme())
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, appearance)
+                val reading = terminal.reading
+                val geometry = GridGeometry(
+                    Size(20.0, 16.0), CellMetrics(10.0, 16.0, 12.0),
+                    0L, reading.lines(0L, 1L), 2L, 1L, reading.screenRevision, true, reading
+                )
+                val frame = TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, glyphs)
+                try {
+                    frame.shape([], "")
+                    assertTrue(frame.hasBlink)
+                    RasterSurface(20, 16)
+                        .use { surface ->
+                            surface.draw { canvas -> frame.drawScreen(canvas, true) }
+                            val painted = surface.readPixels()
+                            assertEquals(255, painted[(15L * 20L + 5L) * 4L].toInt() and 255)
+                            assertEquals(255, painted[(13L * 20L + 5L) * 4L].toInt() and 255)
+                            surface.draw { canvas -> frame.drawScreen(canvas, false) }
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            val rect = geometry.caret(reading.cursor)!!
+                            val cursor = reading
+                                .cursor.{shape: TerminalCursorShape.Underline, blink: true}
+                            surface
+                                .draw { canvas ->
+                                    frame.drawCursor(canvas, rect, cursor, true, false)
+                                }
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            surface
+                                .draw { canvas ->
+                                    frame.drawCursor(canvas, rect, cursor, true, true)
+                                }
+                            assertEquals(
+                                255,
+                                surface.readPixels()[(15L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                            assertEquals(
+                                0,
+                                surface.readPixels()[(8L * 20L + 5L) * 4L].toInt() and 255
+                            )
+                        }
+                } finally {
+                    frame.close()
+                    glyphs.release()
+                }
+            }
+    }
+
+    @Test
+    fun narrowWideCellsShapeThePlaceholderAndKeepOriginalText() {
+        FontCollection()
+            .use { fonts ->
+                val cache = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    val cell = TerminalCell("中", 1L, intrinsicWidth = 2L)
+                    cache
+                        .acquire(cell, Color.White)
+                        .use { placeholder ->
+                            assertEquals("�", placeholder.layout.text)
+                            assertEquals("中", cell.text)
+                            cache
+                                .acquire(TerminalCell("�"), Color.White)
+                                .use { again -> assertTrue(placeholder.layout === again.layout) }
+                        }
+                    cache
+                        .acquire(TerminalCell("中", 2L), Color.White)
+                        .use { wide -> assertEquals("中", wide.layout.text) }
+                    val mark = TerminalCell("\u0301", dottedCircle = true)
+                    cache
+                        .acquire(mark, Color.White)
+                        .use { dotted -> assertEquals("◌\u0301", dotted.layout.text) }
+                    assertEquals("\u0301", mark.text)
+                } finally {
+                    cache.release()
+                }
+            }
+    }
+
     @Test
     fun sharesGlyphsWithTheSameInkAndKeepsRetainedFramesAlive() {
         FontCollection()
             .use { fonts ->
                 val cache = TerminalGlyphCache(fonts, TerminalAppearance())
                 val cell = TerminalCell("A", 1L, TerminalStyle())
-                val plain = cache.layout(cell, Color.White)
+                val lease = cache.acquire(cell, Color.White)
+                val plain = lease.layout
                 cache.retain()
                 cache.release()
                 try {
-                    assertTrue(plain === cache.layout(cell, Color.White))
-                    assertTrue(plain !== cache.layout(cell, Color.Black))
+                    cache
+                        .acquire(cell, Color.White)
+                        .use { same -> assertTrue(plain === same.layout) }
+                    cache
+                        .acquire(cell, Color.Black)
+                        .use { recolored -> assertTrue(plain !== recolored.layout) }
                     val bold = TerminalCell("A", 1L, TerminalStyle(flags = 1))
-                    assertTrue(plain !== cache.layout(bold, Color.White))
+                    cache
+                        .acquire(bold, Color.White)
+                        .use { heavier -> assertTrue(plain !== heavier.layout) }
                     assertTrue(!plain.isClosed)
                 } finally {
                     cache.release()
                 }
+                assertFalse(plain.isClosed)
+                lease.close()
+                lease.close()
                 assertTrue(plain.isClosed)
             }
     }

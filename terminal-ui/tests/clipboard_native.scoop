@@ -1,0 +1,94 @@
+package scoop.ui.terminal
+
+import scoop.io.encoding.Base64
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.window.*
+
+/** Reads the existing system clipboard without replacing any clipboard item or logging its content. */
+@Test
+private class TerminalNativeClipboardTest {
+    @Test(useProcess = true)
+    @Ignore("manual desktop clipboard integration")
+    fun osc52ReadsTheNativeClipboardBeforeTheFollowingDsr() {
+        val handler = NativeClipboardProbe()
+        Application().run(handler)
+        assertTrue(handler.finished)
+    }
+}
+
+private class NativeClipboardProbe : ApplicationHandler {
+    var finished = false
+    public override fun onEvent(application: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed -> {
+                try {
+                    val window = application
+                        .createWindow(windowAttributes { size = LogicalSize(160.0, 100.0) })
+                    val native = window.clipboard.readText() ?: ""
+                    val adapter = WindowTerminalClipboardAdapter(window)
+                    val queue = TerminalWriteQueue()
+                    val failures = ArrayList<Throwable>()
+                    val bridge = TerminalClipboardBridge(
+                        queue,
+                        { Some(adapter) },
+                        { _ -> Some(NativeClipboardDeadline()) },
+                        {},
+                        { error ->
+                            failures.add(error);
+                            Unit
+                        }
+                    )
+                    try {
+                        Terminal(8L, 2L, clipboardPolicy = TerminalClipboardPolicy(read = true))
+                            .use { terminal ->
+                                val update = terminal
+                                    .feed("abc\u001b]52;c;?\u0007\u001b[6n".toByteArray())
+                                for (effect in update.effects)
+                                    when (effect) {
+                                        case ClipboardReadRequested(val request) ->
+                                            bridge.read(request)
+                                        case Reply(val bytes) -> queue.append(bytes)
+                                        case _ ->
+                                            fail(Some("unexpected clipboard integration effect"))
+                                    }
+                                assertEquals(0L, failures.size)
+                                assertEquals(0L, bridge.pendingCount)
+                                val encoded = if (native.byteLength <= 1048576L)
+                                    Base64.Default.encode(native.toByteArray())
+                                else
+                                    ""
+                                // Avoid assertion messages containing clipboard data even on a failure.
+                                assertTrue(
+                                    String.fromUtf8(queue.take()!!) ==
+                                        "\u001b]52;c;" +
+                                        encoded +
+                                        "\u001b\\",
+                                    Some("OSC 52 differs from native clipboard reading")
+                                )
+                                assertEquals("\u001b[1;4R", String.fromUtf8(queue.take()!!))
+                                assertEquals(0L, queue.size)
+                                assertTrue(
+                                    (window.clipboard.readText() ?: "") == native,
+                                    Some("clipboard changed during read-only test")
+                                )
+                            }
+                    } finally {
+                        bridge.close();
+                        adapter.close();
+                        queue.clear()
+                    }
+                    finished = true
+                } finally {
+                    application.requestExit()
+                }
+            }
+
+            case _ -> {}
+        }
+    }
+}
+
+private class NativeClipboardDeadline : Disposable {
+    public override fun dispose() {}
+}

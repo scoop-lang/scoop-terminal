@@ -1,0 +1,63 @@
+package scoop.ui.terminal
+
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.graphics.text.*
+import scoop.terminal.emulator.*
+
+internal fun terminalTestFonts(): FontCollection {
+    val fonts = FontCollection(false)
+    try {
+        fonts.register(includeBytes("data/FiraCode-Regular.ttf"), "Terminal Test Mono")
+        return fonts
+    } catch (error: Throwable) {
+        fonts.close()
+        throw error
+    }
+}
+
+internal fun terminalTestAppearance(): TerminalAppearance = TerminalAppearance(
+    families = ["Terminal Test Mono"], fontSize = 20.0,
+    foreground = Color.White, background = Color.Black
+)
+
+internal fun <T> withTerminalRunFrame(
+    text: String,
+    appearance: TerminalAppearance = terminalTestAppearance(),
+    columns: Long = 24L,
+    action: (Terminal, TerminalGlyphCache, TerminalFrame) -> T
+): T = terminalTestFonts()
+    .use { fonts ->
+        val terminal = Terminal(columns, 3L)
+        terminal.setColors(appearance.colorTheme())
+        terminal.feed(text.toByteArray())
+        val cache = TerminalGlyphCache(fonts, appearance)
+        try {
+            val reading = terminal.reading
+            val geometry = GridGeometry(
+                Size(320.0, 100.0), cache.metrics, 0L, reading.lines(0L, 3L), columns, 3L,
+                reading.screenRevision, true, reading
+            )
+            TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                .use { frame ->
+                    frame.shape([], "")
+                    action(terminal, cache, frame)
+                }
+        } finally {
+            cache.release()
+        }
+    }
+
+internal fun terminalRunPixels(frame: TerminalFrame, cursor: TerminalCursor? = None): Array<Byte> =
+    RasterSurface(320, 100)
+        .use { surface ->
+            surface.draw { canvas -> frame.drawScreen(canvas, activeCursor = cursor) }
+            surface.readPixels()
+        }
+
+internal fun sameTerminalPixels(left: Array<Byte>, right: Array<Byte>): Boolean {
+    if (left.size != right.size) return false
+    for (index in 0L..<left.size)
+        if (left[index] != right[index]) return false
+    return true
+}

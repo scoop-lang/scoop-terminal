@@ -1,0 +1,157 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+import scoop.map
+
+internal const val HISTORY_PAGE_ROWS = 64L
+
+internal struct LogicalSpan(val first: Long, val last: Long)
+
+private class HistoryPage {
+    val rows = MutableArray<ScreenRow?>(HISTORY_PAGE_ROWS) { None }
+}
+
+/** A terminal-owned paged ring. Ordinals stay stable when the oldest row is evicted. */
+internal class LineHistory {
+    private val pages = HashMap<Long, HistoryPage>()
+    private var positions: SnapshotIndex<Long>? = None
+    private var logicalPositions: SnapshotIndex<LogicalSpan>? = None
+    private var versions: SnapshotIndex<Long>? = None
+    private var publishedPages: SnapshotIndex<Array<TerminalLine?>>? = None
+    private val dirtyPages = HashMap<Long, Boolean>()
+    private var bytes = 0L
+    private var first = 0L
+    private var end = 0L
+
+    val size: Long get() = end - first
+
+    operator fun get(index: Long): ScreenRow {
+        if (index < 0L || index >= size) throw IndexOutOfBoundsException()
+        val ordinal = first + index
+        return pages[ordinal / HISTORY_PAGE_ROWS]!!.rows[ordinal % HISTORY_PAGE_ROWS]!!
+    }
+
+    fun find(id: Long): Long? = indexValue(positions, id).map { ordinal -> ordinal - first }
+
+    fun findLogical(id: Long): LogicalSpan? = indexValue(logicalPositions, id)
+        .map { span -> LogicalSpan(span.first - first, span.last - first) }
+
+    fun addLast(line: ScreenRow) {
+        val pageIndex = end / HISTORY_PAGE_ROWS
+        val page = when (pages[pageIndex]) {
+            case Some(val present) -> present
+
+            case None -> {
+                val created = HistoryPage()
+                pages[pageIndex] = created
+                created
+            }
+        }
+        page.rows[end % HISTORY_PAGE_ROWS] = Some(line)
+        positions = Some(indexUpdated(positions, line.id, end))
+        val previous = indexValue(logicalPositions, line.logical.id)
+        logicalPositions = Some(
+            indexUpdated(
+                logicalPositions,
+                line.logical.id,
+                LogicalSpan(previous?.first ?: end, end)
+            )
+        )
+        versions = Some(indexUpdated(versions, line.logical.id, line.logical.version))
+        bytes += line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
+        end += 1L
+    }
+
+    fun removeFirst(): ScreenRow {
+        val line = this[0L]
+        val pageIndex = first / HISTORY_PAGE_ROWS
+        pages[pageIndex]!!.rows[first % HISTORY_PAGE_ROWS] = None
+        positions = indexRemoved(positions, line.id)
+        val span = indexValue(logicalPositions, line.logical.id)!!
+        if (span.first == span.last) {
+            logicalPositions = indexRemoved(logicalPositions, line.logical.id)
+            versions = indexRemoved(versions, line.logical.id)
+        } else
+            logicalPositions = Some(
+                indexUpdated(
+                    logicalPositions,
+                    line.logical.id,
+                    LogicalSpan(span.first + 1L, span.last)
+                )
+            )
+        bytes -= line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
+        first += 1L
+        if (first == end) clear() else if (first % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
+        return line
+    }
+
+    fun removeLast(): ScreenRow {
+        val line = this[size - 1L]
+        end -= 1L
+        val pageIndex = end / HISTORY_PAGE_ROWS
+        pages[pageIndex]!!.rows[end % HISTORY_PAGE_ROWS] = None
+        positions = indexRemoved(positions, line.id)
+        val span = indexValue(logicalPositions, line.logical.id)!!
+        if (span.first == span.last) {
+            logicalPositions = indexRemoved(logicalPositions, line.logical.id)
+            versions = indexRemoved(versions, line.logical.id)
+        } else
+            logicalPositions = Some(
+                indexUpdated(
+                    logicalPositions,
+                    line.logical.id,
+                    LogicalSpan(span.first, span.last - 1L)
+                )
+            )
+        bytes -= line.snapshot().retainedBytes
+        dirtyPages[pageIndex] = true
+        if (first == end) clear() else if (end % HISTORY_PAGE_ROWS == 0L) pages.remove(pageIndex)
+        return line
+    }
+
+    fun snapshot(): HistoryReading {
+        if (size > 0L) {
+            val tail = this[size - 1L].logical
+            if (indexValue(versions, tail.id) != Some(tail.version))
+                versions = Some(indexUpdated(versions, tail.id, tail.version))
+        }
+        for (key in dirtyPages.keys) {
+            when (pages[key]) {
+                case Some(val page) -> {
+                    val frozen = Array<TerminalLine?>(HISTORY_PAGE_ROWS) { offset ->
+                        page.rows[offset].map { row -> row.snapshot() }
+                    }
+                    publishedPages = Some(indexUpdated(publishedPages, key, frozen))
+                }
+
+                case None -> publishedPages = indexRemoved(publishedPages, key)
+            }
+        }
+        dirtyPages.clear()
+        return HistoryReading(
+            first,
+            end,
+            publishedPages,
+            positions,
+            logicalPositions,
+            versions,
+            bytes
+        )
+    }
+
+    fun clear() {
+        for (index in 0L..<size)
+            this[index].release(TerminalInvalidation.Evicted)
+        pages.clear()
+        positions = None
+        logicalPositions = None
+        versions = None
+        publishedPages = None
+        dirtyPages.clear()
+        bytes = 0L
+        first = 0L
+        end = 0L
+    }
+}

@@ -1,50 +1,189 @@
 package scoop.terminal.emulator
 
 import scoop.charset.graphemeBoundaries
-import scoop.charset.unicodeScalarWidth
+import scoop.charset.unicodeTextWidth
 
-internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : VtActions {
+internal class TerminalState(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long,
+    parserLimits: TerminalParserLimits,
+    var ambiguousWidth: TerminalAmbiguousWidth,
+    colors: TerminalColors,
+    val clipboardPolicy: TerminalClipboardPolicy,
+    linkLimits: TerminalLinkLimits,
+    trackingLimits: TerminalTrackingLimits,
+    commandLimits: TerminalCommandLimits,
+    imageLimits: TerminalImageLimits,
+    val graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(),
+    val imageDecoder: TerminalImageDecoder? = None
+) : VtActions {
     private val ids = RowIds()
-    private val screenChanges = ScreenChanges()
-    val main = Screen(columns, rows, historyLimit, ids, screenChanges)
+    private val screenChanges = ScreenChanges(
+        TerminalLinkStore(linkLimits),
+        TerminalTracking(trackingLimits)
+    )
+    val links: TerminalLinkStore get() = screenChanges.links
+    val tracking: TerminalTracking get() = screenChanges.tracking
+    val images = TerminalImageStore(
+        ImageMemory(imageLimits), tracking,
+        { message -> emit(TerminalEffect.Diagnostic(message)) }
+    )
+    val commands = TerminalCommands(tracking, commandLimits)
+    val kitty = TerminalKitty(this)
+    val hasImageDecoder: Boolean
+        get() = when (imageDecoder) {
+            case Some(_) -> true;
+            case None -> false
+        }
+    val main = Screen(columns, rows, historyLimit, ids, screenChanges, reflow = true)
     val alternate = Screen(columns, rows, 0L, ids, screenChanges)
+    init {
+        screenChanges.images = Some(images)
+        images.attach([main, alternate])
+    }
     var alternateScreen = false
     val screen: Screen get() = if (alternateScreen) alternate else main
     var style = TerminalStyle()
     var modes = TerminalModes()
+    var pixelSize: TerminalPixelSize? = None
+    val colorState = TerminalColorState(colors)
+    var metadata = TerminalMetadata()
+    var progressPercent: Int? = None
     private var tabs = defaultTabs(columns)
     private var charset = 0
     private val savedCharset = MutableArray<Int>(2L) { 0 }
+    private val savedWrap = MutableArray<Boolean>(2L) { true }
+    private val savedLinks = MutableArray<Long>(2L) { 0L }
     private var combining: ScreenRow? = None
     private var startColumn = 0L
     private var lastPrinted = TerminalCell()
     private val effects = ArrayList<TerminalEffect>()
+    private var clipboardRequestId = 0L
     private var changed = false
     private var modelRevision = 0L
     private var gridRevision = 0L
+    private var textRevision = 0L
+    private var presentationVersion = 0L
+    private var presentationPending = false
+    private var imageRevision = 0L
+    var synchronizedOutput = false
+    var synchronizationGeneration = 0L
     val revision: Long get() = modelRevision
     val screenRevision: Long get() = gridRevision
-    private val parser = VtParser(this)
+    private val parser = VtParser(this, parserLimits)
+    private var committed = captureReading()
+    val reading: TerminalReadingData get() = committed
+
+    private fun captureReading(): TerminalReadingData = screen
+        .snapshot(
+            modelRevision, gridRevision, textRevision, presentationVersion,
+            alternateScreen, modes.cursorVisible, modes.mouseTracking != 0, modes.cursorShape, modes
+                .cursorBlink, pixelSize, colorState.current, metadata, commands.snapshot(screen),
+            ambiguousWidth, images.snapshot(screen)
+        )
 
     fun feed(bytes: List<Byte>): TerminalUpdate {
+        val before = committed
         parser.feed(bytes)
-        return update()
+        return update(before)
     }
 
     fun finishOutput(): TerminalUpdate {
+        val before = committed
         parser.finish()
+        kitty.cancel()
         combining = None
-        return update()
+        commands.finish(this, main)
+        commands.finish(this, alternate)
+        setSynchronizedOutput(false)
+        progressPercent = None
+        setProgress(TerminalProgress.Inactive)
+        return update(before)
     }
 
-    private fun update(): TerminalUpdate {
+    private fun flush(publish: Boolean) {
+        screen.reconcileLogicalLines()
+        commands.prune()
+        images.prune()
+        images.refreshPalette()
         val screenChanged = updateScreenRevision()
-        val modified = changed || screenChanged
-        if (modified) modelRevision += 1L
-        val result = TerminalUpdate(modified, effects.toArray())
-        effects.clear()
+        val trackedChanged = tracking.takeChanged()
+        val modified = changed || screenChanged || trackedChanged || imageRevision != images.version
+        imageRevision = images.version
+        if (screenChanges.textPending) {
+            textRevision += 1L
+            screenChanges.textPending = false
+        }
+        if (modified) {
+            modelRevision += 1L
+            presentationPending = true
+        }
         changed = false
+        if (publish && presentationPending) {
+            presentationVersion += 1L
+            val previous = committed
+            committed = captureReading()
+            previous.images.release()
+            imageRevision = images.version
+            presentationPending = false
+        }
+    }
+
+    private fun update(before: TerminalReadingData): TerminalUpdate {
+        flush(!synchronizedOutput)
+        val modified = committed !== before
+        val result = TerminalUpdate(
+            modified, effects.toArray(),
+            if (modified) readingDamage(before, committed) else TerminalDamage(),
+            modelRevision, textRevision, presentationVersion
+        )
+        effects.clear()
         return result
+    }
+
+    fun setSynchronizedOutput(enabled: Boolean) {
+        if (enabled == synchronizedOutput) return
+        if (enabled) {
+            // Commit the exact prefix before BSU, even in the middle of one feed.
+            flush(true)
+            synchronizedOutput = true
+            synchronizationGeneration += 1L
+        } else {
+            synchronizedOutput = false
+            flush(true)
+        }
+    }
+
+    fun releaseSynchronizedOutput(): TerminalUpdate {
+        val before = committed
+        setSynchronizedOutput(false)
+        return update(before)
+    }
+
+    fun presentationChanged() {
+        changed = true
+    }
+
+    fun setColors(colors: TerminalColors): TerminalUpdate {
+        val before = committed
+        if (colorState.setDefaults(colors)) changed = true
+        return update(before)
+    }
+
+    fun changeAmbiguousWidth(value: TerminalAmbiguousWidth): TerminalUpdate {
+        val before = committed
+        if (value == ambiguousWidth) return update(before)
+        setSynchronizedOutput(false)
+        ambiguousWidth = value
+        main.remeasure(value, style)
+        val mainTextChanged = screenChanges.textPending
+        screenChanges.textPending = false
+        alternate.remeasure(value, style)
+        if (!alternateScreen) screenChanges.textPending = mainTextChanged
+        combining = None
+        changed = true
+        return update(before)
     }
 
     private fun updateScreenRevision(): Boolean {
@@ -54,16 +193,32 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         return true
     }
 
-    fun resize(columns: Long, rows: Long, restoreHistory: Boolean) {
+    fun resize(
+        columns: Long,
+        rows: Long,
+        restoreHistory: Boolean,
+        pixels: TerminalPixelSize?
+    ): TerminalUpdate {
+        val before = committed
+        setSynchronizedOutput(false)
+        pixelSize = pixels
+        images.setPixels(pixels)
+        if (columns == main.columns && rows == main.rows) {
+            changed = true
+            return update(before)
+        }
         main.resize(columns, rows, restoreHistory, style)
+        val mainTextChanged = screenChanges.textPending
+        screenChanges.textPending = false
         alternate.resize(columns, rows, false, style)
+        if (!alternateScreen) screenChanges.textPending = mainTextChanged
         val previous = tabs
         tabs = MutableArray<Boolean>(columns) { index ->
             if (index < previous.size) previous[index] else defaultTab(index)
         }
         combining = None
-        updateScreenRevision()
-        modelRevision += 1L
+        changed = true
+        return update(before)
     }
 
     public override fun print(character: Char) {
@@ -72,8 +227,8 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         val text = displayed.toString()
         if (extendCluster(displayed, text)) return
         combining = None
-        val width = if (displayed.code < 128) 1L else clusterWidth(text)
-        if (width > 0L) put(text, width)
+        val width = if (displayed.code < 128) 1L else clusterWidth(text, ambiguousWidth)
+        if (width >= 0L) put(text, if (width == 0L) 1L else width, width == 0L)
     }
 
     private fun extendCluster(character: Char, text: String): Boolean {
@@ -82,47 +237,88 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         if (character.code < 128 && cell.text.byteLength == cell.text.charLength) return false
         val combined = cell.text + text
         if (graphemeBoundaries(combined).size != 2L) return false
-        val width = clusterWidth(combined)
-        if (startColumn + width > screen.columns) {
+        val measured = clusterWidth(combined, ambiguousWidth)
+        val width = if (measured <= 0L) 1L else measured
+        val dotted = cell.dottedCircle && measured == 0L
+        if (startColumn + width > screen.writeRight + 1L) {
             row.erase(startColumn, startColumn + cell.width, style)
             screen.moveColumn(startColumn)
-            put(combined, width)
+            put(combined, width, dotted)
         } else {
-            row.put(startColumn, combined, width, cell.style)
+            row
+                .put(
+                    startColumn,
+                    combined,
+                    width,
+                    cell.style,
+                    dottedCircle = dotted,
+                    linkId = cell.linkId,
+                    anchorWidth = anchorWidth(combined, width)
+                )
             moveAfter(startColumn, width)
-            lastPrinted = TerminalCell(combined, width, cell.style)
+            lastPrinted = TerminalCell(
+                combined, width, cell.style, dottedCircle = dotted,
+                anchorWidth = anchorWidth(combined, width)
+            )
             changed = true
         }
         return true
     }
 
-    private fun put(text: String, width: Long) {
+    private fun put(text: String, width: Long, dottedCircle: Boolean = false) {
         val grid = screen
         val length = if (width <= grid.columns) width else 1L
-        if (modes.autoWrap && (grid.pendingWrap || grid.column + length > grid.columns)) {
-            grid.current.softWrapped = true
-            grid.moveColumn(0L)
-            grid.lineFeed(style)
+        val right = grid.writeRight
+        if (modes.autoWrap && (grid.pendingWrap || grid.column + length > right + 1L)) {
+            grid.moveColumn(grid.writeLeft)
+            grid.lineFeed(style, wrapped = true)
         }
-        val fits = length == width && grid.column + length <= grid.columns
-        val displayed = if (fits) text else "�"
+        val fits = length == width && grid.column + length <= grid.writeRight + 1L
+        val narrow = width == 2L && grid.columns == 1L && !alternateScreen
+        val displayed = if (fits || narrow) text else "�"
         val occupied = if (fits) length else 1L
+        val intrinsic = if (narrow) width else 0L
         val row = grid.current
         val position = grid.column
-        if (modes.insert) row.shift(position, occupied, true, style)
-        row.put(position, displayed, occupied, style)
+        if (modes.insert) grid.shiftColumns(occupied, true, style)
+        val advance = anchorWidth(displayed, if (intrinsic > 0L) intrinsic else occupied)
+        row
+            .put(
+                position,
+                displayed,
+                occupied,
+                style,
+                intrinsic,
+                dottedCircle,
+                links.active,
+                advance
+            )
         combining = Some(row)
         startColumn = position
-        lastPrinted = TerminalCell(displayed, occupied, style)
+        lastPrinted = TerminalCell(
+            displayed,
+            occupied,
+            style,
+            intrinsic,
+            dottedCircle,
+            anchorWidth = advance
+        )
         moveAfter(position, occupied)
         changed = true
+    }
+
+    private fun anchorWidth(text: String, width: Long): Long {
+        if (ambiguousWidth == TerminalAmbiguousWidth.Narrow || width <= 1L) return 0L
+        val advance = clamp(clusterWidth(text, TerminalAmbiguousWidth.Narrow), 1L, 2L)
+        return if (advance == width) 0L else advance
     }
 
     private fun moveAfter(column: Long, occupied: Long) {
         val grid = screen
         val end = column + occupied
-        grid.column = clamp(end, 0L, grid.columns - 1L)
-        grid.pendingWrap = modes.autoWrap && end == grid.columns
+        val right = grid.writeRight
+        grid.column = clamp(end, 0L, right)
+        grid.pendingWrap = modes.autoWrap && end == right + 1L
     }
 
     public override fun control(code: Int) {
@@ -142,7 +338,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
             case 12 -> lineFeed(modes.lineFeedNewLine)
 
             case 13 -> {
-                grid.moveColumn(0L)
+                grid.carriageReturn()
                 changed = true
             }
 
@@ -186,17 +382,65 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
         if (executeCsi(this, command)) changed = true
     }
 
-    public override fun title(text: String) {
-        effects.add(TerminalEffect.Title(text))
+    public override fun osc(selector: Int, bytes: Array<Byte>) {
+        if (selector == 133) {
+            commands.osc(this, bytes);
+            return
+        }
+        if (colorOsc(this, selector, bytes)) return
+        if (metadataOsc(this, selector, bytes)) return
+        if (selector == 8) {
+            linkOsc(this, bytes)
+            return
+        }
+        if (selector == 52) {
+            clipboardOsc(this, bytes)
+            return
+        }
+        if (selector == 0 || selector == 2)
+            effects.add(TerminalEffect.Title(String.fromUtf8Lossy(bytes)))
+    }
+
+    public override fun startString(kind: VtStringKind): VtStringSink? = when (kind) {
+        case Dcs(val command) ->
+            if (command.prefix == 0 && command.intermediate == 0 && command.final == 'q'.code)
+                sixelString(this, command)
+            else
+                queryString(this, command)
+        case Apc -> kittyString(this)
+    }
+
+    fun beginGraphics() {
+        combining = None
     }
 
     fun reply(text: String) {
         effects.add(TerminalEffect.Reply(text.toByteArray()))
     }
 
+    fun emit(effect: TerminalEffect) {
+        effects.add(effect)
+    }
+
+    fun stopCombining() {
+        combining = None
+    }
+
+    fun setProgress(progress: TerminalProgress) {
+        if (metadata.progress == progress) return
+        metadata = metadata.{progress: progress}
+        emit(TerminalEffect.ProgressChanged(progress))
+        changed = true
+    }
+
+    fun nextClipboardRequest(): Long {
+        clipboardRequestId += 1L
+        return clipboardRequestId
+    }
+
     private fun lineFeed(returns: Boolean) {
         val grid = screen
-        if (returns) grid.moveColumn(0L)
+        if (returns) grid.carriageReturn()
         grid.lineFeed(style)
         changed = true
     }
@@ -204,7 +448,7 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     fun tab(count: Long, forward: Boolean) {
         val grid = screen
         val step = if (forward) 1L else -1L
-        val edge = if (forward) grid.columns - 1L else 0L
+        val edge = if (forward) grid.writeRight else grid.writeLeft
         var column = grid.column
         var left = count
         while (column != edge && left > 0L) {
@@ -224,47 +468,114 @@ internal class TerminalState(columns: Long, rows: Long, historyLimit: Long) : Vt
     fun repeat(count: Long) {
         val glyph = lastPrinted
         if (glyph.text != "") {
+            val width = clamp(clusterWidth(glyph.text, ambiguousWidth), 1L, 2L)
             for (index in 0L..<clamp(count, 0L, 65535L))
-                put(glyph.text, glyph.width)
+                put(glyph.text, width, glyph.dottedCircle)
         }
     }
 
     fun saveCursor() {
         screen.save(style)
-        savedCharset[if (alternateScreen) 1L else 0L] = charset
+        val index = if (alternateScreen) 1L else 0L
+        savedCharset[index] = charset
+        savedWrap[index] = modes.autoWrap
+        links.retain(links.active)
+        links.release(savedLinks[index])
+        savedLinks[index] = links.active
     }
 
     fun restoreCursor() {
         style = screen.restore()
-        charset = savedCharset[if (alternateScreen) 1L else 0L]
+        val index = if (alternateScreen) 1L else 0L
+        charset = savedCharset[index]
+        modes.autoWrap = savedWrap[index]
+        links.setActive(savedLinks[index])
         changed = true
     }
 
     fun switchScreen(enabled: Boolean, save: Boolean, clear: Boolean) {
         if (alternateScreen == enabled) return
+        kitty.cancel()
         if (enabled && save) saveCursor()
         alternateScreen = enabled
         if (enabled && clear) {
+            commands.reset(alternate.bufferEpoch)
             alternate.reset(TerminalStyle())
             savedCharset[1L] = 0
+            savedWrap[1L] = true
+            links.release(savedLinks[1L])
+            savedLinks[1L] = 0L
         }
         if (!enabled && save) restoreCursor()
         screenChanges.pending = true
+        screenChanges.textPending = true
+        changed = true
+    }
+
+    fun setHorizontalMargins(enabled: Boolean) {
+        modes.horizontalMargins = enabled
+        if (!enabled) {
+            main.resetHorizontalMargins()
+            alternate.resetHorizontalMargins()
+        }
+    }
+
+    fun softReset() {
+        setSynchronizedOutput(false)
+        modes = TerminalModes()
+        style = TerminalStyle()
+        screen.softReset()
+        main.resetHorizontalMargins()
+        alternate.resetHorizontalMargins()
+        charset = 0
+        val index = if (alternateScreen) 1L else 0L
+        savedCharset[index] = 0
+        savedWrap[index] = true
+        links.setActive(0L)
+        links.release(savedLinks[index])
+        savedLinks[index] = 0L
+        combining = None
         changed = true
     }
 
     private fun reset() {
+        kitty.cancel()
+        setSynchronizedOutput(false)
+        colorState.reset()
+        progressPercent = None
+        setProgress(TerminalProgress.Inactive)
         style = TerminalStyle()
         modes = TerminalModes()
+        commands.reset(main.bufferEpoch)
+        commands.reset(alternate.bufferEpoch)
         main.reset(style)
         alternate.reset(style)
+        images.resetPalette()
         alternateScreen = false
         tabs = defaultTabs(main.columns)
         charset = 0
         savedCharset[0L] = 0
         savedCharset[1L] = 0
+        savedWrap[0L] = true
+        savedWrap[1L] = true
+        links.setActive(0L)
+        for (index in 0L..<2L) {
+            links.release(savedLinks[index])
+            savedLinks[index] = 0L
+        }
         lastPrinted = TerminalCell()
         changed = true
+    }
+
+    fun close() {
+        try {
+            finishOutput()
+        } finally {
+            images.close()
+            val previous = committed
+            committed = previous.textProjection()
+            previous.images.release()
+        }
     }
 }
 
@@ -276,15 +587,8 @@ private fun defaultTabs(columns: Long): MutableArray<Boolean> = MutableArray<Boo
     defaultTab(column)
 }
 
-private fun clusterWidth(text: String): Long {
-    var width = 0L
-    var emoji = false
-    var regional = 0
-    for (character in text) {
-        val scalar = unicodeScalarWidth(character).toLong()
-        if (scalar > width) width = scalar
-        if (character.code == 0xfe0f || character.code == 0x20e3) emoji = true
-        if (character.code >= 0x1f1e6 && character.code <= 0x1f1ff) regional += 1
-    }
-    return if (emoji || regional == 2) 2L else clamp(width, 0L, 2L)
-}
+internal fun clusterWidth(text: String, ambiguous: TerminalAmbiguousWidth): Long = clamp(
+    unicodeTextWidth(text, ambiguousAsWide = ambiguous == TerminalAmbiguousWidth.Wide),
+    -1L,
+    2L
+)

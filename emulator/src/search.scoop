@@ -1,0 +1,325 @@
+package scoop.terminal.emulator
+
+import scoop.charset.unicodeCasefold
+
+public struct TerminalSearchOptions(
+    val caseSensitive: Boolean = true,
+    val maxQueryBytes: Long = 65536L,
+    val maxMatches: Long = 100000L
+)
+
+public enum TerminalSearchStatus {
+    Searching, Complete, Cancelled, LimitReached
+}
+
+public enum TerminalSearchMatchStatus {
+    Current, Stale, Unavailable
+}
+
+public struct TerminalSearchCursor(
+    val row: Long,
+    val column: Long,
+    val utf8Offset: Long,
+    val foldedOffset: Long
+)
+
+/** UTF-8 offsets are relative to sourceStart in the retained logical line of the source snapshot. */
+public struct TerminalSearchMatch(
+    val generation: Long,
+    val bufferEpoch: Long,
+    val logicalLineId: Long,
+    val textVersion: Long,
+    val sourceStart: TerminalAnchor,
+    val utf8Start: Long,
+    val utf8End: Long,
+    val range: TerminalRange
+) {
+    public fun status(reading: TerminalReading): TerminalSearchMatchStatus {
+        if (reading.bufferEpoch != bufferEpoch) return TerminalSearchMatchStatus.Unavailable
+        val first = reading.resolve(range.start) ?: return TerminalSearchMatchStatus.Unavailable
+        val last = reading.resolve(range.end) ?: return TerminalSearchMatchStatus.Unavailable
+        val line = reading.lines(first.row, 1L)[0L]
+        if (line.logicalLineId != logicalLineId || line.textVersion != textVersion)
+            return TerminalSearchMatchStatus.Stale
+        if (reading.lines(last.row, 1L)[0L].textVersion != textVersion)
+            return TerminalSearchMatchStatus.Stale
+        return TerminalSearchMatchStatus.Current
+    }
+}
+
+public struct TerminalSearchPage(
+    val matches: Array<TerminalSearchMatch>,
+    val status: TerminalSearchStatus,
+    val nextCursor: TerminalSearchCursor?,
+    val scanned: Long,
+    val generation: Long,
+    val textRevision: Long,
+    val presentationVersion: Long
+)
+
+private struct SearchByte(
+    val sourceStart: TerminalAnchor,
+    val start: Long,
+    val end: Long,
+    val display: TerminalRange,
+    val version: Long
+)
+
+/** Streaming literal KMP search. A page bounds both emitted matches and scanning work, including empty rows. */
+public class TerminalSearch internal constructor(
+    snapshot: TerminalSnapshot,
+    public val query: String,
+    private val options: TerminalSearchOptions,
+    private var pattern: Array<Byte>,
+    public val generation: Long,
+    private val budget: SnapshotBudget,
+    private val workingBytes: Long
+) : Closeable {
+    private var snapshot: TerminalSnapshot? = Some(snapshot)
+    public val textRevision: Long = snapshot.textRevision
+    public val presentationVersion: Long = snapshot.presentationVersion
+    private val epoch = snapshot.bufferEpoch
+    private val totalRows = snapshot.historySize + snapshot.rows
+    private var failure = searchFailure(pattern)
+    private var ring = MutableArray<SearchByte?>(pattern.size) { None }
+    private var currentStatus = TerminalSearchStatus.Searching
+    public val status: TerminalSearchStatus get() = currentStatus
+    private var row = 0L
+    private var column = 0L
+    private var line: TerminalLine? = None
+    private var rowEnd = 0L
+    private var trimming = false
+    private var logicalColumn = 0L
+    private var logicalId = -1L
+    private var logicalStart: TerminalAnchor? = None
+    private var originalOffset = 0L
+    private var hardBreak = true
+    private var characters: Iterator<Char>? = None
+    private var display: TerminalRange? = None
+    private var folded: Array<Byte> = []
+    private var foldedOffset = 0L
+    private var sourceByte: SearchByte? = None
+    private var matched = 0L
+    private var processed = 0L
+    private var emitted = 0L
+    private var previous: TerminalSearchMatch? = None
+
+    init {
+        if (pattern.size == 0L)
+            finish(TerminalSearchStatus.Complete)
+        else if (options.maxMatches == 0L) finish(TerminalSearchStatus.LimitReached)
+    }
+
+    /** scanBudget counts folded UTF-8 bytes and bounded row/cell/scalar preparation steps. */
+    public fun nextPage(maxMatches: Long = 128L, scanBudget: Long = 65536L): TerminalSearchPage {
+        if (maxMatches <= 0L || scanBudget <= 0L)
+            throw IllegalArgumentException(Some("search page limits must be positive"))
+        val found = ArrayList<TerminalSearchMatch>()
+        var scanned = 0L
+        while (
+            currentStatus ==
+                TerminalSearchStatus.Searching &&
+                found.size <
+                maxMatches &&
+                scanned <
+                scanBudget
+        ) {
+            scanned += 1L
+            if (foldedOffset < folded.size) {
+                val byte = folded[foldedOffset]
+                foldedOffset += 1L
+                val mapping = sourceByte!!
+                ring[processed % pattern.size] = Some(mapping)
+                processed += 1L
+                while (matched > 0L && pattern[matched] != byte)
+                    matched = failure[matched - 1L]
+                if (pattern[matched] == byte) matched += 1L
+                if (matched == pattern.size) {
+                    val first = ring[(processed - pattern.size) % pattern.size]!!
+                    val match = TerminalSearchMatch(
+                        generation, epoch, logicalId, mapping.version,
+                        first.sourceStart, first.start, mapping.end, TerminalRange(
+                            first.display.start,
+                            mapping.display.end
+                        )
+                    )
+                    matched = failure[matched - 1L]
+                    // A single scalar such as ß can yield several identical original-text matches.
+                    if (previous != Some(match)) {
+                        found.add(match)
+                        previous = Some(match)
+                        emitted += 1L
+                        if (emitted == options.maxMatches) finish(TerminalSearchStatus.LimitReached)
+                    }
+                }
+                continue
+            }
+            if (!prepare()) finish(TerminalSearchStatus.Complete)
+        }
+        val cursor = if (currentStatus == TerminalSearchStatus.Searching)
+            Some(TerminalSearchCursor(row, column, originalOffset, foldedOffset))
+        else
+            None
+        return TerminalSearchPage(
+            found.toArray(),
+            currentStatus,
+            cursor,
+            scanned,
+            generation,
+            textRevision,
+            presentationVersion
+        )
+    }
+
+    /** Each call prepares at most one scalar, cell or row, including very long graphemes. */
+    private fun prepare(): Boolean {
+        folded = []
+        foldedOffset = 0L
+        if (trimming) {
+            val current = line!!
+            if (rowEnd >
+                0L &&
+                current.cells[rowEnd - 1L].text ==
+                "" &&
+                current.cells[rowEnd - 1L].width ==
+                1L
+            )
+                rowEnd -= 1L
+            else
+                trimming = false
+            return true
+        }
+        when (val iterator = characters) {
+            case Some(val value) ->
+                when (val next = value.next()) {
+                    case Some(val character) -> {
+                        val text = character.toString()
+                        val start = originalOffset
+                        originalOffset += text.byteLength
+                        sourceByte = Some(
+                            SearchByte(
+                                logicalStart!!,
+                                start,
+                                originalOffset,
+                                display!!,
+                                line!!.textVersion
+                            )
+                        )
+                        folded = if (options.caseSensitive)
+                            text.toByteArray()
+                        else
+                            foldedScalar(character)
+                        return true
+                    }
+
+                    case None -> {}
+                }
+            case None -> {}
+        }
+        characters = None
+        when (val current = line) {
+            case Some(val value) -> {
+                if (column < rowEnd) {
+                    val cell = value.cells[column]
+                    val width = if (cell.width > 0L) cell.width else 1L
+                    if (cell.width > 0L) {
+                        display = Some(
+                            TerminalRange(
+                                TerminalAnchor(
+                                    epoch,
+                                    value.logicalLineId,
+                                    logicalColumn,
+                                    TerminalAffinity.After
+                                ),
+                                TerminalAnchor(
+                                    epoch,
+                                    value.logicalLineId,
+                                    logicalColumn + cell.logicalAdvance,
+                                    TerminalAffinity.Before
+                                )
+                            )
+                        )
+                        characters = Some((if (cell.text == "") " " else cell.text).iterator())
+                        logicalColumn += cell.logicalAdvance
+                    }
+                    column += width
+                    return true
+                }
+                hardBreak = !value.softWrapped
+                row += 1L
+                line = None
+                return true
+            }
+
+            case None -> {}
+        }
+        if (row >= totalRows) return false
+        val current = snapshot!!.lines(row, 1L)[0L]
+        line = Some(current)
+        column = 0L
+        rowEnd = current.usedColumns
+        trimming = true
+        logicalColumn = current.logicalOffset
+        if (hardBreak || logicalId != current.logicalLineId) {
+            logicalId = current.logicalLineId
+            logicalStart = Some(TerminalAnchor(epoch, logicalId, current.logicalOffset))
+            originalOffset = 0L
+            matched = 0L
+            previous = None
+        }
+        return true
+    }
+
+    public fun cancel() {
+        if (currentStatus == TerminalSearchStatus.Searching) finish(TerminalSearchStatus.Cancelled)
+    }
+    public override fun close() {
+        cancel()
+    }
+    private fun finish(status: TerminalSearchStatus) {
+        currentStatus = status
+        val reading = snapshot ?: return
+        snapshot = None
+        reading.close()
+        budget.releaseWorking(workingBytes)
+        line = None
+        characters = None
+        folded = []
+        sourceByte = None
+        ring = MutableArray<SearchByte?>(0L) { None }
+        failure = []
+        pattern = []
+    }
+}
+
+internal fun searchPattern(query: String, options: TerminalSearchOptions): Array<Byte> {
+    if (options.maxQueryBytes < 0L || options.maxMatches < 0L)
+        throw IllegalArgumentException(Some("negative terminal search limit"))
+    if (query.byteLength > options.maxQueryBytes)
+        throw IllegalArgumentException(Some("terminal search query limit exceeded"))
+    val pattern = (if (options.caseSensitive) query else unicodeCasefold(query)).toByteArray()
+    if (pattern.size > options.maxQueryBytes)
+        throw IllegalArgumentException(Some("folded terminal search query limit exceeded"))
+    return pattern
+}
+
+private fun searchFailure(pattern: Array<Byte>): Array<Long> {
+    val failure = MutableArray<Long>(pattern.size) { 0L }
+    var matched = 0L
+    for (index in 1L..<pattern.size) {
+        while (matched > 0L && pattern[matched] != pattern[index])
+            matched = failure[matched - 1L]
+        if (pattern[matched] == pattern[index]) matched += 1L
+        failure[index] = matched
+    }
+    return failure.toArray()
+}
+
+private fun foldedScalar(character: Char): Array<Byte> {
+    if (character.code < 128)
+        return [
+            (if (character >= 'A' && character <= 'Z') character.code + 32 else character.code)
+                .toByte()
+        ]
+    return unicodeCasefold(character.toString()).toByteArray()
+}

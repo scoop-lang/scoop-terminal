@@ -1,16 +1,23 @@
 package scoop.terminal.emulator
 
 internal class TerminalModes {
+    var horizontalMargins = false
     var autoWrap = true
     var insert = false
     var lineFeedNewLine = false
     var applicationCursor = false
     var applicationKeypad = false
     var cursorVisible = true
+    var cursorShape = TerminalCursorShape.Block
+    var cursorBlink = true
     var mouseTracking = 0
     var sgrMouse = false
+    var pixelMouse = false
     var focusEvents = false
     var bracketedPaste = false
+    var sixelDisplay = false
+    var sixelPrivateColors = true
+    var sixelMovesRight = false
 }
 
 internal fun lineCharacter(character: Char): Char = when (character) {

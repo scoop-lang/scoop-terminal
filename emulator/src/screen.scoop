@@ -1,9 +1,14 @@
 package scoop.terminal.emulator
 
-import scoop.collections.ArrayDeque
+import scoop.collections.HashMap
 
-internal class ScreenChanges {
+internal class ScreenChanges(
+    val links: TerminalLinkStore = TerminalLinkStore(),
+    val tracking: TerminalTracking = TerminalTracking()
+) {
     var pending = false
+    var textPending = false
+    var images: TerminalImageStore? = None
 }
 
 internal class RowIds {
@@ -23,19 +28,26 @@ private struct SavedPosition(
     val style: TerminalStyle
 )
 
+private struct ReflowCursor(val anchor: TerminalAnchor, val trailing: Long)
+
 internal class Screen(
     var columns: Long,
     rows: Long,
     private val historyLimit: Long,
     private val ids: RowIds,
-    private val changes: ScreenChanges
+    private val changes: ScreenChanges,
+    private val reflow: Boolean = false
 ) {
     private val cells = ArrayList<ScreenRow>()
-    private val history = ArrayDeque<ScreenRow>()
+    private var epoch = ids.take()
+    val bufferEpoch: Long get() = epoch
+    private val history = LineHistory()
     var row = 0L
     var column = 0L
     var top = 0L
     var bottom = rows - 1L
+    var left = 0L
+    var right = columns - 1L
     var pendingWrap = false
     var origin = false
     private var saved = SavedPosition(0L, 0L, false, false, TerminalStyle())
@@ -48,6 +60,10 @@ internal class Screen(
     val rows: Long get() = cells.size
     val historySize: Long get() = history.size
     val current: ScreenRow get() = cells[row]
+    val insideHorizontalMargins: Boolean get() = column >= left && column <= right
+    val insideMargins: Boolean get() = insideHorizontalMargins && row >= top && row <= bottom
+    val writeLeft: Long get() = if (insideHorizontalMargins) left else 0L
+    val writeRight: Long get() = if (insideHorizontalMargins) right else columns - 1L
 
     private fun blank(style: TerminalStyle): ScreenRow = ScreenRow(
         ids.take(),
@@ -56,50 +72,128 @@ internal class Screen(
         changes
     )
 
-    fun lines(start: Long, count: Long): Array<TerminalLine> {
-        val end = start + count
-        val snapshot = ArrayList<TerminalLine>()
-        var index = 0L
-        if (start < history.size) {
-            for (line in history) {
-                if (index >= end) break
-                if (index >= start) snapshot.add(line.snapshot())
-                index += 1L
-            }
-        }
-        index = if (start > history.size) start else history.size
-        while (index < end) {
-            snapshot.add(cells[index - history.size].snapshot())
-            index += 1L
-        }
-        return snapshot.toArray()
+    fun lines(start: Long, count: Long): Array<TerminalLine> = Array<TerminalLine>(count) {
+        offset
+        ->
+        val index = start + offset
+        if (index < history.size)
+            history[index].snapshot()
+        else
+            cells[index - history.size].snapshot()
     }
 
     fun findLine(id: Long): Long? {
-        var index = 0L
-        for (line in history) {
-            if (line.id == id) return Some(index)
-            index += 1L
+        when (val index = history.find(id)) {
+            case Some(_) -> return index
+            case None -> {}
         }
-        for (line in cells) {
-            if (line.id == id) return Some(index)
-            index += 1L
+        for (index in 0L..<cells.size) {
+            if (cells[index].id == id) return Some(history.size + index)
         }
         return None
     }
 
+    private fun lineAt(index: Long): ScreenRow = if (index < history.size)
+        history[index]
+    else
+        cells[index - history.size]
+
+    fun rowAt(index: Long): ScreenRow = lineAt(index)
+
+    fun anchorAt(index: Long, column: Long, affinity: TerminalAffinity): TerminalAnchor? {
+        if (index < 0L || index >= history.size + rows) return None
+        return anchorInLine(bufferEpoch, lineAt(index).snapshot(), column, affinity)
+    }
+
+    fun resolve(anchor: TerminalAnchor): TerminalPosition? {
+        if (anchor.bufferEpoch != bufferEpoch || anchor.cellOffset < 0L) return None
+        val historySpan = history.findLogical(anchor.logicalLineId)
+        var first = historySpan?.first ?: -1L
+        var last = historySpan?.last ?: -1L
+        for (index in 0L..<rows) {
+            if (cells[index].logical.id == anchor.logicalLineId) {
+                if (first < 0L) first = history.size + index
+                last = history.size + index
+            }
+        }
+        if (first < 0L) return None
+        return resolveInLines(
+            anchor,
+            LogicalSpan(first, last),
+            { index -> lineAt(index).snapshot() }
+        )
+    }
+
+    fun snapshot(
+        revision: Long,
+        screenRevision: Long,
+        textRevision: Long,
+        presentationVersion: Long,
+        alternate: Boolean,
+        visible: Boolean,
+        mouseReporting: Boolean,
+        cursorShape: TerminalCursorShape,
+        cursorBlink: Boolean,
+        pixels: TerminalPixelSize?,
+        colors: TerminalColors,
+        metadata: TerminalMetadata,
+        commands: CommandReading,
+        ambiguousWidth: TerminalAmbiguousWidth,
+        images: TerminalImages = TerminalImages.Empty
+    ): TerminalReadingData = TerminalReadingData(
+        columns, bufferEpoch, alternate, revision, screenRevision, textRevision,
+        presentationVersion,
+        TerminalCursor(row, column, visible, cursorShape, cursorBlink), mouseReporting, history
+            .snapshot(),
+        Array<TerminalLine>(rows) { index -> cells[index].snapshot() }, pixels, colors, metadata,
+        changes.links.snapshot(), changes.tracking.snapshot(), commands, ambiguousWidth, images
+    )
+
+    fun reconcileLogicalLines() {
+        var previous: ScreenRow? = if (history.size == 0L)
+            None
+        else
+            Some(history[history.size - 1L])
+        for (line in cells) {
+            when (previous) {
+                case Some(val before) -> {
+                    if (before.softWrapped)
+                        line.rebase(before.logical, before.logicalOffset + before.logicalLength)
+                    else if (line.logical === before.logical || line.logicalOffset != 0L)
+                        line.rebase(LogicalLine(ids.take()), 0L)
+                }
+
+                case None -> {}
+            }
+            previous = Some(line)
+        }
+    }
+
     fun position(targetRow: Long, targetColumn: Long) {
-        row = if (origin) clamp(top + targetRow, top, bottom) else clamp(targetRow, 0L, rows - 1L)
-        column = clamp(targetColumn, 0L, columns - 1L)
+        positionRow(targetRow)
+        positionColumn(targetColumn)
+    }
+
+    fun positionRow(target: Long) {
+        row = if (origin) clamp(top + target, top, bottom) else clamp(target, 0L, rows - 1L)
+        pendingWrap = false
+    }
+
+    fun positionColumn(target: Long) {
+        column = if (origin) clamp(left + target, left, right) else clamp(target, 0L, columns - 1L)
         pendingWrap = false
     }
 
     fun move(rows: Long, columns: Long) {
         val inside = row >= top && row <= bottom
-        val low = if (inside) top else 0L
-        val high = if (inside) bottom else this.rows - 1L
-        row = clamp(row + rows, low, high)
-        moveColumn(column + columns)
+        row = clamp(row + rows, if (inside) top else 0L, if (inside) bottom else this.rows - 1L)
+        val horizontal = insideHorizontalMargins
+        column = clamp(
+            column + columns,
+            if (horizontal) left else 0L,
+            if (horizontal) right else this.columns - 1L
+        )
+        pendingWrap = false
     }
 
     fun moveColumn(target: Long) {
@@ -107,14 +201,36 @@ internal class Screen(
         pendingWrap = false
     }
 
-    fun lineFeed(style: TerminalStyle) {
+    fun carriageReturn() {
+        moveColumn(if (column >= left) left else 0L)
+    }
+
+    fun shiftColumns(count: Long, insert: Boolean, style: TerminalStyle) {
+        if (insideHorizontalMargins) current.shift(column, count, insert, style, right + 1L)
         pendingWrap = false
-        if (row == bottom) scrollUp(top, bottom, 1L, style) else if (row + 1L < rows) row += 1L
+    }
+
+    fun lineFeed(style: TerminalStyle, wrapped: Boolean = false) {
+        val before = current
+        val joins = wrapped && left == 0L && right == columns - 1L
+        val followers = if (joins) changes.tracking.takeWrap(before) else []
+        before.softWrapped = joins
+        pendingWrap = false
+        if (row == bottom && insideHorizontalMargins)
+            scrollUp(top, bottom, 1L, style)
+        else if (row + 1L < rows) row += 1L
+        if (joins && before !== current)
+            current.rebase(before.logical, before.logicalOffset + before.logicalLength)
+        else if (!joins && before !== current && current.logical === before.logical)
+            current.rebase(LogicalLine(ids.take()), 0L)
+        changes.tracking.finishWrap(followers, current)
     }
 
     fun reverseIndex(style: TerminalStyle) {
         pendingWrap = false
-        if (row == top) scrollDown(top, bottom, 1L, style) else if (row > 0L) row -= 1L
+        if (row == top && insideHorizontalMargins)
+            scrollDown(top, bottom, 1L, style)
+        else if (row > 0L) row -= 1L
     }
 
     fun setMargins(first: Long, last: Long) {
@@ -122,6 +238,27 @@ internal class Screen(
         top = first
         bottom = last
         position(0L, 0L)
+    }
+
+    fun setHorizontalMargins(first: Long, last: Long) {
+        if (first < 0L || last >= columns || first >= last) return
+        left = first
+        right = last
+        position(0L, 0L)
+    }
+
+    fun resetHorizontalMargins(clearWrap: Boolean = true) {
+        left = 0L
+        right = columns - 1L
+        if (clearWrap) pendingWrap = false
+    }
+
+    fun softReset() {
+        origin = false
+        top = 0L
+        bottom = rows - 1L
+        resetHorizontalMargins()
+        saved = SavedPosition(0L, 0L, false, false, TerminalStyle())
     }
 
     fun save(style: TerminalStyle) {
@@ -132,12 +269,13 @@ internal class Screen(
         origin = saved.origin
         row = clamp(saved.row, 0L, rows - 1L)
         column = clamp(saved.column, 0L, columns - 1L)
-        pendingWrap = saved.pendingWrap && column == columns - 1L
+        pendingWrap = saved.pendingWrap && column == writeRight
         return saved.style
     }
 
     fun eraseDisplay(mode: Int, style: TerminalStyle) {
         pendingWrap = false
+        changes.images?.eraseDisplay(this, mode)
         when (mode) {
             case 0 -> {
                 current.erase(column, columns, style)
@@ -158,6 +296,7 @@ internal class Screen(
                 if (history.size != 0L) {
                     history.clear()
                     changes.pending = true
+                    changes.textPending = true
                 }
             case _ -> {}
         }
@@ -180,34 +319,150 @@ internal class Screen(
         style: TerminalStyle,
         record: Boolean = true
     ) {
+        val images = if ((changes.images?.placementCount ?: 0L) == 0L) None else changes.images
+        val moved = images
+            ?.beforeScroll(
+                this, first, last, count, true,
+                record && first == 0L && last == rows - 1L && left == 0L && right == columns - 1L
+            )
+        images?.suspendCells()
+        try {
+            scrollUpGrid(first, last, count, style, record)
+        } finally {
+            images?.resumeCells()
+        }
+        when (moved) {
+            case Some(val value) -> images!!.afterScroll(this, value)
+            case None -> {}
+        }
+    }
+
+    private fun scrollUpGrid(
+        first: Long,
+        last: Long,
+        count: Long,
+        style: TerminalStyle,
+        record: Boolean
+    ) {
+        pendingWrap = false
+        if (left != 0L || right != columns - 1L) {
+            scrollRectangle(first, last, count, true, style)
+            return
+        }
+        val toHistory = record && first == 0L && last == rows - 1L
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
             val removed = cells.removeAt(first)
-            if (record && first == 0L) remember(removed)
+            if (toHistory) remember(removed) else removed.release()
             cells.add(last, blank(style))
             changes.pending = true
+            changes.textPending = true
         }
     }
 
     fun scrollDown(first: Long, last: Long, count: Long, style: TerminalStyle) {
+        val images = if ((changes.images?.placementCount ?: 0L) == 0L) None else changes.images
+        val moved = images?.beforeScroll(this, first, last, count, false, false)
+        images?.suspendCells()
+        try {
+            scrollDownGrid(first, last, count, style)
+        } finally {
+            images?.resumeCells()
+        }
+        when (moved) {
+            case Some(val value) -> images!!.afterScroll(this, value)
+            case None -> {}
+        }
+    }
+
+    private fun scrollDownGrid(first: Long, last: Long, count: Long, style: TerminalStyle) {
+        pendingWrap = false
+        if (left != 0L || right != columns - 1L) {
+            scrollRectangle(first, last, count, false, style)
+            return
+        }
         for (index in 0L..<clamp(count, 0L, last - first + 1L)) {
-            cells.removeAt(last)
+            cells.removeAt(last).release()
             cells.add(first, blank(style))
             changes.pending = true
+            changes.textPending = true
+        }
+    }
+
+    private fun scrollRectangle(
+        first: Long,
+        last: Long,
+        count: Long,
+        up: Boolean,
+        style: TerminalStyle
+    ) {
+        val height = last - first + 1L
+        val amount = clamp(count, 0L, height)
+        if (amount == 0L) return
+        val source = Array<TerminalLine>(height) { index -> cells[first + index].snapshot() }
+        for (step in 0L..<height) {
+            val index = if (up) step else height - 1L - step
+            val from = index + if (up) amount else -amount
+            cells[first + index]
+                .replaceRange(
+                    if (from >= 0L && from < height) Some(source[from]) else None,
+                    left,
+                    right + 1L,
+                    style
+                )
         }
     }
 
     private fun remember(line: ScreenRow) {
         if (historyLimit != 0L) {
-            if (history.size == historyLimit) history.removeFirst()
+            if (history.size == historyLimit) {
+                history.removeFirst().release(TerminalInvalidation.Evicted)
+                changes.textPending = true
+            }
             history.addLast(line)
+        } else {
+            if (line.usedColumns > 0L) changes.textPending = true
+            line.release(TerminalInvalidation.Evicted)
         }
     }
 
     fun resize(width: Long, height: Long, restoreHistory: Boolean, style: TerminalStyle) {
+        changes.images?.suspendCells()
+        try {
+            resizeGrid(width, height, restoreHistory, style)
+        } finally {
+            changes.images?.resumeCells()
+        }
+        changes.images?.afterResize(this)
+    }
+
+    private fun resizeGrid(
+        width: Long,
+        height: Long,
+        restoreHistory: Boolean,
+        style: TerminalStyle
+    ) {
         val previousWidth = columns
+        if (reflow && previousWidth != width) {
+            reflowResize(width, height, restoreHistory, style)
+            return
+        }
         columns = width
-        while (cells.size > height && cells.size > row + 1L)
-            cells.removeAt(cells.size - 1L)
+        resetHorizontalMargins(previousWidth != width || left != 0L || right != width - 1L)
+        while (
+            cells.size >
+                height &&
+                cells.size >
+                row +
+                1L &&
+                cells.size >
+                saved.row +
+                1L &&
+                cells[cells.size - 1L].usedColumns ==
+                0L &&
+                cells[cells.size - 1L].tracked.size ==
+                0L
+        )
+            cells.removeAt(cells.size - 1L).release()
         while (cells.size > height) {
             remember(cells.removeAt(0L))
             row -= 1L
@@ -228,9 +483,117 @@ internal class Screen(
             top = 0L
             bottom = height - 1L
         }
+        row = clamp(row, 0L, height - 1L)
         column = clamp(column, 0L, width - 1L)
+        reconcileLogicalLines()
         if (previousWidth != width) pendingWrap = false
         changes.pending = true
+    }
+
+    fun remeasure(ambiguous: TerminalAmbiguousWidth, style: TerminalStyle) {
+        changes.images?.suspendCells()
+        try {
+            reflowResize(columns, rows, true, style, Some(ambiguous))
+        } finally {
+            changes.images?.resumeCells()
+        }
+        changes.images?.afterResize(this)
+    }
+
+    private fun reflowResize(
+        width: Long,
+        height: Long,
+        restoreHistory: Boolean,
+        style: TerminalStyle,
+        ambiguous: TerminalAmbiguousWidth? = None
+    ) {
+        reconcileLogicalLines()
+        val previousTextPending = changes.textPending
+        val oldRows = rows
+        val active = capture(row, column, pendingWrap)
+        val stored = capture(
+            clamp(saved.row, 0L, rows - 1L),
+            clamp(saved.column, 0L, columns - 1L),
+            saved.pendingWrap
+        )
+        val topAnchor = capture(0L, 0L, false)
+        val required = HashMap<Long, Long>()
+        required[current.id] = column + 1L
+        val savedLine = cells[clamp(saved.row, 0L, rows - 1L)]
+        val savedColumns = clamp(saved.column + 1L, 1L, columns)
+        if (savedColumns > (required[savedLine.id] ?: 0L)) required[savedLine.id] = savedColumns
+        var end = history.size + rows
+        while (
+            end >
+                history.size +
+                row +
+                1L &&
+                end >
+                history.size +
+                saved.row +
+                1L &&
+                lineAt(end - 1L).usedColumns ==
+                0L &&
+                lineAt(end - 1L).tracked.size ==
+                0L
+        )
+            end -= 1L
+        val source = Array<ScreenRow>(end) { index -> lineAt(index) }
+        for (line in source) {
+            val tracked = changes.tracking.required(line)
+            if (tracked > (required[line.id] ?: 0L)) required[line.id] = tracked
+        }
+        val packed = reflowLines(source, width, required, ids, changes, ambiguous)
+        changes.tracking.reflow(source, packed)
+        val cursorPosition = resolveReflow(packed, active)
+        val savedPosition = resolveReflow(packed, stored)
+        var start = if (packed.size > height) packed.size - height else 0L
+        if (!restoreHistory && height > oldRows) {
+            val oldTop = resolveReflow(packed, topAnchor).row
+            if (oldTop > start) start = oldTop
+        }
+        columns = width
+        resetHorizontalMargins()
+        history.clear()
+        for (line in cells)
+            line.release()
+        cells.clear()
+        val retained = if (start > historyLimit) start - historyLimit else 0L
+        for (index in 0L..<retained)
+            packed[index].release(TerminalInvalidation.Evicted)
+        changes.textPending = previousTextPending || retained > 0L
+        for (index in retained..<start)
+            history.addLast(packed[index])
+        for (index in start..<packed.size)
+            cells.add(packed[index])
+        while (cells.size < height)
+            cells.add(blank(style))
+        row = clamp(cursorPosition.row - start, 0L, height - 1L)
+        column = clamp(cursorPosition.column, 0L, width - 1L)
+        pendingWrap = active.anchor.affinity ==
+            TerminalAffinity.Before &&
+            cursorPosition.column ==
+            width
+        saved = SavedPosition(
+            savedPosition.row - start, clamp(savedPosition.column, 0L, width - 1L),
+            stored.anchor.affinity == TerminalAffinity.Before && savedPosition.column == width,
+            saved.origin, saved.style
+        )
+        top = 0L
+        bottom = height - 1L
+        changes.pending = true
+    }
+
+    private fun capture(row: Long, column: Long, wrap: Boolean): ReflowCursor {
+        val line = cells[row]
+        val trailing = if (!wrap && line[column].width == 0L) 1L else 0L
+        return ReflowCursor(
+            TerminalAnchor(
+                bufferEpoch, line.logical.id,
+                line.logicalOffset + line.logicalColumn(column - trailing + if (wrap) 1L else 0L),
+                if (wrap) TerminalAffinity.Before else TerminalAffinity.After
+            ), trailing
+        )
     }
 
     private fun shiftSaved(delta: Long) {
@@ -244,14 +607,48 @@ internal class Screen(
     }
 
     fun reset(style: TerminalStyle) {
-        for (index in 0L..<rows)
+        changes.images?.reset(epoch)
+        epoch = ids.take()
+        changes.textPending = true
+        for (index in 0L..<rows) {
+            cells[index].release()
             cells[index] = blank(style)
+        }
         history.clear()
         top = 0L
         bottom = rows - 1L
         origin = false
+        resetHorizontalMargins()
         position(0L, 0L)
         save(style)
         changes.pending = true
     }
+}
+
+private fun resolveReflow(lines: Array<ScreenRow>, cursor: ReflowCursor): TerminalPosition {
+    val anchor = cursor.anchor
+    var candidate = TerminalPosition(0L, 0L)
+    for (index in 0L..<lines.size) {
+        val line = lines[index]
+        if (line.logical.id != anchor.logicalLineId) continue
+        val relative = anchor.cellOffset - line.logicalOffset
+        if (relative < 0L) continue
+        candidate = TerminalPosition(index, line.visualColumn(relative))
+        if (relative <
+            line.logicalLength ||
+            (relative == line.logicalLength && anchor.affinity == TerminalAffinity.Before)
+        )
+            return reflowCursorTail(lines, candidate, cursor.trailing)
+    }
+    return reflowCursorTail(lines, candidate, cursor.trailing)
+}
+
+private fun reflowCursorTail(
+    lines: Array<ScreenRow>,
+    position: TerminalPosition,
+    trailing: Long
+): TerminalPosition {
+    if (trailing == 0L || position.column >= lines[position.row].columns) return position
+    val width = lines[position.row][position.column].width
+    return position.{column: position.column + if (width > 1L) trailing else 0L}
 }

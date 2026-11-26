@@ -1,0 +1,143 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalSearchHighlightTest {
+    @Test fun overlappingHitsPaintOnceAndActiveHitHasItsOwnColor() {
+        val terminal = Terminal(8L, 2L, colors = TerminalColors(background = TerminalRgb(0, 0, 0)))
+        terminal.feed("\u001b[8maaaa中e\u0301".toByteArray())
+        val matches = searchMatches(terminal, "aa")
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            val reading = terminal.reading
+            val geometry = testGrid(reading, 0L)
+            controller.setSearchHighlights(matches, Some(matches[1L]))
+            val highlights = controller.visibleHighlights(geometry)
+            assertEquals(3L, highlights.size)
+            assertEquals(Rect(0.0, 0.0, 10.0, 16.0), highlights[0L].bounds)
+            assertEquals(Rect(30.0, 0.0, 10.0, 16.0), highlights[1L].bounds)
+            assertEquals(Rect(10.0, 0.0, 20.0, 16.0), highlights[2L].bounds)
+            assertTrue(highlights[2L].active)
+            FontCollection()
+                .use { fonts ->
+                    val appearance = TerminalAppearance(
+                        searchHighlight = Color(1.0, 0.0, 0.0, 0.5),
+                        activeSearchHighlight = Color(0.0, 1.0, 0.0, 0.5)
+                    )
+                    val cache = TerminalGlyphCache(fonts, appearance)
+                    try {
+                        TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache)
+                            .use { frame ->
+                                frame.shape([], "")
+                                RasterSurface(80, 32)
+                                    .use { surface ->
+                                        surface
+                                            .draw { canvas ->
+                                                frame.drawScreen(canvas);
+                                                frame.drawSearchHighlights(canvas, highlights)
+                                            }
+                                        val pixels = surface.readPixels()
+                                        assertEquals(
+                                            128,
+                                            pixels[(8L * 80L + 5L) * 4L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            0,
+                                            pixels[(8L * 80L + 15L) * 4L].toInt() and 255
+                                        )
+                                        assertEquals(
+                                            128,
+                                            pixels[(8L * 80L + 15L) * 4L + 1L].toInt() and 255
+                                        )
+                                        controller.clearSearchHighlights()
+                                        surface
+                                            .draw { canvas ->
+                                                frame.drawScreen(canvas);
+                                                frame
+                                                    .drawSearchHighlights(
+                                                        canvas,
+                                                        controller.visibleHighlights(geometry)
+                                                    )
+                                            }
+                                        assertEquals(
+                                            0,
+                                            surface.readPixels()[(8L * 80L + 5L) * 4L].toInt() and
+                                                255
+                                        )
+                                    }
+                            }
+                    } finally {
+                        cache.release()
+                    }
+                }
+            assertEquals(reading.screenRevision, terminal.reading.screenRevision)
+            controller.setSearchHighlights(searchMatches(terminal, "\u0301"))
+            assertEquals(
+                Rect(60.0, 0.0, 10.0, 16.0),
+                controller.visibleHighlights(geometry)[0L].bounds
+            )
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun highlightsFollowReflowAndDisappearWhenTheirLogicalTextChanges() {
+        val terminal = Terminal(5L, 3L)
+        terminal.feed("abcd中e".toByteArray())
+        val controller = TerminalViewController(testViewport(terminal))
+        val changes = ArrayList<TerminalViewChange>()
+        controller.onChanged = { value ->
+            changes.add(value);
+            Unit
+        }
+        try {
+            controller.setSearchHighlights(searchMatches(terminal, "d中"))
+            val original = controller.visibleHighlights(testGrid(terminal.reading, 0L))
+            assertEquals(2L, original.size)
+            assertEquals(Rect(30.0, 0.0, 10.0, 16.0), original[0L].bounds)
+            assertEquals(Rect(0.0, 16.0, 20.0, 16.0), original[1L].bounds)
+            terminal.resize(10L, 3L)
+            controller.synchronize()
+            val reflowed = controller.visibleHighlights(testGrid(terminal.reading, 0L))
+            assertEquals(1L, reflowed.size)
+            assertEquals(Rect(30.0, 0.0, 30.0, 16.0), reflowed[0L].bounds)
+            terminal.feed("\rX".toByteArray())
+            controller.synchronize()
+            assertEquals(0L, controller.visibleHighlights(testGrid(terminal.reading, 0L)).size)
+            assertEquals(
+                TerminalViewChange
+                    .SearchContentChanged(
+                        terminal.reading.bufferEpoch,
+                        terminal.reading.textRevision
+                    ),
+                changes[changes.size - 1L]
+            )
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun partiallyEvictedMatchesAreNotDisplayedAsSurvivingFragments() {
+        val terminal = Terminal(3L, 2L, 1L)
+        terminal.feed("abcdefghijk".toByteArray())
+        val matches = searchMatches(terminal, "defg")
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            assertEquals(1L, matches.size)
+            controller.setSearchHighlights(matches)
+            terminal.feed("\r\nN".toByteArray())
+            assertEquals(
+                TerminalSearchMatchStatus.Unavailable,
+                matches[0L].status(terminal.reading)
+            )
+            assertEquals(matches[0L].textVersion, terminal.reading.lines(0L, 1L)[0L].textVersion)
+            assertEquals(0L, controller.visibleHighlights(testGrid(terminal.reading, 0L)).size)
+        } finally {
+            controller.close()
+        }
+    }
+}

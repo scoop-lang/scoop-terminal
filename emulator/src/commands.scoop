@@ -1,0 +1,540 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+import scoop.text.split
+import scoop.text.toIntOrNone
+
+public enum TerminalCommandState {
+    Editing, Running, Finished, Incomplete
+}
+
+public struct TerminalCommandLimits(val maxBlocks: Long = 2048L, val maxBytes: Long = 8388608L)
+
+/** Shell-reported structure, without inferred command text or an invented successful exit status. */
+public struct TerminalCommandBlock(
+    val id: Long,
+    val bufferEpoch: Long,
+    val prompt: TerminalAnchor?,
+    val input: TerminalAnchor?,
+    val output: TerminalAnchor?,
+    val end: TerminalAnchor?,
+    val state: TerminalCommandState,
+    val exitStatus: Int?,
+    val workingDirectory: TerminalWorkingDirectory?,
+    val range: TerminalRange?,
+    val separator: Boolean
+)
+
+internal struct CommandRecord(
+    val id: Long,
+    val epoch: Long,
+    val prompt: Long?,
+    val input: Long?,
+    val output: Long?,
+    val end: Long?,
+    val state: TerminalCommandState,
+    val status: Int?,
+    val directory: TerminalWorkingDirectory?,
+    val separator: Boolean
+)
+
+internal class CommandReading(
+    private val root: SnapshotIndex<CommandRecord>?,
+    private val cursor: TerminalAnchor,
+    val version: Long,
+    val bytes: Long
+) {
+    val count: Long get() = root?.size ?: 0L
+    fun command(id: Long, reading: TerminalReading): TerminalCommandBlock? = when (val value =
+        indexValue(root, id)
+    ) {
+        case Some(val record) -> Some(resolve(record, reading))
+        case None -> None
+    }
+    fun at(index: Long, reading: TerminalReading): TerminalCommandBlock = resolve(
+        indexAt(root, index)!!,
+        reading
+    )
+    private fun resolve(record: CommandRecord, reading: TerminalReading): TerminalCommandBlock {
+        val prompt = point(record.prompt, reading)
+        val input = point(record.input, reading)
+        val output = point(record.output, reading)
+        val end = point(record.end, reading)
+        val start = firstAnchor(prompt, firstAnchor(input, output))
+        val finish = if (record.end ==
+            None &&
+            (
+                record.state ==
+                    TerminalCommandState.Editing ||
+                    record.state ==
+                    TerminalCommandState.Running
+            )
+        )
+            Some(cursor)
+        else
+            end
+        val range = if (start != None && finish != None)
+            Some(TerminalRange(start!!, finish!!))
+        else
+            None
+        return TerminalCommandBlock(
+            record.id, record.epoch, prompt, input, output, end, record.state,
+            record.status, record.directory, range, record.separator
+        )
+    }
+    private fun point(id: Long?, reading: TerminalReading): TerminalAnchor? {
+        val key = id ?: return None
+        return when (val state = reading.trackedRange(key)) {
+            case Some(Available(val range)) -> Some(range.start)
+            case _ -> None
+        }
+    }
+}
+
+private class CommandEntry(val buffer: CommandBuffer, var record: CommandRecord) {
+    val points = MutableArray<TerminalTrackedRange?>(4L) { None }
+    var lastPrompt: TerminalAnchor? = None
+    var dormant = false
+}
+
+private class CommandBuffer(val epoch: Long) {
+    val entries = HashMap<Long, CommandEntry>()
+    var root: SnapshotIndex<CommandRecord>? = None
+    var active: CommandEntry? = None
+    var seenPrompt = false
+    var bytes = 0L
+}
+
+internal class TerminalCommands(
+    private val tracking: TerminalTracking,
+    private val limits: TerminalCommandLimits
+) {
+    private val buffers = HashMap<Long, CommandBuffer>()
+    private val dirty = HashMap<Long, CommandEntry>()
+    private var nextId = 1L
+    private var count = 0L
+    private var version = 0L
+    private var bytes = 0L
+    init {
+        if (limits.maxBlocks < 0L || limits.maxBytes < 0L)
+            throw IllegalArgumentException(Some("negative command block limit"))
+    }
+
+    fun snapshot(screen: Screen): CommandReading {
+        val buffer = buffers[screen.bufferEpoch]
+        val root = when (buffer) {
+            case Some(val value) -> value.root;
+            case None -> None
+        }
+        return CommandReading(
+            root,
+            commandCursor(screen, TerminalAffinity.Before),
+            version,
+            buffer?.bytes ?: 0L
+        )
+    }
+
+    fun osc(terminal: TerminalState, bytes: Array<Byte>) {
+        val text = String.fromUtf8OrNone(bytes) ?: return
+        val parts = text.split(';')
+        val action = parts[0L]
+        if (action != "A" && action != "B" && action != "C" && action != "D") return
+        if (action == "A")
+            for (part in parts) {
+                if (part == "k=s") return
+            }
+        if (limits.maxBlocks == 0L) return
+        terminal.stopCombining()
+        terminal.screen.reconcileLogicalLines()
+        val screen = terminal.screen
+        val buffer = buffers[screen.bufferEpoch] ?: CommandBuffer(screen.bufferEpoch)
+        buffers[screen.bufferEpoch] = buffer
+        val anchor = commandCursor(screen)
+        val status = if (action == "D" && parts.size > 1L) parts[1L].toIntOrNone() else None
+        try {
+            consume(terminal, buffer, action, anchor, status)
+        } catch (_: IllegalStateException) {
+            when (val active = buffer.active) {
+                case Some(val entry) ->
+                    if (entry.record.prompt ==
+                        None &&
+                        entry.record.input ==
+                        None &&
+                        entry.record.output ==
+                        None &&
+                        entry.record.end ==
+                        None
+                    )
+                        remove(entry)
+                case None -> {}
+            }
+            terminal
+                .emit(
+                    TerminalEffect
+                        .Diagnostic("terminal command metadata or tracking limit exceeded")
+                )
+        }
+        terminal.presentationChanged()
+    }
+
+    private fun consume(
+        terminal: TerminalState,
+        buffer: CommandBuffer,
+        action: String,
+        anchor: TerminalAnchor,
+        status: Int?
+    ) {
+        var active = buffer.active
+        if (action == "A") {
+            when (active) {
+                case Some(val entry) -> {
+                    if (entry.record.state ==
+                        TerminalCommandState.Editing &&
+                        entry.lastPrompt ==
+                        Some(anchor)
+                    ) {
+                        mark(terminal, entry, 0L, anchor)
+                        publish(entry)
+                        return
+                    }
+                    if (entry.dormant)
+                        remove(entry)
+                    else if (entry.record.state ==
+                        TerminalCommandState.Editing ||
+                        entry.record.state ==
+                        TerminalCommandState.Running
+                    ) {
+                        mark(terminal, entry, 3L, anchor)
+                        entry.record = entry
+                            .record.{state: TerminalCommandState.Incomplete, status: None}
+                        publish(entry)
+                    }
+                }
+
+                case None -> {}
+            }
+            val entry = create(terminal, buffer, TerminalCommandState.Editing, buffer.seenPrompt)
+            mark(terminal, entry, 0L, anchor)
+            buffer.seenPrompt = true
+            publish(entry)
+            return
+        }
+        when (active) {
+            case Some(val entry) -> {
+                if (action ==
+                    "D" &&
+                    (
+                        entry.record.state ==
+                            TerminalCommandState.Finished ||
+                            entry.record.state ==
+                            TerminalCommandState.Incomplete
+                    ) &&
+                    current(entry.points[3L]) ==
+                    Some(anchor.{affinity: TerminalAffinity.Before}) &&
+                    entry.record.status ==
+                    status
+                )
+                    return
+                if (entry.dormant) {
+                    remove(entry);
+                    active = None
+                } else if (entry.record.state ==
+                    TerminalCommandState.Running &&
+                    (action == "B" || (action == "C" && current(entry.points[2L]) != Some(anchor)))
+                ) {
+                    mark(terminal, entry, 3L, anchor)
+                    entry.record = entry
+                        .record.{state: TerminalCommandState.Incomplete, status: None}
+                    publish(entry)
+                    active = None
+                }
+                if (entry.record.state ==
+                    TerminalCommandState.Finished ||
+                    entry.record.state ==
+                    TerminalCommandState.Incomplete ||
+                    (action == "B" && entry.record.state == TerminalCommandState.Running)
+                ) {
+                    if (action ==
+                        "D" &&
+                        current(entry.points[3L]) ==
+                        Some(anchor.{affinity: TerminalAffinity.Before}) &&
+                        entry.record.status ==
+                        status
+                    )
+                        return
+                    active = None
+                }
+            }
+
+            case None -> {}
+        }
+        val orphan = when (active) {
+            case Some(_) -> false;
+            case None -> true
+        }
+        val entry = active ?:
+            create(
+                terminal,
+                buffer,
+                if (action == "D")
+                    TerminalCommandState.Incomplete
+                else
+                    TerminalCommandState.Editing,
+                false
+            )
+        if (action == "B")
+            mark(terminal, entry, 1L, anchor)
+        else if (action == "C") {
+            mark(terminal, entry, 2L, anchor)
+            entry.record = entry.record.{state: TerminalCommandState.Running}
+        } else {
+            mark(terminal, entry, 3L, anchor)
+            entry.record = entry
+                .record.{
+                    state: if (orphan)
+                        TerminalCommandState.Incomplete
+                    else
+                        TerminalCommandState.Finished,
+                    status: status
+                }
+        }
+        publish(entry)
+    }
+
+    private fun create(
+        terminal: TerminalState,
+        buffer: CommandBuffer,
+        state: TerminalCommandState,
+        separator: Boolean
+    ): CommandEntry {
+        val size = commandBytes(terminal.metadata.workingDirectory)
+        if (size > limits.maxBytes)
+            throw IllegalStateException(Some("command metadata exceeds retention budget"))
+        while (count >= limits.maxBlocks || size > limits.maxBytes - bytes) {
+            var oldest: CommandEntry? = None
+            for (key in buffers.keys) {
+                val candidate = when (val retained = indexAt(buffers[key]!!.root, 0L)) {
+                    case Some(_) -> retained
+                    case None -> buffers[key]!!.active?.record
+                }
+                when (candidate) {
+                    case Some(val record) ->
+                        if (record.id < (oldest?.record?.id ?: Long.MAX_VALUE))
+                            oldest = buffers[key]!!.entries[record.id]
+                    case None -> {}
+                }
+            }
+            val entry = oldest ?:
+                throw IllegalStateException(Some("command retention is inconsistent"))
+            remove(entry)
+        }
+        val id = nextId
+        nextId += 1L
+        val entry = CommandEntry(
+            buffer,
+            CommandRecord(
+                id, buffer.epoch, None, None, None, None,
+                state, None, terminal.metadata.workingDirectory, separator &&
+                    !terminal.alternateScreen
+            )
+        )
+        buffer.entries[id] = entry
+        buffer.active = Some(entry)
+        count += 1L
+        bytes += size
+        buffer.bytes += size
+        publish(entry)
+        return entry
+    }
+
+    private fun mark(
+        terminal: TerminalState,
+        entry: CommandEntry,
+        slot: Long,
+        anchor: TerminalAnchor,
+        source: Screen? = None
+    ) {
+        val boundary = anchor.{
+            affinity: if (slot == 3L) TerminalAffinity.Before else TerminalAffinity.After
+        }
+        if (current(entry.points[slot]) == Some(boundary)) return
+        val point = tracking
+            .registerLive(
+                source ?: terminal.screen, TerminalRange(boundary, boundary), TerminalTrackingKind
+                    .Boundary,
+                terminal.reading.presentationVersion
+            )
+        entry.points[slot]?.close()
+        entry.points[slot] = Some(point)
+        if (slot == 0L) entry.lastPrompt = Some(boundary)
+        tracking
+            .watch(point.id) {
+                if (slot == 0L) {
+                    val current = current(entry.points[0L])
+                    if (current != None) entry.lastPrompt = current
+                }
+                dirty[entry.record.id] = entry
+            }
+        val record = entry.record
+        entry.record = when (slot) {
+            case 0L -> record.{prompt: Some(point.id)}
+            case 1L -> record.{input: Some(point.id)}
+            case 2L -> record.{output: Some(point.id)}
+            case _ -> record.{end: Some(point.id)}
+        }
+    }
+
+    private fun current(handle: TerminalTrackedRange?): TerminalAnchor? {
+        val point = handle ?: return None
+        return when (val state = tracking.current(point.id)) {
+            case Some(Available(val range)) -> Some(range.start)
+            case _ -> None
+        }
+    }
+
+    private fun publish(entry: CommandEntry) {
+        entry.dormant = false
+        entry.buffer.root = Some(indexUpdated(entry.buffer.root, entry.record.id, entry.record))
+        version += 1L
+    }
+
+    private fun remove(entry: CommandEntry) {
+        entry.buffer.entries.remove(entry.record.id)
+        entry.buffer.root = indexRemoved(entry.buffer.root, entry.record.id)
+        if (entry.buffer.active?.record?.id == Some(entry.record.id)) entry.buffer.active = None
+        for (point in entry.points)
+            point?.close()
+        dirty.remove(entry.record.id)
+        count -= 1L
+        val size = commandBytes(entry.record.directory)
+        bytes -= size
+        entry.buffer.bytes -= size
+        version += 1L
+    }
+
+    fun prune() {
+        val pending = ArrayList<CommandEntry>()
+        for (key in dirty.keys)
+            pending.add(dirty[key]!!)
+        dirty.clear()
+        // Boundary migration changes command positions even when the record keeps its handle IDs.
+        if (pending.size > 0L) version += 1L
+        for (entry in pending) {
+            var retained = false
+            for (point in entry.points) {
+                if (current(point) != None) retained = true
+            }
+            if (!retained) {
+                if (entry.record.state ==
+                    TerminalCommandState.Editing &&
+                    entry.lastPrompt !=
+                    None &&
+                    entry.buffer.active?.record?.id ==
+                    Some(entry.record.id)
+                ) {
+                    // One bounded redraw context per buffer survives an EL followed by A in a later feed.
+                    entry.dormant = true
+                    entry.buffer.root = indexRemoved(entry.buffer.root, entry.record.id)
+                    for (index in 0L..<entry.points.size) {
+                        entry.points[index]?.close();
+                        entry.points[index] = None
+                    }
+                    version += 1L
+                } else
+                    remove(entry)
+            }
+        }
+    }
+
+    fun reset(epoch: Long) {
+        val buffer = buffers[epoch] ?: return
+        val entries = ArrayList<CommandEntry>()
+        for (key in buffer.entries.keys)
+            entries.add(buffer.entries[key]!!)
+        for (entry in entries)
+            remove(entry)
+        buffers.remove(epoch)
+    }
+
+    fun finish(terminal: TerminalState, screen: Screen) {
+        val buffer = buffers[screen.bufferEpoch] ?: return
+        val entry = buffer.active ?: return
+        if (entry.record.state ==
+            TerminalCommandState.Finished ||
+            entry.record.state ==
+            TerminalCommandState.Incomplete
+        )
+            return
+        try {
+            mark(terminal, entry, 3L, commandCursor(screen), Some(screen))
+        } catch (_: IllegalStateException) {
+            terminal.emit(TerminalEffect.Diagnostic("terminal command end tracking limit exceeded"))
+        }
+        entry.record = entry.record.{state: TerminalCommandState.Incomplete, status: None}
+        publish(entry)
+        terminal.presentationChanged()
+    }
+}
+
+internal fun commandCursor(
+    screen: Screen,
+    affinity: TerminalAffinity = TerminalAffinity.After
+): TerminalAnchor = screen
+    .anchorAt(
+        screen.historySize + screen.row,
+        screen.column + if (screen.pendingWrap) 1L else 0L, affinity
+    )!!
+
+private fun firstAnchor(left: TerminalAnchor?, right: TerminalAnchor?): TerminalAnchor? = when (left
+) {
+    case Some(_) -> left
+    case None -> right
+}
+
+public fun TerminalReading.commandAt(anchor: TerminalAnchor): TerminalCommandBlock? {
+    val position = resolve(anchor) ?: return None
+    var index = commandCount
+    while (index > 0L) {
+        index -= 1L
+        val block = commands(index, 1L)[0L]
+        val range = block.range ?: continue
+        val start = resolve(range.start) ?: continue
+        val end = resolve(range.end) ?: continue
+        if (positionIn(position, start, end)) return Some(block)
+    }
+    return None
+}
+
+public fun TerminalReading.commandsIn(range: TerminalRange): Array<TerminalCommandBlock> {
+    val start = resolve(range.start) ?: return []
+    val end = resolve(range.end) ?: return []
+    val found = ArrayList<TerminalCommandBlock>()
+    for (index in 0L..<commandCount) {
+        val block = commands(index, 1L)[0L]
+        val span = block.range ?: continue
+        val first = resolve(span.start) ?: continue
+        val last = resolve(span.end) ?: continue
+        if (positionBefore(start, last) && positionBefore(first, end)) found.add(block)
+    }
+    return found.toArray()
+}
+
+private fun positionIn(
+    position: TerminalPosition,
+    start: TerminalPosition,
+    end: TerminalPosition
+): Boolean = !positionBefore(position, start) && (positionBefore(position, end) || start == end)
+
+private fun commandBytes(directory: TerminalWorkingDirectory?): Long = when (directory) {
+    case None -> 1024L
+    case Some(val value) ->
+        1024L +
+            value.uri.byteLength +
+            value.host.byteLength +
+            value.encodedPath.byteLength +
+            value.path.byteLength
+}
+
+private fun positionBefore(a: TerminalPosition, b: TerminalPosition): Boolean = a.row <
+    b.row ||
+    (a.row == b.row && a.column < b.column)

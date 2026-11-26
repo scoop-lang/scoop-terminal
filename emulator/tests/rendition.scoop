@@ -1,0 +1,81 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class RenditionTest {
+    @Test
+    fun underlineKindsAndColorsPreserveIndependentRendition() {
+        val terminal = Terminal(16L, 2L)
+        terminal
+            .feed(
+                "\u001b[1;4:3;58:2::12:34:56mA\u001b[4:0mB\u001b[4:5;59mC\u001b[21mD\u001b[24mE"
+                    .toByteArray()
+            )
+        val cells = terminal.lines(0L, 1L)[0L].cells
+        assertEquals(TerminalUnderline.Curly, cells[0L].style.underlineStyle)
+        assertEquals(TerminalColor.Rgb(12, 34, 56), cells[0L].style.underlineColor)
+        assertTrue(!cells[1L].style.underlined)
+        assertEquals(TerminalColor.Rgb(12, 34, 56), cells[1L].style.underlineColor)
+        assertEquals(TerminalUnderline.Dashed, cells[2L].style.underlineStyle)
+        assertEquals(TerminalColor.Default, cells[2L].style.underlineColor)
+        assertEquals(TerminalUnderline.Double, cells[3L].style.underlineStyle)
+        assertTrue(!cells[4L].style.underlined)
+        assertTrue(cells[4L].style.bold)
+        terminal.feed("\u001b[4:4;58;5;123mF\u001b[0mG".toByteArray())
+        assertEquals(
+            TerminalUnderline.Dotted,
+            terminal.lines(0L, 1L)[0L].cells[5L].style.underlineStyle
+        )
+        assertEquals(
+            TerminalColor.Indexed(123),
+            terminal.lines(0L, 1L)[0L].cells[5L].style.underlineColor
+        )
+        assertEquals(TerminalStyle(), terminal.lines(0L, 1L)[0L].cells[6L].style)
+    }
+
+    @Test
+    fun unsupportedColorSpacesAndMalformedGroupsAreConsumedWithoutChangingInk() {
+        val terminal = Terminal(16L, 2L)
+        terminal
+            .feed(
+                "\u001b[31;4mA\u001b[38:2:7:1:2:3;4:99mB\u001b[38:2:1:2:3;58:5:999mC".toByteArray()
+            )
+        val cells = terminal.lines(0L, 1L)[0L].cells
+        assertEquals(cells[0L].style, cells[1L].style)
+        assertEquals(TerminalColor.Rgb(1, 2, 3), cells[2L].style.foreground)
+        assertEquals(TerminalColor.Default, cells[2L].style.underlineColor)
+        assertTrue(!cells[2L].style.bold)
+    }
+
+    @Test
+    fun cursorStyleIsImmutableInReadingsAndIndependentOfVisibility() {
+        val terminal = Terminal(8L, 3L)
+        val initial = terminal.reading
+        val grid = initial.screenRevision
+        terminal.feed("\u001b[4 q\u001b[?25l".toByteArray())
+        assertEquals(TerminalCursorShape.Underline, terminal.cursor.shape)
+        assertTrue(!terminal.cursor.blink)
+        assertTrue(!terminal.cursor.visible)
+        assertEquals(grid, terminal.reading.screenRevision)
+        assertEquals(TerminalCursorShape.Block, initial.cursor.shape)
+        terminal.feed("\u001b[5 q\u001b[?12l\u001b[?25h".toByteArray())
+        assertEquals(TerminalCursorShape.Bar, terminal.cursor.shape)
+        assertTrue(!terminal.cursor.blink)
+        assertTrue(terminal.cursor.visible)
+        terminal.feed("\u001b[99 q".toByteArray())
+        assertEquals(TerminalCursorShape.Bar, terminal.cursor.shape)
+        terminal.feed("\u001b[0 q".toByteArray())
+        assertEquals(TerminalCursor(0L, 0L, true), terminal.cursor)
+    }
+
+    @Test
+    fun savedRenditionIncludesUnderlineColorAndWideCellsStayInAgreement() {
+        val terminal = Terminal(10L, 2L)
+        terminal.feed("\u001b[4:2;58;5;33m\u001b7\u001b[0m\u001b8中".toByteArray())
+        val cells = terminal.lines(0L, 1L)[0L].cells
+        assertEquals(TerminalUnderline.Double, cells[0L].style.underlineStyle)
+        assertEquals(TerminalColor.Indexed(33), cells[0L].style.underlineColor)
+        assertEquals(cells[0L].style, cells[1L].style)
+    }
+}

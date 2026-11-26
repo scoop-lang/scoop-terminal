@@ -9,64 +9,247 @@ internal struct CellMetrics(val width: Double, val height: Double, val baseline:
 
 private const val GLYPH_CACHE_LIMIT = 1024L
 
-/** The view and its measured layouts keep this font snapshot alive. */
+private const val GLYPH_CACHE_BYTES = 16L * 1024L * 1024L
+
+/** LRU ownership and frame ownership are independent; eviction never closes a leased layout. */
 internal class TerminalGlyphCache(
     private val fonts: FontCollection,
-    private val appearance: TerminalAppearance
+    private val appearance: TerminalAppearance,
+    private val maxEntries: Long = GLYPH_CACHE_LIMIT,
+    private val maxBytes: Long = GLYPH_CACHE_BYTES
 ) {
     private val fontRevision = fonts.revision
-    private val layouts = HashMap<GlyphKey, TextLayout>()
+    private val source = glyphFontSource(fonts, appearance, maxEntries, maxBytes)
+    private val layouts = HashMap<GlyphKey, GlyphCacheEntry>()
+    private var oldest: GlyphCacheEntry? = None
+    private var newest: GlyphCacheEntry? = None
+    private var bytes = 0L
+    private var shaped = 0L
     private var references = 1L
 
-    val metrics: CellMetrics = shapeText(fonts, "M", appearance, appearance.foreground)
-        .use { layout ->
-            CellMetrics(layout.maxIntrinsicWidth, layout.size.height, layout.alphabeticBaseline)
+    val metrics: CellMetrics get() = source.metrics
+    val cachedCount: Long get() = layouts.size
+    val estimatedBytes: Long get() = bytes
+    val shapeCount: Long get() = shaped
+
+    fun canReuse(fonts: FontCollection, appearance: TerminalAppearance): Boolean {
+        if (references ==
+            0L ||
+            this.fonts !==
+            fonts ||
+            fontRevision !=
+            fonts.revision ||
+            this.appearance.fontSize !=
+            appearance.fontSize ||
+            this.appearance.families.size !=
+            appearance.families.size
+        )
+            return false
+        for (index in 0L..<appearance.families.size)
+            if (this.appearance.families[index] != appearance.families[index]) return false
+        if ((this.appearance.ligatures == TerminalLigatures.Disabled) !=
+            (appearance.ligatures == TerminalLigatures.Disabled) ||
+            this.appearance.fontFeatures.size !=
+            appearance.fontFeatures.size
+        )
+            return false
+        for (index in 0L..<appearance.fontFeatures.size) {
+            val previous = this.appearance.fontFeatures[index]
+            val next = appearance.fontFeatures[index]
+            if (previous.tag != next.tag || previous.value != next.value) return false
         }
+        return true
+    }
 
-    fun canReuse(fonts: FontCollection, appearance: TerminalAppearance): Boolean = this.fonts ===
-        fonts &&
-        fontRevision ==
-        fonts.revision &&
-        this.appearance.families ===
-        appearance.families &&
-        this.appearance.fontSize ==
-        appearance.fontSize &&
-        this.appearance.foreground ==
-        appearance.foreground &&
-        layouts.size <
-        GLYPH_CACHE_LIMIT
+    fun acquire(cell: TerminalCell, ink: Color): TerminalGlyphLease = acquire(
+        cell.displayText,
+        cell.style.bold,
+        cell.style.italic,
+        ink
+    )
 
-    fun layout(cell: TerminalCell, ink: Color): TextLayout {
+    fun acquire(text: String, bold: Boolean, italic: Boolean, ink: Color): TerminalGlyphLease {
+        ensureOpen()
         val key = GlyphKey(
-            cell.text, cell.style.bold, cell.style.italic, ink.red.toBits(),
+            text, bold, italic, ink.red.toBits(),
             ink.green.toBits(), ink.blue.toBits(), ink.alpha.toBits()
         )
         when (layouts[key]) {
-            case Some(val cached) -> return cached
+            case Some(val cached) -> {
+                touch(cached)
+                return TerminalGlyphLease(cached.resource)
+            }
+
             case None -> {}
         }
-        val value = shapeText(fonts, cell.text, appearance, ink, key.bold, key.italic)
-        layouts[key] = value
-        return value
+        val layout = shapeText(source.fonts, key.text, appearance, ink, key.bold, key.italic)
+        shaped += 1L
+        // A conservative cache weight, not a measurement of the native allocator's RSS.
+        val cost = 256L + text.byteLength * 2L + text.charLength * 64L
+        val entry = GlyphCacheEntry(key, TerminalGlyphResource(layout), cost)
+        layouts[key] = entry
+        append(entry)
+        bytes += cost
+        val lease = TerminalGlyphLease(entry.resource)
+        while (layouts.size > maxEntries || bytes > maxBytes)
+            evictOldest()
+        return lease
     }
 
-    fun shapePreedit(text: String): TextLayout = shapeText(
-        fonts,
-        text,
-        appearance,
-        appearance.foreground
-    )
+    fun shapePreedit(text: String, foreground: Color): TextLayout {
+        ensureOpen()
+        return shapeText(source.fonts, text, appearance, foreground)
+    }
+
+    private fun append(entry: GlyphCacheEntry) {
+        entry.previous = newest
+        when (newest) {
+            case Some(val last) -> last.next = Some(entry)
+            case None -> oldest = Some(entry)
+        }
+        newest = Some(entry)
+    }
+
+    private fun detach(entry: GlyphCacheEntry) {
+        when (entry.previous) {
+            case Some(val previous) -> previous.next = entry.next
+            case None -> oldest = entry.next
+        }
+        when (entry.next) {
+            case Some(val next) -> next.previous = entry.previous
+            case None -> newest = entry.previous
+        }
+        entry.previous = None
+        entry.next = None
+    }
+
+    private fun touch(entry: GlyphCacheEntry) {
+        when (newest) {
+            case Some(val last) -> if (last === entry) return
+            case None -> {}
+        }
+        detach(entry)
+        append(entry)
+    }
+
+    private fun evictOldest() {
+        val entry = oldest ?: return
+        detach(entry)
+        layouts.remove(entry.key)
+        bytes -= entry.cost
+        entry.resource.release()
+    }
+
+    private fun ensureOpen() {
+        if (references == 0L) throw IllegalStateException(Some("terminal glyph cache is closed"))
+    }
 
     fun retain() {
+        ensureOpen()
         references += 1L
     }
 
     fun release() {
+        ensureOpen()
         references -= 1L
         if (references != 0L) return
-        for ((_, layout) in layouts)
-            layout.close()
-        layouts.clear()
+        try {
+            while (layouts.size > 0L)
+                evictOldest()
+        } finally {
+            source.fonts.close()
+        }
+    }
+}
+
+private struct GlyphFontSource(val fonts: FontCollection, val metrics: CellMetrics)
+
+private fun glyphFontSource(
+    fonts: FontCollection,
+    appearance: TerminalAppearance,
+    maxEntries: Long,
+    maxBytes: Long
+): GlyphFontSource {
+    if (maxEntries < 1L || maxBytes < 1L)
+        throw IllegalArgumentException(Some("terminal glyph cache limits must be positive"))
+    val snapshot = fonts.copy()
+    try {
+        val metrics = shapeText(snapshot, "M", appearance, appearance.foreground)
+            .use { layout ->
+                CellMetrics(layout.maxIntrinsicWidth, layout.size.height, layout.alphabeticBaseline)
+            }
+        return GlyphFontSource(snapshot, metrics)
+    } catch (error: Throwable) {
+        snapshot.close()
+        throw error
+    }
+}
+
+private class GlyphCacheEntry(
+    val key: GlyphKey,
+    val resource: TerminalGlyphResource,
+    val cost: Long
+) {
+    var previous: GlyphCacheEntry? = None
+    var next: GlyphCacheEntry? = None
+}
+
+internal class TerminalGlyphResource(val layout: TextLayout) {
+    private var references = 1L
+    private var grid: GlyphGridCheck? = None
+    fun gridAligned(boundaries: Array<Long>, width: Double): Boolean {
+        when (grid) {
+            case Some(val previous) -> {
+                if (previous.matches(boundaries, width)) return previous.aligned
+            }
+
+            case None -> {}
+        }
+        val aligned = terminalRunFitsGrid(layout, boundaries, width)
+        grid = Some(GlyphGridCheck(boundaries, width, aligned))
+        return aligned
+    }
+    fun retain() {
+        references += 1L
+    }
+    fun release() {
+        references -= 1L
+        if (references == 0L) layout.close()
+    }
+}
+
+/** Each caller owns a separate idempotently closed reference to one immutable layout. */
+internal class TerminalGlyphLease(private val resource: TerminalGlyphResource) : Closeable {
+    private var closed = false
+    val layout: TextLayout
+        get() {
+            if (closed) throw IllegalStateException(Some("terminal glyph lease is closed"))
+            return resource.layout
+        }
+    init {
+        resource.retain()
+    }
+    fun gridAligned(boundaries: Array<Long>, width: Double): Boolean {
+        if (closed) throw IllegalStateException(Some("terminal glyph lease is closed"))
+        return resource.gridAligned(boundaries, width)
+    }
+    public override fun close() {
+        if (closed) return
+        closed = true
+        resource.release()
+    }
+}
+
+private class GlyphGridCheck(
+    val boundaries: Array<Long>,
+    val width: Double,
+    val aligned: Boolean
+) {
+    fun matches(next: Array<Long>, width: Double): Boolean {
+        if (this.width != width || boundaries.size != next.size) return false
+        for (index in 0L..<next.size)
+            if (boundaries[index] != next[index]) return false
+        return true
     }
 }
 
@@ -119,6 +302,27 @@ private fun shapeText(
         color = foreground
         weight = if (bold) 700 else 400
         slant = if (italic) FontSlant.Italic else FontSlant.Upright
+        features = terminalFontFeatures(appearance)
     }
     return Paragraph(fonts, value, style).use { paragraph -> paragraph.layoutUnwrapped() }
+}
+
+private fun terminalFontFeatures(appearance: TerminalAppearance): Array<FontFeature> {
+    if (appearance.ligatures != TerminalLigatures.Disabled) return appearance.fontFeatures
+    val features = ArrayList<FontFeature>()
+    for (feature in appearance.fontFeatures) {
+        if (feature.tag !=
+            "liga" &&
+            feature.tag !=
+            "clig" &&
+            feature.tag !=
+            "calt" &&
+            feature.tag !=
+            "dlig"
+        )
+            features.add(feature)
+    }
+    for (tag in ["liga", "clig", "calt", "dlig"])
+        features.add(FontFeature(tag, 0))
+    return features.toArray()
 }

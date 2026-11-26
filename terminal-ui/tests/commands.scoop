@@ -1,0 +1,63 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalCommandSeparatorTest {
+    @Test
+    fun separatorsAreAnOptInOverlayOnMainPromptRows() {
+        val terminal = Terminal(4L, 3L)
+        terminal
+            .feed(
+                "\u001b]133;A\u0007 \u001b]133;D;0\u0007\r\n\u001b]133;A\u0007 \u001b]133;A;k=s\u0007 "
+                    .toByteArray()
+            )
+        val appearance = TerminalAppearance(background = Color.Black, foreground = Color.White)
+        terminal.setColors(appearance.colorTheme())
+        val reading = terminal.reading
+        val before = reading
+            .text(TerminalRange(reading.anchorAt(0L, 0L)!!, reading.anchorAt(2L, 4L)!!))
+        FontCollection()
+            .use { fonts ->
+                val cache = TerminalGlyphCache(fonts, appearance)
+                try {
+                    for (enabled in [false, true]) {
+                        val geometry = GridGeometry(
+                            Size(40.0, 48.0), CellMetrics(10.0, 16.0, 12.0),
+                            0L, reading.lines(0L, 3L), 4L, 3L, reading.screenRevision, true, reading
+                        )
+                        TerminalFrame(geometry, 1L, reading.cursor, 0L, appearance, cache, enabled)
+                            .use { frame ->
+                                frame.shape([], "")
+                                RasterSurface(40, 48)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val pixels = surface.readPixels()
+                                        assertEquals(0, pixels[35L * 4L].toInt() and 255)
+                                        val line = pixels[(16L * 40L + 35L) * 4L].toInt() and 255
+                                        if (enabled)
+                                            assertTrue(line > 0 && line < 100)
+                                        else
+                                            assertEquals(0, line)
+                                        assertEquals(
+                                            0,
+                                            pixels[(32L * 40L + 35L) * 4L].toInt() and 255
+                                        )
+                                    }
+                            }
+                    }
+                } finally {
+                    cache.release()
+                }
+            }
+        assertEquals(
+            before,
+            reading.text(TerminalRange(reading.anchorAt(0L, 0L)!!, reading.anchorAt(2L, 4L)!!))
+        )
+        assertEquals(TerminalCursor(1L, 2L, true), reading.cursor)
+        assertFalse(TerminalViewOptions().commandSeparators)
+    }
+}

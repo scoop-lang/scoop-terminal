@@ -1,0 +1,142 @@
+package scoop.terminal.emulator
+
+import scoop.platform.concurrent.Thread
+import scoop.test.*
+
+@Test
+private class TerminalImageReadingTest {
+    @Test fun snapshotsAndUploadLeasesOutliveTheCoreImageReference() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val source = imageReading(memory)
+        val pool = TerminalSnapshotPool()
+        val snapshot = pool.acquire(source)
+        source.images.release()
+        assertEquals(1L, snapshot.images.imageCount)
+        assertEquals(1L, snapshot.images.placementCount)
+        assertEquals(7L, snapshot.images.placements(0L, 1L)[0L].imageKey)
+        assertFailsWith<IndexOutOfBoundsException> { snapshot.images.placements(1L, 1L) }
+        val other = TerminalSnapshotPool().acquire(snapshot)
+        val pixels = snapshot.images.image(7L)!!.pixels()
+        snapshot.close()
+        assertFailsWith<IllegalStateException> { snapshot.images }
+        other.close()
+        // Uploads hold the immutable RGBA allocation independently of the resource/placement map.
+        assertEquals(264L, memory.bytes)
+        assertEquals(128, imageByte(pixels.bytes, 7L))
+        pixels.close()
+        pixels.close()
+        assertEquals(0L, memory.bytes)
+        assertFailsWith<IllegalStateException> { pixels.bytes }
+        assertFailsWith<IllegalStateException> { source.images.image(7L) }
+    }
+
+    @Test fun searchRetainsTextWithoutKeepingAnyImageAllocationAlive() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val source = imageReading(memory)
+        val first = source.textProjection()
+        val second = source.textProjection()
+        assertTrue(first === second)
+        assertTrue(first.lines(0L, 1L)[0L].cells === source.lines(0L, 1L)[0L].cells)
+        assertEquals(0L, first.images.imageCount)
+        assertTrue(first.retainedBytes < source.retainedBytes)
+        val snapshot = TerminalSnapshotPool().acquire(source)
+        val search = snapshot.search("find")
+        snapshot.close()
+        source.images.release()
+        assertEquals(0L, memory.bytes)
+        search
+            .use { query ->
+                val page = query.nextPage()
+                assertEquals(1L, page.matches.size)
+                assertEquals(TerminalSearchStatus.Complete, page.status)
+                assertEquals(TerminalSearchMatchStatus.Current, page.matches[0L].status(first))
+            }
+    }
+
+    @Test fun rejectedSnapshotAndImageMapsReleaseOnlyTheirOwnReservations() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val source = imageReading(memory)
+        val before = memory.bytes
+        val limited = TerminalSnapshotPool(TerminalSnapshotLimits(0L))
+        assertFailsWith<IllegalStateException> { limited.acquire(source) }
+        assertEquals(before, memory.bytes)
+        val budget = TerminalSnapshotPool(TerminalSnapshotLimits(1L, source.retainedBytes - 1L))
+        assertFailsWith<IllegalStateException> { budget.acquire(source) }
+        source.images.release()
+        assertEquals(0L, memory.bytes)
+
+        val tight = ImageMemory(TerminalImageLimits(maxCpuBytes = 900L))
+        val image = readingRaster(tight)
+        assertFailsWith<TerminalImageException> { TerminalImages.adopt(tight, 1L, [image], []) }
+        assertEquals(0L, tight.bytes)
+    }
+
+    @Test fun workerSnapshotAcquisitionKeepsImagesAliveUntilEveryOwnerCloses() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val source = imageReading(memory)
+        val pool = TerminalSnapshotPool(TerminalSnapshotLimits(8L))
+        val retained = pool.acquire(source)
+        val closeTwice = source.images.retain()
+        source.images.release()
+        val work: () -> Unit = {
+            for (iteration in 0L..<100L)
+                pool
+                    .acquire(retained)
+                    .use { snapshot ->
+                        snapshot
+                            .images
+                            .image(7L)!!
+                            .pixels()
+                            .use { pixels ->
+                                assertEquals(255, imageByte(pixels.bytes, 0L))
+                                assertEquals(128, imageByte(pixels.bytes, 7L))
+                            }
+                    }
+            closeTwice.close()
+        }
+        val first = Thread.start(work)
+        try {
+            val second = Thread.start(work)
+            try {
+                first.join()
+                second.join()
+            } finally {
+                second.dispose()
+            }
+        } finally {
+            first.dispose()
+            closeTwice.close()
+            retained.close()
+        }
+        assertEquals(0L, memory.bytes)
+    }
+}
+
+private fun readingRaster(memory: ImageMemory): TerminalImage {
+    val bytes = ImageBytes
+        .create(memory, 8L) {
+            [
+                255.toByte(),
+                0.toByte(),
+                0.toByte(),
+                255.toByte(),
+                0.toByte(),
+                255.toByte(),
+                0.toByte(),
+                128.toByte()
+            ]
+        }
+    return TerminalImage.raster(7L, 123L, 0L, ImageRaster(TerminalImageSize(2, 1), bytes))
+}
+
+private fun imageReading(memory: ImageMemory): TerminalReadingData {
+    val terminal = Terminal(8L, 1L)
+    terminal.feed("find me".toByteArray())
+    val reading = terminal.reading
+    if (!(reading is TerminalReadingData)) throw IllegalStateException()
+    val image = readingRaster(memory)
+    val placement = TerminalImagePlacement(
+        10L, image.key, 1L, reading.anchorAt(0L, 0L)!!, TerminalImageRect(0L, 0L, 2L, 1L)
+    )
+    return reading.withImages(TerminalImages.adopt(memory, 1L, [image], [placement]))
+}

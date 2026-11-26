@@ -1,0 +1,216 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class RuntimeWidthPolicyTest {
+    @Test
+    fun anchorsSearchAndOwnedRangesSurviveBothDirectionsWithoutTextVersionChanges() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("a·bΩc".toByteArray())
+        val old = terminal.snapshot()
+        val range = TerminalRange(
+            old.anchorAt(0L, 2L)!!,
+            old.anchorAt(0L, 5L, TerminalAffinity.Before)!!
+        )
+        val track = terminal.track(range)
+        val match = widthMatches(terminal, "bΩ")[0L]
+        val version = old.lines(0L, 1L)[0L].textVersion
+        try {
+            assertTrue(terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide).changed)
+            val wide = terminal.reading
+            assertEquals(TerminalAmbiguousWidth.Wide, wide.ambiguousWidth)
+            assertEquals(TerminalAmbiguousWidth.Narrow, old.ambiguousWidth)
+            assertEquals(TerminalPosition(0L, 3L), wide.resolve(range.start)!!)
+            assertEquals(Some("bΩc"), wide.text(range))
+            assertEquals(Some("bΩc"), wide.text(widthAvailable(track, wide)))
+            assertEquals(TerminalSearchMatchStatus.Current, match.status(wide))
+            assertEquals(Some("bΩ"), wide.text(match.range))
+            assertEquals(version, wide.lines(0L, 1L)[0L].textVersion)
+            assertEquals(old.textRevision, wide.textRevision)
+            assertEquals(1L, old.lines(0L, 1L)[0L].cells[1L].width)
+            assertEquals(2L, wide.lines(0L, 1L)[0L].cells[1L].width)
+            assertEquals(7L, wide.cursor.column)
+            terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow)
+            assertEquals(TerminalPosition(0L, 2L), terminal.reading.resolve(range.start)!!)
+            assertEquals(TerminalSearchMatchStatus.Current, match.status(terminal.reading))
+            assertEquals(5L, terminal.cursor.column)
+            val current = terminal.reading
+            assertFalse(terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow).changed)
+            assertSame(current, terminal.reading)
+        } finally {
+            track.close()
+            old.close()
+        }
+    }
+
+    @Test
+    fun initiallyWideAnchorsUseStableUnitsAndSavedWideTailsRemainRepresentable() {
+        val terminal = Terminal(9L, 3L, ambiguousWidth = TerminalAmbiguousWidth.Wide)
+        terminal.feed("·x\u001b7Ωy".toByteArray())
+        val x = terminal.anchorAt(0L, 2L)!!
+        assertEquals(1L, x.cellOffset)
+        assertEquals(
+            TerminalPosition(0L, 0L),
+            terminal.resolve(terminal.anchorAt(0L, 1L, TerminalAffinity.Before)!!)!!
+        )
+        assertEquals(
+            TerminalPosition(0L, 2L),
+            terminal.resolve(terminal.anchorAt(0L, 1L, TerminalAffinity.After)!!)!!
+        )
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow)
+        assertEquals(TerminalPosition(0L, 1L), terminal.resolve(x)!!)
+        terminal.feed("\u001b8".toByteArray())
+        assertEquals(2L, terminal.cursor.column)
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        terminal.feed("\u001b[1;2H\u001b7".toByteArray())
+        terminal.resize(7L, 3L)
+        assertEquals(1L, terminal.cursor.column)
+        terminal.feed("\u001b[H\u001b8".toByteArray())
+        assertEquals(1L, terminal.cursor.column)
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow)
+        assertEquals(0L, terminal.cursor.column)
+        terminal.feed("\u001b[H\u001b8".toByteArray())
+        assertEquals(0L, terminal.cursor.column)
+    }
+
+    @Test
+    fun oneColumnKeepsOriginalTextAndPendingWrapAcrossWidthChanges() {
+        val terminal = Terminal(1L, 3L)
+        terminal.feed("·Ω".toByteArray())
+        val omega = terminal.anchorAt(1L, 0L)!!
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        for (index in 0L..<2L) {
+            val cell = terminal.lines(index, 1L)[0L].cells[0L]
+            assertEquals(1L, cell.width)
+            assertEquals(2L, cell.logicalWidth)
+            assertEquals(1L, cell.logicalAdvance)
+            assertEquals("�", cell.displayText)
+        }
+        assertEquals(TerminalPosition(1L, 0L), terminal.resolve(omega)!!)
+        terminal.feed("x".toByteArray())
+        assertEquals("x", terminal.lines(2L, 1L)[0L].cells[0L].text)
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow)
+        assertEquals("·", terminal.lines(0L, 1L)[0L].cells[0L].displayText)
+        assertEquals("Ω", terminal.lines(1L, 1L)[0L].cells[0L].displayText)
+        assertEquals(TerminalPosition(1L, 0L), terminal.resolve(omega)!!)
+    }
+
+    @Test
+    fun remeasurementAppliesHistoryLimitsAndClipsTrackedContentAtTheRetainedPrefix() {
+        val terminal = Terminal(4L, 2L, 2L)
+        terminal.feed("·x·x·x·x·x·x".toByteArray())
+        val reading = terminal.reading
+        val range = TerminalRange(
+            reading.anchorAt(0L, 0L)!!,
+            reading
+                .anchorAt(reading.historySize + reading.cursor.row, 4L, TerminalAffinity.Before)!!
+        )
+        val track = terminal.track(range)
+        val matches = widthMatches(terminal, "x")
+        try {
+            terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+            val current = terminal.reading
+            assertEquals(2L, current.historySize)
+            assertEquals(4L, current.lines(0L, 1L)[0L].logicalOffset)
+            assertEquals(None, current.resolve(range.start))
+            assertEquals(TerminalSearchMatchStatus.Unavailable, matches[0L].status(current))
+            assertEquals(
+                TerminalSearchMatchStatus.Current,
+                matches[matches.size - 1L].status(current)
+            )
+            assertEquals(Some("·x·x·x·x"), current.text(widthAvailable(track, current)))
+        } finally {
+            track.close()
+        }
+    }
+
+    @Test
+    fun activeAndInactiveBuffersRemeasureButAlternateOverflowHasNoHistory() {
+        val terminal = Terminal(6L, 3L)
+        terminal.feed("a·b".toByteArray())
+        val mainB = terminal.anchorAt(0L, 2L)!!
+        terminal.feed("\u001b[?1049hxΩy".toByteArray())
+        val alternateY = terminal.anchorAt(0L, 2L)!!
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        assertTrue(terminal.alternateScreen)
+        assertEquals(TerminalPosition(0L, 3L), terminal.resolve(alternateY)!!)
+        assertEquals(0L, terminal.historySize)
+        terminal.feed("\u001b[?1049l".toByteArray())
+        assertEquals(TerminalPosition(0L, 3L), terminal.resolve(mainB)!!)
+        assertEquals(4L, terminal.cursor.column)
+        val small = Terminal(3L, 2L)
+        small.feed("\u001b[?1049h····".toByteArray())
+        val first = small.anchorAt(0L, 0L)!!
+        val last = small.anchorAt(1L, 0L)!!
+        small.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        assertEquals(0L, small.historySize)
+        assertEquals(None, small.resolve(first))
+        assertTrue(small.resolve(last) != None)
+    }
+
+    @Test
+    fun actualChangesCommitSynchronizedOutputAndNewTextUsesOneWidthPolicy() {
+        val terminal = Terminal(4L, 3L)
+        terminal.feed("x\u001b[?2026h·".toByteArray())
+        val frozen = terminal.reading
+        assertFalse(terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Narrow).changed)
+        assertTrue(terminal.synchronizedOutput)
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        assertFalse(terminal.synchronizedOutput)
+        assertEquals("", frozen.lines(0L, 1L)[0L].cells[1L].text)
+        assertEquals("·", terminal.reading.lines(0L, 1L)[0L].cells[1L].text)
+        assertEquals(2L, terminal.reading.lines(0L, 1L)[0L].cells[1L].width)
+        terminal.feed("\u001b[b".toByteArray())
+        assertEquals("·", terminal.lines(1L, 1L)[0L].cells[0L].text)
+        assertEquals(2L, terminal.lines(1L, 1L)[0L].cells[0L].width)
+        val fragmented = Terminal(8L, 2L)
+        fragmented.feed([0xce.toByte()])
+        fragmented.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        fragmented.feed([0xa9.toByte()])
+        assertEquals("Ω", fragmented.lines(0L, 1L)[0L].cells[0L].text)
+        assertEquals(2L, fragmented.cursor.column)
+    }
+
+    @Test
+    fun commandBoundariesHyperlinksAndRenditionKeepTheirOriginalContent() {
+        val terminal = Terminal(6L, 6L)
+        terminal
+            .feed(
+                (
+                    "\u001b]133;A\u0007$ \u001b]133;B\u0007echo ·\r\n" +
+                        "\u001b]133;C\u0007\u001b]8;;https://example.test\u0007\u001b[31mΩ\u001b[0m\u001b]8;;\u0007\r\n" +
+                        "\u001b]133;D;0\u0007\u001b]133;A\u0007$ "
+                )
+                    .toByteArray()
+            )
+        val old = terminal.reading
+        val command = old.commands(0L, 1L)[0L]
+        val text = old.text(command.range!!)
+        val output = command.output!!
+        val oldPoint = old.resolve(output)!!
+        val link = old.linkAt(oldPoint.row, oldPoint.column)!!
+        terminal.setAmbiguousWidth(TerminalAmbiguousWidth.Wide)
+        val current = terminal.reading
+        val changed = current.command(command.id)!!
+        assertEquals(TerminalCommandState.Finished, changed.state)
+        assertEquals(Some(0), changed.exitStatus)
+        assertEquals(text, current.text(changed.range!!))
+        val point = current.resolve(changed.output!!)!!
+        val cell = current.lines(point.row, 1L)[0L].cells[point.column]
+        assertEquals("Ω", cell.text)
+        assertEquals(2L, cell.width)
+        assertEquals(TerminalColor.Indexed(1), cell.style.foreground)
+        assertEquals(link.key, current.linkAt(point.row, point.column + 1L)!!.key)
+    }
+}
+
+private fun widthMatches(terminal: Terminal, query: String): Array<TerminalSearchMatch> = terminal
+    .snapshot()
+    .use { snapshot -> snapshot.search(query).use { search -> search.nextPage().matches } }
+
+private fun widthAvailable(track: TerminalTrackedRange, reading: TerminalReading): TerminalRange =
+    when (track.state(reading)) {
+        case Available(val range) -> range
+        case Invalidated(_) -> fail(Some("width change invalidated retained text"))
+    }

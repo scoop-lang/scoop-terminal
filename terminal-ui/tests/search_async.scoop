@@ -1,0 +1,187 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.concurrent.Channel
+import scoop.platform.concurrent.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalAsyncSearchTest {
+    @Test fun pagesYieldAndBoundWorkEvenWhenTheCallerRequestsUnlimitedScanning() {
+        val terminal = Terminal(100L, 3L, 2000L)
+        terminal.feed(Array<Byte>(100000L) { 120.toByte() })
+        val executor = TerminalSearchExecutor()
+        eventLoop()
+            .run {
+                try {
+                    val absent = asyncQuery(executor, terminal, "z")
+                    val progressed = AtomicBoolean(false)
+                    try {
+                        val peer = launch { progressed.store(true) }
+                        val page = absent.nextPage(Long.MAX_VALUE, Long.MAX_VALUE)
+                        assertTrue(progressed.load())
+                        assertEquals(65536L, page.scanned)
+                        assertEquals(TerminalSearchStatus.Searching, page.status)
+                        assertEquals(0L, page.matches.size)
+                        peer.join()
+                    } finally {
+                        absent.close()
+                    }
+                    val repeated = asyncQuery(executor, terminal, "x")
+                    try {
+                        val page = repeated.nextPage(Long.MAX_VALUE, Long.MAX_VALUE)
+                        assertEquals(1024L, page.matches.size)
+                        assertEquals(TerminalSearchStatus.Searching, page.status)
+                        repeated.cancel()
+                        assertEquals(TerminalSearchStatus.Cancelled, repeated.nextPage().status)
+                    } finally {
+                        repeated.close()
+                    }
+                } finally {
+                    executor.close()
+                }
+            }
+    }
+
+    @Test fun coroutineCancellationReleasesTheQueryLeaseAndWorkingMemory() {
+        val terminal = Terminal(12L, 2L, snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L))
+        terminal.feed("needle".toByteArray())
+        val executor = TerminalSearchExecutor()
+        eventLoop()
+            .run {
+                val search = asyncQuery(executor, terminal, "needle")
+                try {
+                    val child = launch {
+                        currentJobOrNone()!!.cancel()
+                        try {
+                            search.nextPage();
+                            fail(Some("cancelled page returned"))
+                        } catch (_: CancellationException) {
+                            Unit
+                        }
+                    }
+                    child.join()
+                    assertEquals(TerminalSearchStatus.Cancelled, search.status)
+                    val first = terminal.snapshot()
+                    try {
+                        val second = terminal.snapshot()
+                        second.close()
+                    } finally {
+                        first.close()
+                    }
+                } finally {
+                    search.close()
+                    executor.close()
+                }
+            }
+    }
+
+    @Test fun aBusySearchWorkerNeverBlocksTheCallerAndPendingCancellationDiscardsResults() {
+        val terminal = Terminal(16L, 2L, snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L))
+        terminal.feed("needle needle".toByteArray())
+        val executor = TerminalSearchExecutor()
+        val gate = SearchWorkerGate()
+        val owner = currentThreadId()
+        val entered = Channel<ThreadId>(1L)
+        val started = Channel<Unit>(1L)
+        val returned = AtomicBoolean(false)
+        eventLoop()
+            .run {
+                try {
+                    val busy = async(executor.executor) {
+                        entered.send(currentThreadId())
+                        gate.await()
+                    }
+                    assertNotEquals(owner, entered.receive())
+                    val search = asyncQuery(executor, terminal, "needle")
+                    val page = async {
+                        started.send(Unit)
+                        val value = search.nextPage()
+                        returned.store(true)
+                        value
+                    }
+                    started.receive()
+                    for (turn in 0L..<5L)
+                        yieldCoroutine()
+                    assertFalse(returned.load())
+                    try {
+                        search.nextPage()
+                        fail(Some("overlapping search page was accepted"))
+                    } catch (_: IllegalStateException) {
+                        Unit
+                    }
+                    search.cancel()
+                    assertEquals(TerminalSearchStatus.Cancelled, search.status)
+                    gate.open()
+                    busy.await()
+                    val result = page.await()
+                    assertEquals(TerminalSearchStatus.Cancelled, result.status)
+                    assertEquals(0L, result.matches.size)
+                    terminal.snapshot().use { terminal.snapshot().close() }
+                    search.close()
+                } finally {
+                    gate.open()
+                    executor.close()
+                }
+            }
+        gate.close()
+    }
+
+    @Test fun workerShutdownReleasesIdleQueriesAndRejectsNewWorkWithoutLeaking() {
+        val terminal = Terminal(16L, 2L, snapshotLimits = TerminalSnapshotLimits(maxHandles = 2L))
+        terminal.feed("needle".toByteArray())
+        val executor = TerminalSearchExecutor()
+        val search = asyncQuery(executor, terminal, "needle")
+        eventLoop()
+            .run {
+                executor.close()
+                executor.close()
+                assertEquals(TerminalSearchStatus.Cancelled, search.status)
+                assertEquals(TerminalSearchStatus.Cancelled, search.nextPage().status)
+            }
+        assertTrue(executor.executor.isTerminated)
+        assertFailsWith<IllegalStateException> {
+            asyncQuery(executor, terminal, "needle");
+            Unit
+        }
+        terminal.snapshot().use { terminal.snapshot().close() }
+    }
+}
+
+private fun asyncQuery(
+    executor: TerminalSearchExecutor,
+    terminal: Terminal,
+    query: String
+): TerminalAsyncSearch {
+    val snapshot = terminal.snapshot()
+    try {
+        return executor.create(snapshot.search(query))
+    } finally {
+        snapshot.close()
+    }
+}
+
+private class SearchWorkerGate : Closeable {
+    private val lock = Mutex()
+    private val changed = ConditionVariable(lock)
+    private var released = false
+    fun await() {
+        lock
+            .withLock {
+                while (!released)
+                    changed.await()
+            }
+    }
+    fun open() {
+        lock
+            .withLock {
+                released = true;
+                changed.broadcast()
+            }
+    }
+    public override fun close() {
+        changed.dispose();
+        lock.dispose()
+    }
+}

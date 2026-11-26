@@ -16,7 +16,7 @@ import scoop.window.asyncio.*
 
 @Test
 private class ConPtyWindowTest {
-    @Test
+    @Test(useProcess = true)
     fun windowResizesAndRetainsWindowsShellOutput() {
         val probe = ConPtyWindowProbe()
         UiHost { host, active, event -> probe.onEvent(host, active, event) }
@@ -57,11 +57,11 @@ private class ConPtyWindowProbe {
             host.attach(window, { scope -> ConPtyTestView(session, scope) })
             window.requestFocus()
             awaitWindowsFrame("first accepted layout and terminal focus") {
-                session.terminal.columns != 80L && textInputEnabled
+                session.reading.columns != 80L && textInputEnabled
             }
-            val oldColumns = session.terminal.columns
+            val oldColumns = session.reading.columns
             window.requestSize(LogicalSize(650.0, 420.0))
-            awaitWindowsFrame("resized layout") { session.terminal.columns > oldColumns }
+            awaitWindowsFrame("resized layout") { session.reading.columns > oldColumns }
             session.send(TerminalInput.Text("echo scoop-windows-roundtrip&exit /b 17\r"))
             awaitWindowsFrame("command exit and output EOF") {
                 when (session.state) {
@@ -76,8 +76,8 @@ private class ConPtyWindowProbe {
             }
             assertTrue(
                 session
-                    .terminal
-                    .lines(0L, session.terminal.historySize + session.terminal.rows)
+                    .reading
+                    .lines(0L, session.reading.historySize + session.reading.rows)
                     .any { line ->
                         val text = StringBuilder()
                         for (cell in line.cells)

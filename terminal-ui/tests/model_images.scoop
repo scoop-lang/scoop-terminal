@@ -1,0 +1,138 @@
+package scoop.ui.terminal
+
+import scoop.asyncio.*
+import scoop.concurrent.Channel
+import scoop.platform.concurrent.*
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalModelImageTest {
+    @Test fun publicationsOwnImagesUntilReplacedAndSnapshotsOutliveExplicitClose() {
+        eventLoop()
+            .run {
+                val model = TerminalModel
+                    .create {
+                        Terminal(
+                            8L, 4L, imageLimits = TerminalImageLimits(maxCpuBytes = 196608L),
+                            graphics = TerminalGraphicsSupport(sixel = true)
+                        )
+                    }
+                model.start(this)
+                try {
+                    val first = model.submit(TerminalModelCommand.Feed(modelSixel(100L)))
+                    val frozen = TerminalSnapshotPool().acquire(first.reading)
+                    val oldImages = first.reading.images
+                    try {
+                        val projection = frozen.withoutImages()
+                        assertEquals(0L, projection.images.imageCount)
+                        for (iteration in 0L..<100L) {
+                            val next = model
+                                .submit(TerminalModelCommand.Feed(modelSixel(iteration)))
+                            assertEquals(1L, next.reading.images.imageCount)
+                            assertTrue(next.update.effects.size == 0L)
+                        }
+                        val last = model.current.reading.images
+                        val placement = last.placements(0L, 1L)[0L]
+                        val image = last.image(placement.imageKey)!!
+                        model.submit(TerminalModelCommand.Feed("\u001b[4;1Hdone".toByteArray()))
+                        model.close()
+                        model.close()
+                        assertTrue(model.executor.isTerminated)
+                        assertEquals(0L, model.current.reading.images.imageCount)
+                        assertEquals("d", model.current.reading.lines(3L, 1L)[0L].cells[0L].text)
+                        assertFailsWith<IllegalStateException> { image.pixels() }
+                        val old = oldImages.image(oldImages.placements(0L, 1L)[0L].imageKey)!!
+                        old
+                            .pixels()
+                            .use { pixels -> assertEquals(255, pixels.bytes[0L].toInt() and 255) }
+                    } finally {
+                        frozen.close()
+                    }
+                    assertFailsWith<IllegalStateException> { oldImages.imageCount }
+                } finally {
+                    model.close()
+                }
+            }
+    }
+
+    @Test fun cancellationDuringWorkerHandoffRetainsTheFinalFrameUntilClose() {
+        val gate = ImageModelGate()
+        try {
+            eventLoop()
+                .run {
+                    val owner = this
+                    val entered = Channel<Unit>(1L)
+                    val model = TerminalModel
+                        .create {
+                            Terminal(8L, 4L, graphics = TerminalGraphicsSupport(sixel = true))
+                        }
+                    val blocker = owner
+                        .async(model.executor) {
+                            entered.send(Unit)
+                            gate.await()
+                        }
+                    entered.receive()
+                    try {
+                        try {
+                            coroutineScope<Unit> {
+                                model.start(this)
+                                model.post(TerminalModelCommand.Feed(modelSixel(100L)))
+                                for (turn in 0L..<4L)
+                                    yieldCoroutine()
+                                currentJobOrNone()!!.cancel()
+                                gate.open()
+                            }
+                        } catch (_: CancellationException) {
+                            Unit
+                        }
+                        blocker.await()
+                        assertTrue(model.executor.isTerminated)
+                        val finalImages = model.current.reading.images
+                        assertEquals(1L, finalImages.imageCount)
+                        finalImages
+                            .image(finalImages.placements(0L, 1L)[0L].imageKey)!!
+                            .pixels()
+                            .use { pixels -> assertEquals(255, pixels.bytes[0L].toInt() and 255) }
+                        model.close()
+                        assertEquals(0L, model.current.reading.images.imageCount)
+                        assertFailsWith<IllegalStateException> { finalImages.imageCount }
+                    } finally {
+                        gate.open()
+                        model.close()
+                    }
+                }
+        } finally {
+            gate.close()
+        }
+    }
+}
+
+private fun modelSixel(red: Long): Array<Byte> = f"\u001b[2J\u001b[?80h\u001bP7;1q#1;2;${
+    red
+};0;0~\u001b\\"
+    .toByteArray()
+
+private class ImageModelGate : Closeable {
+    private val lock = Mutex()
+    private val changed = ConditionVariable(lock)
+    private var released = false
+    fun await() {
+        lock
+            .withLock {
+                while (!released)
+                    changed.await()
+            }
+    }
+    fun open() {
+        lock
+            .withLock {
+                released = true;
+                changed.broadcast()
+            }
+    }
+    public override fun close() {
+        changed.dispose()
+        lock.dispose()
+    }
+}

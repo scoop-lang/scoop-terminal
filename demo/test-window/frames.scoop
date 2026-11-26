@@ -1,0 +1,239 @@
+package scoop.terminal.demo
+
+import scoop.asyncio.*
+import scoop.collections.sorted
+import scoop.graphics.Point
+import scoop.platform.fs.Path
+import scoop.platform.process.*
+import scoop.platform.system.*
+import scoop.platform.time.*
+import scoop.surface.FrameSubmission
+import scoop.terminal.emulator.TerminalInput
+import scoop.test.*
+import scoop.text.startsWith
+import scoop.time.Duration
+import scoop.ui.*
+import scoop.ui.terminal.*
+import scoop.window.*
+import scoop.window.asyncio.*
+
+@Test
+private class TerminalNativeFrameBenchmark {
+    @Test(useProcess = true)
+    @Ignore("manual desktop frame measurement")
+    fun windowFrames() {
+        val probe = NativeFrameProbe()
+        UiHost { host, active, event -> probe.event(host, active, event) }
+            .use { host -> Application().runWithAsyncio(host) }
+        assertTrue(probe.finished)
+    }
+}
+
+private struct NativeFrameStamp(
+    val sequence: Long,
+    val delivered: MonotonicInstant?,
+    val revision: Long
+)
+
+private class NativeFrameProbe {
+    var finished = false
+    var sequence = -1L
+    var delivered: MonotonicInstant? = None
+    var frames = 0L
+    var acceptedRevision = -1L
+    private var title = ""
+    private var acceptedSequence = -1L
+    private var lastAccepted: MonotonicInstant? = None
+    private val latencies = ArrayList<Long>()
+    private val intervals = ArrayList<Long>()
+
+    fun event(host: UiHost, active: ActiveApplication, event: ApplicationEvent) {
+        when (event) {
+            case Resumed ->
+                currentApplicationScope()
+                    .launch {
+                        try {
+                            this @NativeFrameProbe.exercise(host, active)
+                        } finally {
+                            active.requestExit()
+                        }
+                    }
+            else -> {}
+        }
+    }
+
+    private fun titleChanged(value: String) {
+        title = value
+        if (value.startsWith("sample:")) {
+            sequence += 1L
+            delivered = Some(MonotonicTimeSource.now())
+        }
+    }
+
+    fun accepted(stamp: NativeFrameStamp) {
+        frames += 1L
+        acceptedRevision = stamp.revision
+        val started = stamp.delivered ?: return
+        if (stamp.sequence <= acceptedSequence) return
+        val now = MonotonicTimeSource.now()
+        latencies.add((now - started).inWholeNanoseconds)
+        when (lastAccepted) {
+            case Some(val previous) -> intervals.add((now - previous).inWholeNanoseconds)
+            case None -> {}
+        }
+        lastAccepted = Some(now)
+        acceptedSequence = stamp.sequence
+    }
+
+    private suspend fun exercise(host: UiHost, active: ActiveApplication) {
+        val window = active.createWindow(windowAttributes { size = LogicalSize(960.0, 640.0) })
+        val windows = operatingSystem == OperatingSystem.Windows
+        val child = command(Path.fromString(if (windows) "powershell.exe" else "/bin/sh")) {
+            if (windows) {
+                arg(OsString.fromString("-NoLogo"))
+                arg(OsString.fromString("-NoProfile"))
+                arg(OsString.fromString("-NonInteractive"))
+                arg(OsString.fromString("-Command"))
+                arg(OsString.fromString(nativeFrameWindowsScript))
+            } else {
+                arg(OsString.fromString("-c"))
+                arg(OsString.fromString(nativeFrameUnixScript))
+            }
+        }
+        val probe = this
+        val session = TerminalEmulatorSession
+            .start(
+                child, searchPath = windows,
+                onTitle = { value -> probe.titleChanged(value) }
+            )
+        try {
+            host.attach(window, { scope -> NativeFrameRoot(session, probe, scope) })
+            window.requestFocus()
+            awaitNativeFrame { title == "ready" && frames > 0L && session.reading.columns != 80L }
+            session.send(TerminalInput.Text("go\r"))
+            awaitNativeFrame { title == "done" && acceptedSequence == 119L }
+            assertTrue(latencies.size >= 3L)
+            session.send(TerminalInput.Text("exit\r"))
+            awaitNativeFrame {
+                when (session.state) {
+                    case Running -> false
+
+                    case Exited(val status) -> {
+                        assertEquals(ExitStatus.Exited(0), status);
+                        true
+                    }
+
+                    case Failed(val error) -> throw error
+                    case _ -> false
+                }
+            }
+            awaitNativeFrame { acceptedRevision == session.reading.screenRevision }
+            val finalRow = session.reading.historySize + session.reading.cursor.row
+            assertEquals("f", session.reading.lines(finalRow, 1L)[0L].cells[0L].text)
+            assertTrue((session.reading.lines(finalRow, 1L)[0L].cells[0L].style.flags and 16) != 0)
+            currentEventLoop().sleep(Duration.milliseconds(200L))
+            val beforeIdle = frames
+            currentEventLoop().sleep(Duration.milliseconds(1350L))
+            assertEquals(beforeIdle, frames, Some("exited terminal must not keep blinking"))
+            val times = latencies.sorted()
+            val gaps = intervals.sorted()
+            var total = 0L
+            for (time in times)
+                total += time
+            val last = times.size - 1L
+            val lastGap = gaps.size - 1L
+            val columns = session.reading.columns
+            val rows = session.reading.rows
+            val scale = (window.metrics!!.scaleFactor * 1000.0).toLong()
+            println(
+                f"BENCH name=window columns=${columns} rows=${rows} scale_milli=${
+                    scale
+                } bytes=0 samples=${times.size} ns=${total} p50=${times[last / 2L]} p95=${
+                    times[last * 95L / 100L]
+                } p99=${times[last * 99L / 100L]} interval_p50=${gaps[lastGap / 2L]} interval_p95=${
+                    gaps[lastGap * 95L / 100L]
+                } interval_p99=${gaps[lastGap * 99L / 100L]} delivered=${
+                    sequence + 1L
+                } idle_frames=${frames - beforeIdle}"
+            )
+            finished = true
+        } finally {
+            session.close()
+        }
+    }
+}
+
+private class NativeFrameRoot(
+    private val session: TerminalEmulatorSession,
+    private val probe: NativeFrameProbe,
+    scope: ComponentScope
+) : Component(scope) {
+    public override fun render(): View = element(
+        { child -> NativeFrameContainer(session, probe, child) },
+        [terminalView(session, autoFocus = true)]
+    )
+}
+
+private class NativeFrameContainer(
+    private val session: TerminalEmulatorSession,
+    private val probe: NativeFrameProbe,
+    scope: ComponentScope
+) :
+    Element<NativeFrameStamp>(scope) {
+    public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
+        NativeFrameStamp
+    > {
+        val child = context.measureChild(0L, constraints)
+        context.placeChild(0L, Point(0.0, 0.0))
+        return LayoutResult(
+            child,
+            NativeFrameStamp(probe.sequence, probe.delivered, session.reading.screenRevision)
+        )
+    }
+    public override fun scene(context: SceneContext, layout: NativeFrameStamp) {
+        context.children()
+        context
+            .onFrameComplete { completion ->
+                if (completion.submission == FrameSubmission.Accepted) probe.accepted(layout)
+            }
+    }
+}
+
+private suspend fun awaitNativeFrame(ready: () -> Boolean) {
+    var attempts = 0L
+    while (!ready()) {
+        assertTrue(attempts < 400L, Some("native frame measurement timed out"))
+        attempts += 1L
+        currentEventLoop().sleep(Duration.milliseconds(20L))
+    }
+}
+
+private val nativeFrameUnixScript = """
+stty -echo || exit 2
+printf '\033[?25l\033]2;ready\007'
+IFS= read -r go
+i=0
+while [ "$i" -lt 120 ]; do
+  printf '\rvalue-%04d\033]2;sample:%s\007' "$i" "$i"
+  i=$((i+1))
+  sleep 0.004
+done
+printf '\033]2;done\007'
+IFS= read -r finish
+printf '\r\033[5mfinal blinking text\033[0m'
+exit 0
+"""
+
+private val nativeFrameWindowsScript = """
+$esc = [char]27
+[Console]::Write("${esc}[?25l${esc}]2;ready`a")
+$null = [Console]::ReadLine()
+for ($i = 0; $i -lt 120; $i++) {
+  [Console]::Write(("`rvalue-{0:D4}${esc}]2;sample:{0}`a" -f $i))
+  Start-Sleep -Milliseconds 4
+}
+[Console]::Write("${esc}]2;done`a")
+$null = [Console]::ReadLine()
+[Console]::Write("`r${esc}[5mfinal blinking text${esc}[0m")
+exit 0
+"""

@@ -1,0 +1,432 @@
+package scoop.terminal.emulator
+
+import scoop.collections.HashMap
+
+private const val imageTileSide = 64L
+
+private const val imageTileBytes = 16384L
+
+private class IndexedTiles(val value: Array<ImageBytes?>?)
+
+/** One immutable tile map; snapshots share its allocation rather than cloning every tile lease. */
+private class IndexedImageStorage(
+    val memory: ImageMemory,
+    val size: TerminalImageSize,
+    val background: Int,
+    val version: Long,
+    private val reservation: ImageReservation,
+    tiles: Array<ImageBytes?>
+) {
+    private val references = AtomicLong(1L)
+    private val retained = AtomicRef<IndexedTiles>(IndexedTiles(Some(tiles)))
+    val tiles: Array<ImageBytes?>
+        get() = retained.load().value ?:
+            throw IllegalStateException(Some("indexed image was released"))
+
+    fun retain() {
+        references
+            .updateAndGet { current ->
+                if (current == 0L || current == Long.MAX_VALUE)
+                    throw IllegalStateException(Some("indexed image cannot be retained"))
+                current + 1L
+            }
+    }
+
+    fun release() {
+        val remaining = references
+            .updateAndGet { current ->
+                if (current == 0L)
+                    throw IllegalStateException(Some("indexed image reference underflow"))
+                current - 1L
+            }
+        if (remaining != 0L) return
+        val tiles = retained.exchange(IndexedTiles(None)).value!!
+        for (tile in tiles)
+            tile?.close()
+        reservation.close()
+    }
+}
+
+private class IndexedImageReference(val value: IndexedImageStorage?)
+
+/** Palette-independent register indices; -1 is a transparent hole, not register zero. */
+internal class ImageIndexedPlane private constructor(storage: IndexedImageStorage) : Closeable {
+    private val retained = AtomicRef<IndexedImageReference>(IndexedImageReference(Some(storage)))
+    private fun available(): IndexedImageStorage = retained.load().value ?:
+        throw IllegalStateException(Some("indexed image lease is closed"))
+    val size: TerminalImageSize get() = available().size
+    val version: Long get() = available().version
+    val memory: ImageMemory get() = available().memory
+    val background: Int get() = available().background
+    val retainedBytes: Long
+        get() = indexedMapBytes(available().tiles.size) +
+            tileCount *
+            (imageTileBytes + ImageBytes.overhead)
+    val tileCount: Long
+        get() {
+            var count = 0L
+            for (tile in available().tiles)
+                when (tile) {
+                    case Some(_) -> count += 1L;
+                    case None -> {}
+                }
+            return count
+        }
+
+    fun retain(): ImageIndexedPlane {
+        val storage = available()
+        storage.retain()
+        return ImageIndexedPlane(storage)
+    }
+
+    fun tileVersion(column: Long, row: Long): Long {
+        val storage = available()
+        val columns = imageTileColumns(storage.size.width.toLong())
+        if (column <
+            0L ||
+            row <
+            0L ||
+            column >=
+            columns ||
+            row >=
+            imageTileColumns(storage.size.height.toLong())
+        )
+            throw IndexOutOfBoundsException()
+        return storage.tiles[row * columns + column]?.version ?: 0L
+    }
+
+    fun index(column: Long, row: Long): Int {
+        val storage = available()
+        if (column <
+            0L ||
+            row <
+            0L ||
+            column >=
+            storage.size.width.toLong() ||
+            row >=
+            storage.size.height.toLong()
+        )
+            throw IndexOutOfBoundsException()
+        val stride = imageTileColumns(storage.size.width.toLong())
+        val tile = storage.tiles[row / imageTileSide * stride + column / imageTileSide] ?:
+            return storage.background
+        return imageTileIndex(tile.bytes, column % imageTileSide, row % imageTileSide)
+    }
+
+    /** Used for CPU upload; the returned RGBA reservation includes its immutable result array. */
+    fun rgba(palette: ImageBytes): ImageRaster = rgba(
+        palette,
+        TerminalImageRect(0L, 0L, size.width.toLong(), size.height.toLong())
+    )
+
+    fun rgba(palette: ImageBytes, region: TerminalImageRect): ImageRaster {
+        val storage = available()
+        checkImageRegion(storage.size, region)
+        if (palette.memory !== storage.memory)
+            throw IllegalArgumentException(Some("indexed image palette belongs to another budget"))
+        val colors = palette.bytes
+        val width = region.width
+        val result = TerminalImageSize(region.width.toInt(), region.height.toInt())
+        val slots = storage.tiles
+        val stride = imageTileColumns(storage.size.width.toLong())
+        val pixels = ImageBytes
+            .create(storage.memory, result.rgbaBytes) {
+                Array<Byte>(result.rgbaBytes) { offset ->
+                    val x = region.x + offset / 4L % width
+                    val y = region.y + offset / 4L / width
+                    val tile = slots[y / imageTileSide * stride + x / imageTileSide]
+                    val index = when (tile) {
+                        case Some(val value) ->
+                            imageTileIndex(value.bytes, x % imageTileSide, y % imageTileSide)
+                        case None -> storage.background
+                    }
+                    if (index < 0) 0.toByte() else colors[index.toLong() * 4L + offset % 4L]
+                }
+            }
+        return ImageRaster(result, pixels)
+    }
+
+    /** Copy only intersecting 64x64 tiles; a text-cell erasure never copies an entire large image. */
+    fun erased(left: Long, top: Long, right: Long, bottom: Long): ImageIndexedPlane {
+        val source = available()
+        val x1 = if (left < 0L) 0L else left
+        val y1 = if (top < 0L) 0L else top
+        val x2 = if (right > source.size.width.toLong()) source.size.width.toLong() else right
+        val y2 = if (bottom > source.size.height.toLong()) source.size.height.toLong() else bottom
+        if (x2 <= x1 || y2 <= y1) return retain()
+        val all = x1 ==
+            0L &&
+            y1 ==
+            0L &&
+            x2 ==
+            source.size.width.toLong() &&
+            y2 ==
+            source.size.height.toLong()
+        val columns = imageTileColumns(source.size.width.toLong())
+        val reservation = source.memory.reserve(indexedMapBytes(source.tiles.size))
+        val owned = ArrayList<ImageBytes>()
+        try {
+            val result = Array<ImageBytes?>(source.tiles.size) { slot ->
+                val old = source.tiles[slot]
+                val column = slot % columns * imageTileSide
+                val row = slot / columns * imageTileSide
+                val overlaps = column <
+                    x2 &&
+                    row <
+                    y2 &&
+                    column +
+                    imageTileSide >
+                    x1 &&
+                    row +
+                    imageTileSide >
+                    y1
+                if (all ||
+                    (
+                        source.background ==
+                            -1 &&
+                            (
+                                when (old) {
+                                    case None -> true;
+                                    case Some(_) -> false
+                                }
+                            )
+                    )
+                ) {
+                    None
+                } else if (!overlaps) {
+                    when (old) {
+                        case Some(val bytes) -> {
+                            val copy = bytes.retain()
+                            owned.add(copy)
+                            Some(copy)
+                        }
+
+                        case None -> None
+                    }
+                } else {
+                    val data = ImageBytes
+                        .create(source.memory, imageTileBytes) {
+                            Array<Byte>(imageTileBytes) { offset ->
+                                val x = offset / 4L % imageTileSide
+                                val y = offset / 4L / imageTileSide
+                                val index = if (x +
+                                    column >=
+                                    x1 &&
+                                    x +
+                                    column <
+                                    x2 &&
+                                    y +
+                                    row >=
+                                    y1 &&
+                                    y +
+                                    row <
+                                    y2
+                                )
+                                    -1
+                                else
+                                    when (old) {
+                                        case Some(val bytes) -> imageTileIndex(bytes.bytes, x, y)
+                                        case None -> source.background
+                                    }
+                                ((index + 1) shr ((offset % 4L) * 8L)).toByte()
+                            }
+                        }
+                    owned.add(data)
+                    Some(data)
+                }
+            }
+            return ImageIndexedPlane
+                .adopt(
+                    source.memory,
+                    source.size,
+                    if (all) -1 else source.background,
+                    reservation,
+                    result
+                )
+        } catch (error: Throwable) {
+            for (bytes in owned)
+                bytes.close()
+            reservation.close()
+            throw error
+        }
+    }
+
+    public override fun close() {
+        val storage = retained.exchange(IndexedImageReference(None)).value ?: return
+        storage.release()
+    }
+
+    companion object {
+        fun adopt(
+            memory: ImageMemory,
+            size: TerminalImageSize,
+            background: Int,
+            reservation: ImageReservation,
+            tiles: Array<ImageBytes?>
+        ): ImageIndexedPlane = ImageIndexedPlane(
+            IndexedImageStorage(memory, size, background, memory.nextVersion(), reservation, tiles)
+        )
+    }
+}
+
+private class MutableImageTile(
+    private val memory: ImageMemory,
+    background: Int,
+    private val beforeAllocate: (Long) -> Unit
+) : Closeable {
+    private val reservation = indexedReserve(memory, imageTileBytes + 512L, beforeAllocate)
+    private var pixels: MutableArray<Int>? = Some(MutableArray<Int>(4096L) { background })
+    private var frozen: ImageBytes? = None
+    fun set(column: Long, row: Long, value: Int) {
+        pixels!![row * imageTileSide + column] = value
+    }
+    fun freeze(): ImageBytes {
+        val source = pixels!!
+        beforeAllocate(imageTileBytes + ImageBytes.overhead)
+        val result = ImageBytes
+            .create(memory, imageTileBytes) {
+                Array<Byte>(imageTileBytes) { offset ->
+                    ((source[offset / 4L] + 1) shr ((offset % 4L) * 8L)).toByte()
+                }
+            }
+        frozen = Some(result)
+        pixels = None
+        reservation.close()
+        return result
+    }
+    fun transfer() {
+        frozen = None
+    }
+    public override fun close() {
+        pixels = None
+        frozen?.close()
+        frozen = None
+        reservation.close()
+    }
+}
+
+/** Mutable sparse decode tiles; their default background does not allocate a full raster eagerly. */
+internal class ImageIndexedBuilder(
+    val memory: ImageMemory,
+    val background: Int,
+    private val beforeAllocate: (Long) -> Unit = {}
+) : Closeable {
+    private val reservation = indexedReserve(memory, 512L, beforeAllocate)
+    private var tiles = HashMap<Long, MutableImageTile>()
+    private val stride = imageTileColumns(memory.limits.maxDimension)
+    private var ended = false
+    private var wide = 0L
+    private var high = 0L
+    val width: Long get() = wide
+    val height: Long get() = high
+
+    init {
+        if (background < -1 || background.toLong() >= memory.limits.colorRegisters) {
+            reservation.close()
+            throw IllegalArgumentException(Some("invalid indexed image background"))
+        }
+    }
+
+    fun extent(width: Long, height: Long) {
+        checkOpen()
+        val nextWidth = if (width > wide) width else wide
+        val nextHeight = if (height > high) height else high
+        if (nextWidth > 0L && nextHeight > 0L) imageSize(nextWidth, nextHeight, memory.limits)
+        if (width <
+            0L ||
+            height <
+            0L ||
+            nextWidth >
+            memory.limits.maxDimension ||
+            nextHeight >
+            memory.limits.maxDimension
+        )
+            imageFailure(TerminalImageFailure.Limit, "indexed image extent exceeds limit")
+        wide = nextWidth
+        high = nextHeight
+    }
+
+    fun set(column: Long, row: Long, value: Int) {
+        checkOpen()
+        if (column < 0L || row < 0L || column >= wide || row >= high)
+            throw IndexOutOfBoundsException()
+        if (value < -1 || value.toLong() >= memory.limits.colorRegisters)
+            throw IllegalArgumentException(Some("invalid image color register"))
+        val key = row / imageTileSide * stride + column / imageTileSide
+        val tile = when (val old = tiles[key]) {
+            case Some(val tile) -> tile
+
+            case None -> {
+                if (value == background) return
+                val tile = MutableImageTile(memory, background, beforeAllocate)
+                tiles[key] = tile
+                tile
+            }
+        }
+        tile.set(column % imageTileSide, row % imageTileSide, value)
+    }
+
+    /** Returns None for an image that has no extent; either outcome consumes this builder. */
+    fun finish(): ImageIndexedPlane? {
+        checkOpen()
+        try {
+            if (wide == 0L || high == 0L) return None
+            val size = imageSize(wide, high, memory.limits)
+            val columns = imageTileColumns(wide)
+            val slots = columns * imageTileColumns(high)
+            val reserved = indexedReserve(memory, indexedMapBytes(slots), beforeAllocate)
+            try {
+                val result = Array<ImageBytes?>(slots) { index ->
+                    val key = index / columns * stride + index % columns
+                    tiles[key]?.freeze()
+                }
+                val image = ImageIndexedPlane.adopt(memory, size, background, reserved, result)
+                for (tile in tiles.values)
+                    tile.transfer()
+                return Some(image)
+            } catch (error: Throwable) {
+                reserved.close()
+                throw error
+            }
+        } finally {
+            close()
+        }
+    }
+
+    private fun checkOpen() {
+        if (ended) throw IllegalStateException(Some("indexed image builder is closed"))
+    }
+
+    public override fun close() {
+        if (ended) return
+        ended = true
+        for (tile in tiles.values)
+            tile.close()
+        tiles = HashMap<Long, MutableImageTile>()
+        reservation.close()
+    }
+}
+
+private fun indexedReserve(
+    memory: ImageMemory,
+    bytes: Long,
+    beforeAllocate: (Long) -> Unit
+): ImageReservation {
+    beforeAllocate(bytes)
+    return memory.reserve(bytes)
+}
+
+private fun imageTileColumns(pixels: Long): Long = (pixels + imageTileSide - 1L) / imageTileSide
+
+private fun indexedMapBytes(slots: Long): Long = imageByteSum(slots * 128L, 512L)
+
+private fun imageTileIndex(bytes: Array<Byte>, column: Long, row: Long): Int {
+    val offset = (row * imageTileSide + column) * 4L
+    return (
+        imageByte(bytes, offset) or
+            (imageByte(bytes, offset + 1L) shl 8L) or
+            (imageByte(bytes, offset + 2L) shl 16L) or
+            (imageByte(bytes, offset + 3L) shl 24L)
+    ) -
+        1
+}

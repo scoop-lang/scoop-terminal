@@ -1,0 +1,266 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.*
+import scoop.terminal.emulator.*
+
+internal struct TerminalRunStyle(
+    val bold: Boolean,
+    val italic: Boolean,
+    val ink: Color,
+    val blink: Boolean
+) {
+    fun matches(other: TerminalRunStyle): Boolean = bold ==
+        other.bold &&
+        italic ==
+        other.italic &&
+        ink ==
+        other.ink &&
+        blink ==
+        other.blink
+}
+
+private struct RunText(val text: String, val boundaries: Array<Long>, val columns: Long)
+
+/** UTF-8 boundaries map each original cell to its unchanged terminal column span. */
+internal class TerminalTextRun(
+    val row: Long,
+    val column: Long,
+    val cells: Array<TerminalCell>,
+    val style: TerminalRunStyle
+) {
+    private val projection = runText(cells)
+    val text: String get() = projection.text
+    val boundaries: Array<Long> get() = projection.boundaries
+    val columns: Long get() = projection.columns
+    fun contains(column: Long): Boolean = column >= this.column && column < this.column + columns
+    fun part(start: Long, end: Long): TerminalTextRun {
+        var offset = 0L
+        for (index in 0L..<start)
+            offset += cells[index].width
+        return TerminalTextRun(
+            row, column + offset, Array<TerminalCell>(end - start) { i -> cells[start + i] }, style
+        )
+    }
+}
+
+private fun runText(cells: Array<TerminalCell>): RunText {
+    val text = StringBuilder()
+    val boundaries = ArrayList<Long>()
+    var bytes = 0L
+    var columns = 0L
+    boundaries.add(0L)
+    for (cell in cells) {
+        val display = cell.displayText
+        text.append(display)
+        bytes += display.byteLength
+        columns += cell.width
+        boundaries.add(bytes)
+    }
+    return RunText(text.toString(), boundaries.toArray(), columns)
+}
+
+/** Native shaping may reorder text or change internal advances even when total width matches. */
+internal fun terminalRunFitsGrid(
+    layout: TextLayout,
+    boundaries: Array<Long>,
+    cellWidth: Double
+): Boolean {
+    if (!cellWidth.isFinite() ||
+        cellWidth <=
+        0.0 ||
+        layout.lines.size !=
+        1L ||
+        layout.unresolvedGlyphCount !=
+        0
+    )
+        return false
+    val native = layout.graphemeBoundaries
+    if (native.size != boundaries.size) return false
+    for (index in 0L..<boundaries.size) {
+        if (native[index] != boundaries[index]) return false
+        val expected = index.toDouble() * cellWidth
+        for (affinity in [TextAffinity.Downstream, TextAffinity.Upstream]) {
+            val caret = layout.caret(TextPosition(boundaries[index], affinity)) ?: return false
+            val delta = caret.x - expected
+            if (!caret.x.isFinite() || delta < -0.05 || delta > 0.05) return false
+        }
+    }
+    return true
+}
+
+internal fun terminalTextRuns(
+    row: Long,
+    line: TerminalLine,
+    columns: Long,
+    styleFor: (Long, TerminalCell) -> TerminalRunStyle?
+): Array<TerminalTextRun> {
+    val builder = TerminalRunBuilder(row)
+    val last = clamp(columns, 0L, line.cells.size)
+    for (column in 0L..<last) {
+        val cell = line.cells[column]
+        if (cell.width > 0L && column + cell.width <= last)
+            builder.add(column, cell, styleFor(column, cell))
+    }
+    return builder.finish()
+}
+
+private class TerminalRunBuilder(private val row: Long) {
+    private val result = ArrayList<TerminalTextRun>()
+    private val cells = ArrayList<TerminalCell>()
+    private var column = 0L
+    private var style = TerminalRunStyle(false, false, Color.Black, false)
+
+    fun add(column: Long, cell: TerminalCell, candidate: TerminalRunStyle?) {
+        val next = when (candidate) {
+            case Some(val value) -> value
+
+            case None -> {
+                flush();
+                return
+            }
+        }
+        if (cell.width != 1L || cell.logicalWidth != 1L) {
+            flush()
+            result.add(TerminalTextRun(row, column, [cell], next))
+            return
+        }
+        // Bound context and validation work for unusually wide windows.
+        if (cells.size == 256L || column != this.column + cells.size || !style.matches(next))
+            flush()
+        if (cells.size == 0L) {
+            this.column = column
+            style = next
+        }
+        cells.add(cell)
+    }
+    fun finish(): Array<TerminalTextRun> {
+        flush()
+        return result.toArray()
+    }
+    private fun flush() {
+        if (cells.size == 0L) return
+        result.add(TerminalTextRun(row, column, cells.toArray(), style))
+        cells.clear()
+    }
+}
+
+internal struct TerminalCursorGlyph(val lease: TerminalGlyphLease, val offset: Double) : Closeable {
+    val layout: TextLayout get() = lease.layout
+    public override fun close() {
+        lease.close()
+    }
+}
+
+private struct TerminalGlyphPiece(val source: TerminalTextRun, val lease: TerminalGlyphLease)
+
+/** The full run is retained by its frame; temporary cursor fragments only live through drawing. */
+internal class TerminalPaintRun(
+    val source: TerminalTextRun,
+    private val glyphs: TerminalGlyphCache,
+    private val cellWidth: Double
+) : Closeable {
+    private val full = shapeRun(source, glyphs, cellWidth)
+    fun draw(canvas: Canvas, geometry: GridGeometry, split: Long?) {
+        val column = when (split) {
+            case Some(val value) -> value
+
+            case None -> {
+                full.draw(canvas, geometry);
+                return
+            }
+        }
+        if (source.cells.size <= 1L || !source.contains(column) || !full.joined) {
+            full.draw(canvas, geometry)
+            return
+        }
+        val at = column - source.column
+        for ((start, end) in [(0L, at), (at, at + 1L), (at + 1L, source.cells.size)]) {
+            if (end > start)
+                shapeRun(source.part(start, end), glyphs, cellWidth)
+                    .use { part -> part.draw(canvas, geometry) }
+        }
+    }
+    fun cursorGlyph(
+        column: Long,
+        ink: Color,
+        split: Boolean,
+        cellWidth: Double
+    ): TerminalCursorGlyph {
+        val piece = if (split && source.cells.size > 1L && full.joined) {
+            val at = column - source.column
+            source.part(at, at + 1L)
+        } else
+            full.at(column)
+        return TerminalCursorGlyph(
+            glyphs.acquire(piece.text, piece.style.bold, piece.style.italic, ink),
+            (piece.column - column).toDouble() * cellWidth
+        )
+    }
+    public override fun close() {
+        full.close()
+    }
+}
+
+private class TerminalRunLayout(private val pieces: Array<TerminalGlyphPiece>) : Closeable {
+    val joined: Boolean get() = pieces.size == 1L
+    fun at(column: Long): TerminalTextRun {
+        for (piece in pieces)
+            if (piece.source.contains(column)) return piece.source
+        throw IllegalArgumentException(Some("column is outside the terminal run"))
+    }
+    fun draw(canvas: Canvas, geometry: GridGeometry) {
+        for (piece in pieces) {
+            val source = piece.source
+            val rect = geometry.rect(source.row, source.column, source.columns)
+            val layout = piece.lease.layout
+            canvas.save()
+            canvas.clipRect(rect)
+            canvas
+                .drawText(
+                    layout,
+                    Point(rect.x, rect.y + geometry.metrics.baseline - layout.alphabeticBaseline)
+                )
+            canvas.restore()
+        }
+    }
+    public override fun close() {
+        for (piece in pieces)
+            piece.lease.close()
+    }
+}
+
+private fun shapeRun(
+    source: TerminalTextRun,
+    glyphs: TerminalGlyphCache,
+    cellWidth: Double
+): TerminalRunLayout {
+    val style = source.style
+    val lease = glyphs.acquire(source.text, style.bold, style.italic, style.ink)
+    try {
+        if (source.cells.size == 1L || lease.gridAligned(source.boundaries, cellWidth))
+            return TerminalRunLayout([TerminalGlyphPiece(source, lease)])
+    } catch (error: Throwable) {
+        lease.close()
+        throw error
+    }
+    lease.close()
+    val pieces = ArrayList<TerminalGlyphPiece>()
+    try {
+        for (index in 0L..<source.cells.size) {
+            val cell = source.part(index, index + 1L)
+            pieces
+                .add(
+                    TerminalGlyphPiece(
+                        cell,
+                        glyphs.acquire(cell.text, style.bold, style.italic, style.ink)
+                    )
+                )
+        }
+        return TerminalRunLayout(pieces.toArray())
+    } catch (error: Throwable) {
+        for (piece in pieces)
+            piece.lease.close()
+        throw error
+    }
+}

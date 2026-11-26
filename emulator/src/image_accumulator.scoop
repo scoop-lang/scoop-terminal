@@ -1,0 +1,93 @@
+package scoop.terminal.emulator
+
+/** Model-owned pages; reserves the flattening overlap and drops page storage on every exit. */
+internal class ImageAccumulator(
+    private val memory: ImageMemory,
+    private val limit: Long,
+    private val beforeAllocate: (Long) -> Unit = {}
+) :
+    Closeable {
+    private var pages = ArrayList<ImageBytes>()
+    private val reservation = reserveImage(memory, 512L, beforeAllocate)
+    private var ended = false
+    private var length = 0L
+    val size: Long get() = length
+    val isClosed: Boolean get() = ended
+
+    init {
+        if (limit < 0L) {
+            reservation.close()
+            throw IllegalArgumentException(Some("negative image accumulator limit"))
+        }
+    }
+
+    fun append(size: Long, produce: () -> Array<Byte>) {
+        checkAdditional(size)
+        beforeAllocate(size + ImageBytes.overhead)
+        appendOwned(ImageBytes.create(memory, size, produce))
+    }
+
+    /** Takes the supplied lease, including on error. Empty pages never accumulate metadata. */
+    fun appendOwned(page: ImageBytes) {
+        var accepted = false
+        try {
+            val size = page.bytes.size
+            checkAdditional(size)
+            if (page.memory !== memory)
+                throw IllegalArgumentException(Some("image page belongs to another budget"))
+            if (size == 0L) return
+            pages.add(page)
+            length += size
+            accepted = true
+        } finally {
+            if (!accepted) page.close()
+        }
+    }
+
+    private fun checkAdditional(size: Long) {
+        if (ended) throw IllegalStateException(Some("image accumulator is closed"))
+        if (size < 0L || size > limit - length)
+            imageFailure(TerminalImageFailure.Limit, "image payload exceeds limit")
+    }
+
+    /** Consumes the pages. A failed final allocation also cancels the unfinished image. */
+    fun finish(): ImageBytes {
+        checkAdditional(0L)
+        try {
+            if (pages.size == 1L) return pages.removeAt(0L)
+            val cursor = ImagePageCursor(pages)
+            val count = length
+            beforeAllocate(count + ImageBytes.overhead)
+            return ImageBytes.create(memory, count) { Array<Byte>(count) { cursor.next() } }
+        } finally {
+            close()
+        }
+    }
+
+    public override fun close() {
+        if (ended) return
+        ended = true
+        for (page in pages)
+            page.close()
+        // Do not keep an ArrayList's large capacity in a still-reachable closed transfer.
+        pages = ArrayList<ImageBytes>()
+        length = 0L
+        reservation.close()
+    }
+}
+
+private class ImagePageCursor(private val pages: List<ImageBytes>) {
+    private var page = 0L
+    private var offset = 0L
+    private var current: Array<Byte> = if (pages.size == 0L) [] else pages[0L].bytes
+    fun next(): Byte {
+        if (offset == current.size) {
+            page += 1L
+            current = pages[page].bytes
+            offset = 0L
+        }
+        val result = current[offset]
+        offset += 1L
+        return result
+    }
+}

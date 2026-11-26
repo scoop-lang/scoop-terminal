@@ -1,0 +1,88 @@
+package scoop.terminal.emulator
+
+/** Enable a protocol only when the embedding host can display its committed image readings. */
+public struct TerminalGraphicsSupport(val sixel: Boolean = false, val kitty: Boolean = false)
+
+/** Policy limits, not protocol constants. CPU accounting includes retained versions and work. */
+public struct TerminalImageLimits(
+    val maxEncodedBytes: Long = 100663296L,
+    val maxDecodedBytes: Long = 67108864L,
+    val maxDecompressedBytes: Long = 67108864L,
+    val maxCpuBytes: Long = 268435456L,
+    val maxDimension: Long = 16384L,
+    val maxPlacements: Long = 4096L,
+    val colorRegisters: Long = 1024L,
+    val maxSixelPixelWrites: Long = 67108864L,
+    val maxPngProfileBytes: Long = 1048576L
+)
+
+public enum TerminalImageFailure {
+    InvalidData, Unsupported, Limit
+}
+
+/** Recoverable image failure; a protocol handler maps it to a reply or diagnostic. */
+public class TerminalImageException public constructor(
+    public val kind: TerminalImageFailure,
+    message: String,
+    public val cause: Throwable? = None
+) : Exception(Some(message))
+
+/** Validated by the terminal before calling an injected decoder. Units are device pixels. */
+public struct TerminalImageSize(val width: Int, val height: Int) {
+    public val rgbaBytes: Long
+        get() {
+            if (width <= 0 || height <= 0 || width.toLong() > Long.MAX_VALUE / 4L / height.toLong())
+                throw IllegalArgumentException(Some("invalid image dimensions"))
+            return width.toLong() * height.toLong() * 4L
+        }
+}
+
+internal fun checkImageLimits(limits: TerminalImageLimits) {
+    if (limits.maxSixelPixelWrites < 0L || limits.maxPngProfileBytes < 0L)
+        throw IllegalArgumentException(Some("negative image work limit"))
+    if (limits.maxEncodedBytes <
+        0L ||
+        limits.maxDecodedBytes <
+        0L ||
+        limits.maxDecompressedBytes <
+        0L ||
+        limits.maxCpuBytes <
+        0L ||
+        limits.maxDimension <
+        0L ||
+        limits.maxDimension >
+        2147483647L ||
+        limits.maxPlacements <
+        0L ||
+        limits.colorRegisters <
+        1L ||
+        limits.colorRegisters >
+        65536L
+    )
+        throw IllegalArgumentException(Some("invalid terminal image limits"))
+}
+
+internal fun imageSize(width: Long, height: Long, limits: TerminalImageLimits): TerminalImageSize {
+    if (width <= 0L || height <= 0L)
+        imageFailure(TerminalImageFailure.InvalidData, "image dimensions must be positive")
+    if (width >
+        limits.maxDimension ||
+        height >
+        limits.maxDimension ||
+        width >
+        limits.maxDecodedBytes /
+        4L /
+        height
+    )
+        imageFailure(TerminalImageFailure.Limit, "image dimensions or decoded pixels exceed limit")
+    return TerminalImageSize(width.toInt(), height.toInt())
+}
+
+internal fun imageFailure(kind: TerminalImageFailure, message: String): Nothing =
+    throw TerminalImageException(kind, message)
+
+internal fun imageByteSum(left: Long, right: Long): Long {
+    if (left < 0L || right < 0L || right > Long.MAX_VALUE - left)
+        imageFailure(TerminalImageFailure.Limit, "image allocation size overflow")
+    return left + right
+}

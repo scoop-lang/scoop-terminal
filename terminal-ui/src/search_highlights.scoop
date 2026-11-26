@@ -1,0 +1,209 @@
+package scoop.ui.terminal
+
+import scoop.collections.HashMap
+import scoop.collections.sortedBy
+import scoop.graphics.Rect
+import scoop.terminal.emulator.*
+
+internal struct TerminalHighlight(val bounds: Rect, val active: Boolean)
+
+private struct HighlightKey(val epoch: Long, val logical: Long, val version: Long) :
+    Equals<HighlightKey>,
+    Hash {
+    public override operator fun equals(other: HighlightKey): Boolean = epoch ==
+        other.epoch &&
+        logical ==
+        other.logical &&
+        version ==
+        other.version
+    public override fun hash(): Long = (epoch.hash() * 31L + logical.hash()) * 31L + version.hash()
+}
+
+private struct HighlightInterval(val start: Long, val end: Long)
+
+private class HighlightScan(
+    val start: Long,
+    val end: Long,
+    val retainedStart: Long,
+    val retainedEnd: Long
+) {
+    var covered = start
+    val intervals = ArrayList<HighlightInterval>()
+    fun add(start: Long, end: Long) {
+        if (end <= covered) return
+        if (intervals.size > 0L && start <= intervals[intervals.size - 1L].end) {
+            val last = intervals[intervals.size - 1L]
+            intervals[intervals.size - 1L] = HighlightInterval(last.start, end)
+        } else
+            intervals.add(HighlightInterval(start, end))
+        covered = end
+    }
+}
+
+/** A static interval index; a frame queries only visible logical rows and unions overlapping hits. */
+private class HighlightLine(val matches: Array<TerminalSearchMatch>) {
+    private val maximum = MutableArray<Long>(matches.size) { 0L }
+    init {
+        build(0L, matches.size)
+    }
+
+    private fun build(first: Long, last: Long): Long {
+        if (first == last) return 0L
+        val middle = first + (last - first) / 2L
+        var end = matches[middle].range.end.cellOffset
+        val left = build(first, middle)
+        val right = build(middle + 1L, last)
+        if (left > end) end = left
+        if (right > end) end = right
+        maximum[middle] = end
+        return end
+    }
+
+    fun visible(start: Long, end: Long, retained: TerminalRange): Array<HighlightInterval> {
+        val scan = HighlightScan(start, end, retained.start.cellOffset, retained.end.cellOffset)
+        visit(0L, matches.size, scan)
+        return scan.intervals.toArray()
+    }
+
+    private fun visit(first: Long, last: Long, scan: HighlightScan) {
+        if (first == last || scan.covered >= scan.end) return
+        val middle = first + (last - first) / 2L
+        if (maximum[middle] <=
+            scan.covered ||
+            matches[first].range.start.cellOffset >=
+            scan.end ||
+            matches[last - 1L].range.start.cellOffset <
+            scan.retainedStart
+        )
+            return
+        visit(first, middle, scan)
+        val range = matches[middle].range
+        if (range.start.cellOffset >=
+            scan.retainedStart &&
+            range.end.cellOffset <=
+            scan.retainedEnd &&
+            range.start.cellOffset <
+            scan.end &&
+            range.end.cellOffset >
+            scan.covered
+        ) {
+            scan
+                .add(
+                    if (range.start.cellOffset > scan.start) range.start.cellOffset else scan.start,
+                    if (range.end.cellOffset < scan.end) range.end.cellOffset else scan.end
+                )
+        }
+        visit(middle + 1L, last, scan)
+    }
+}
+
+internal class TerminalSearchHighlights {
+    private var lines = HashMap<HighlightKey, HighlightLine>()
+    private var selected: TerminalSearchMatch? = None
+    private var count = 0L
+    val isEmpty: Boolean get() = count == 0L && selected?.generation == None
+
+    fun set(matches: Array<TerminalSearchMatch>, active: TerminalSearchMatch?) {
+        if (matches.size > 100000L)
+            throw IllegalArgumentException(Some("terminal highlight limit exceeded"))
+        val grouped = HashMap<HighlightKey, ArrayList<TerminalSearchMatch>>()
+        for (match in matches) {
+            if (match.range.start.logicalLineId !=
+                match.logicalLineId ||
+                match.range.end.logicalLineId !=
+                match.logicalLineId ||
+                match.range.start.bufferEpoch !=
+                match.bufferEpoch ||
+                match.range.end.bufferEpoch !=
+                match.bufferEpoch ||
+                match.range.start.cellOffset >=
+                match.range.end.cellOffset
+            )
+                continue
+            val key = HighlightKey(match.bufferEpoch, match.logicalLineId, match.textVersion)
+            val values = grouped[key] ?: ArrayList<TerminalSearchMatch>()
+            values.add(match);
+            grouped[key] = values
+        }
+        val prepared = HashMap<HighlightKey, HighlightLine>()
+        for ((key, values) in grouped)
+            prepared[key] = HighlightLine(
+                values.sortedBy { match -> match.range.start.cellOffset }.toArray()
+            )
+        lines = prepared;
+        selected = active;
+        count = matches.size
+    }
+
+    fun clear() {
+        lines.clear();
+        selected = None;
+        count = 0L
+    }
+
+    fun visible(geometry: GridGeometry): Array<TerminalHighlight> {
+        val result = ArrayList<TerminalHighlight>()
+        val reading = geometry.reading
+        val active = when (selected) {
+            case Some(val match) ->
+                if (match.status(reading) == TerminalSearchMatchStatus.Current)
+                    terminalRects(geometry, match.range) ?: []
+                else
+                    []
+            case None -> []
+        }
+        for (row in 0L..<geometry.rows.size) {
+            val line = geometry.rows[row]
+            val group = lines[
+                HighlightKey(reading.bufferEpoch, line.logicalLineId, line.textVersion)
+            ] ?:
+                continue
+            val retained = reading.logicalLineRange(line.logicalLineId) ?: continue
+            val end = reading
+                .anchorAt(geometry.first + row, line.cells.size, TerminalAffinity.Before)!!
+                .cellOffset
+            for (interval in group.visible(line.logicalOffset, end, retained)) {
+                val first = reading
+                    .resolve(
+                        TerminalAnchor(reading.bufferEpoch, line.logicalLineId, interval.start)
+                    ) ?:
+                    continue
+                val last = reading
+                    .resolve(
+                        TerminalAnchor(
+                            reading.bufferEpoch,
+                            line.logicalLineId,
+                            interval.end,
+                            TerminalAffinity.Before
+                        )
+                    ) ?:
+                    continue
+                val right = clamp(last.column, 0L, geometry.columns)
+                if (right <= first.column) continue
+                val bounds = geometry.rect(row, first.column, right - first.column)
+                addOrdinary(result, bounds, active)
+            }
+        }
+        for (bounds in active)
+            result.add(TerminalHighlight(bounds, true))
+        return result.toArray()
+    }
+}
+
+private fun addOrdinary(output: ArrayList<TerminalHighlight>, bounds: Rect, active: Array<Rect>) {
+    var left = bounds.x
+    val end = bounds.x + bounds.width
+    for (selected in active) {
+        if (selected.y != bounds.y || selected.x >= end || selected.x + selected.width <= left)
+            continue
+        if (selected.x > left)
+            output
+                .add(
+                    TerminalHighlight(Rect(left, bounds.y, selected.x - left, bounds.height), false)
+                )
+        left = selected.x + selected.width
+        if (left >= end) return
+    }
+    if (left < end)
+        output.add(TerminalHighlight(Rect(left, bounds.y, end - left, bounds.height), false))
+}

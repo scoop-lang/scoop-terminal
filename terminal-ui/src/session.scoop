@@ -1,40 +1,114 @@
 package scoop.ui.terminal
 
 import scoop.asyncio.*
-import scoop.collections.ArrayDeque
 import scoop.concurrent.Channel
 import scoop.platform.memory.NativeByteBuffer
 import scoop.platform.process.Command
 import scoop.platform.process.ExitStatus
 import scoop.platform.process.requirePtySize
 import scoop.platform.system.*
+import scoop.platform.time.MonotonicTimeSource
 import scoop.terminal.emulator.*
+import scoop.time.Duration
 import scoop.window.asyncio.currentApplicationScope
 
 public enum TerminalSessionState {
     Running, Exited(ExitStatus), Closed, Failed(Throwable)
 }
 
-private struct Dimensions(val columns: Long, val rows: Long)
-
-/** An application-owned session. The view and session are used on the window owner. */
-public class TerminalEmulatorSession private constructor(
-    public val terminal: Terminal,
+/** Window-owned session API; all mutable VT work runs on its serial background model. */
+public class TerminalEmulatorSession internal constructor(
+    private val model: TerminalModel,
     private val pty: AsyncPty,
-    private val onTitle: (String) -> Unit,
-    private val onBell: () -> Unit
+    private val onTitle: (String) -> Unit = {},
+    private val onBell: () -> Unit = {},
+    private val synchronizedOutputTimeout: Duration = Duration.seconds(1L),
+    private val configuredClipboard: TerminalClipboardAdapter? = None,
+    private val clipboardReadTimeout: Duration = Duration.seconds(1L),
+    private val onHostServiceError: (Throwable) -> Unit = {},
+    private val onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit = {},
+    private val onProgress: (TerminalProgress) -> Unit = {},
+    private val onDiagnostic: (String) -> Unit = {}
 ) : AsyncCloseable {
-    private val outgoing = ArrayDeque<Array<Byte>>()
+    private val snapshots = TerminalSnapshotPool()
+    private val searches = TerminalSearchExecutor()
+    private val outgoing = TerminalWriteQueue()
     private val writeReady = Channel<Unit>(1L)
-    private val resizeReady = Channel<Unit>(1L)
-    private var requestedSize: Dimensions? = None
+    private var requestedSize: TerminalModelSize? = None
+    private var closed = false
+    private var modelFailure: Throwable? = None
     private var childExited = false
     private var inputEnded = false
     private var driver: Job? = None
     private var observer: (() -> Unit)? = None
+    private val observers = ArrayList<SessionObservation>()
     private var current = TerminalSessionState.Running
+    private var deadlineScope: CoroutineScope? = None
+    private var synchronizationDeadline: Job? = None
+    private var deadlineGeneration = -1L
+    private var viewClipboard: TerminalClipboardAdapter? = None
+    private val clipboardBridge = TerminalClipboardBridge(
+        outgoing, { activeClipboard() },
+        { expire -> clipboardDeadline(expire) },
+        {
+            writeReady.trySend(Unit);
+            Unit
+        }, { error -> onHostServiceError(error) }
+    )
 
     public val state: TerminalSessionState get() = current
+    private fun activeClipboard(): TerminalClipboardAdapter? = when (configuredClipboard) {
+        case Some(_) -> configuredClipboard
+        case None -> viewClipboard
+    }
+    /** The last delivered immutable presentation; this never reads the background mutable core. */
+    public val reading: TerminalReading get() = model.current.reading
+    public val mouseReporting: Boolean get() = model.current.mouseReporting
+    public val metadata: TerminalMetadata get() = model.current.metadata
+    public val ambiguousWidth: TerminalAmbiguousWidth get() = model.current.ambiguousWidth
+    public fun snapshot(): TerminalSnapshot = snapshots.acquire(reading)
+    /** Captures committed text; asynchronous pages scan on a separate, bounded search worker. */
+    public fun search(
+        query: String,
+        options: TerminalSearchOptions = TerminalSearchOptions()
+    ): TerminalAsyncSearch {
+        val snapshot = snapshot()
+        try {
+            return searches.create(snapshot.search(query, options))
+        } finally {
+            snapshot.close()
+        }
+    }
+    internal fun track(
+        range: TerminalRange,
+        kind: TerminalTrackingKind,
+        reading: TerminalReading
+    ): TerminalTrackedRange = model.track(range, kind, reading)
+    internal fun observe(changed: () -> Unit): Disposable {
+        val observation = SessionObservation(changed)
+        observers.add(observation)
+        return ViewAttachment {
+            observation.active = false;
+            for (index in 0L..<observers.size) {
+                if (observers[index] === observation) {
+                    observers.removeAt(index);
+                    break
+                }
+            }
+            Unit
+        }
+    }
+    private fun notifyObservers() {
+        for (observation in observers.toArray())
+            if (observation.active) observation.changed()
+        observer?.invoke()
+    }
+    public fun setColors(colors: TerminalColors) {
+        if (!closed && !model.isClosing) model.post(TerminalModelCommand.Colors(colors))
+    }
+    public fun setAmbiguousWidth(width: TerminalAmbiguousWidth) {
+        if (!closed && !model.isClosing) model.post(TerminalModelCommand.Width(width))
+    }
 
     private val running: Boolean
         get() = when (current) {
@@ -50,67 +124,158 @@ public class TerminalEmulatorSession private constructor(
             rows: Long = 24L,
             historyLimit: Long = 10000L,
             searchPath: Boolean = false,
+            ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
             onTitle: (String) -> Unit = {},
-            onBell: () -> Unit = {}
+            onBell: () -> Unit = {},
+            synchronizedOutputTimeout: Duration = Duration.seconds(1L),
+            clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
+            clipboard: TerminalClipboardAdapter? = None,
+            clipboardReadTimeout: Duration = Duration.seconds(1L),
+            onHostServiceError: (Throwable) -> Unit = {},
+            onWorkingDirectory: (TerminalWorkingDirectory?) -> Unit = {},
+            onProgress: (TerminalProgress) -> Unit = {},
+            onDiagnostic: (String) -> Unit = {},
+            graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(sixel = true, kitty = true),
+            imageLimits: TerminalImageLimits = TerminalImageLimits()
         ): TerminalEmulatorSession {
             val application = currentApplicationScope()
             val loop = currentEventLoop()
             requirePtySize(columns, rows)
-            val terminal = Terminal(columns, rows, historyLimit)
-            val pty = loop.spawnPty(command, columns, rows, searchPath)
-            val session = TerminalEmulatorSession(terminal, pty, onTitle, onBell)
-            session.driver = Some(application.launch { session.run() })
+            if (synchronizedOutputTimeout <= Duration.ZERO || clipboardReadTimeout <= Duration.ZERO)
+                throw IllegalArgumentException(Some("terminal service timeouts must be positive"))
+            val model = TerminalModel
+                .create {
+                    Terminal(
+                        columns, rows, historyLimit, clipboardPolicy = clipboardPolicy,
+                        ambiguousWidth = ambiguousWidth, graphics = graphics, imageLimits =
+                            imageLimits, imageDecoder = Some(TerminalCpuImageDecoder())
+                    )
+                }
+            val pty = try {
+                loop.spawnPty(command, columns, rows, searchPath)
+            } catch (error: Throwable) {
+                model.close()
+                throw error
+            }
+            val session = try {
+                TerminalEmulatorSession(
+                    model,
+                    pty,
+                    onTitle,
+                    onBell,
+                    synchronizedOutputTimeout, clipboard, clipboardReadTimeout, onHostServiceError,
+                    onWorkingDirectory, onProgress, onDiagnostic
+                )
+            } catch (error: Throwable) {
+                nonCancellableScope {
+                    try {
+                        pty.close()
+                    } finally {
+                        model.close()
+                    }
+                }
+                throw error
+            }
+            try {
+                session.launch(application)
+            } catch (error: Throwable) {
+                session.close()
+                throw error
+            }
             return session
         }
     }
 
-    /** Enqueues input using the modes active when the input arrives. */
+    internal fun launch(scope: CoroutineScope) {
+        val session = this
+        model
+            .start(
+                scope,
+                { value -> session.apply(value) },
+                { error -> session.modelFailed(error) }
+            )
+        driver = Some(scope.launch { session.run() })
+    }
+
+    private fun modelFailed(error: Throwable) {
+        modelFailure = Some(error)
+        driver?.cancel()
+    }
+
+    /** Enqueues input after all previously accepted model operations, using their resulting modes. */
     public fun send(input: TerminalInput) {
-        if (running && !childExited) enqueue(terminal.encodeInput(input))
+        if (running && !childExited && !closed && !model.isClosing)
+            model.post(TerminalModelCommand.Input(input))
     }
 
-    internal fun requestSize(columns: Long, rows: Long) {
+    internal fun requestSize(columns: Long, rows: Long, pixels: TerminalPixelSize? = None) {
         requirePtySize(columns, rows)
-        if (!running) {
-            resizeModel(columns, rows)
+        if (closed || model.isClosing) return
+        val next = TerminalModelSize(columns, rows, pixels)
+        if (requestedSize == Some(next) || (requestedSize == None && model.current.size == next))
             return
-        }
-        if (columns == terminal.columns && rows == terminal.rows) {
-            requestedSize = None
-            return
-        }
-        requestedSize = Some(Dimensions(columns, rows))
-        resizeReady.trySend(Unit)
+        model.post(TerminalModelCommand.Resize(next, operatingSystem != OperatingSystem.Windows))
+        requestedSize = Some(next)
     }
 
-    internal fun attach(changed: () -> Unit): Disposable {
+    internal fun attach(
+        clipboard: TerminalClipboardAdapter? = None,
+        changed: () -> Unit
+    ): Disposable {
         when (observer) {
             case Some(_) -> throw IllegalStateException(Some("terminal session already has a view"))
             case None -> {}
         }
         observer = Some(changed)
-        return ViewAttachment { observer = None }
+        viewClipboard = clipboard
+        return ViewAttachment {
+            observer = None
+            when (clipboard) {
+                case Some(val adapter) ->
+                    when (configuredClipboard) {
+                        case None -> clipboardBridge.detach(adapter)
+                        case Some(_) -> {}
+                    }
+                case None -> {}
+            }
+            viewClipboard = None
+        }
     }
 
     public override suspend fun close() {
-        driver?.cancel()
-        pty.close()
-        driver?.join()
-        if (running) publish(TerminalSessionState.Closed)
+        closed = true
+        val session = this
+        nonCancellableScope {
+            session.clipboardBridge.close()
+            session.driver?.cancel()
+            try {
+                session.pty.close()
+                session.driver?.join()
+            } finally {
+                try {
+                    session.model.close()
+                } finally {
+                    session.searches.close()
+                }
+            }
+            if (session.running) session.publish(TerminalSessionState.Closed)
+            Unit
+        }
     }
 
     private fun enqueue(bytes: Array<Byte>) {
         if (!inputEnded && bytes.size != 0L) {
-            outgoing.addLast(bytes)
+            outgoing.append(bytes)
             writeReady.trySend(Unit)
         }
     }
 
     private suspend fun run() {
         val session = this
-        var result: TerminalSessionState = try {
+        val result: TerminalSessionState = try {
             coroutineScope<TerminalSessionState> {
                 val scope = this
+                session.deadlineScope = Some(scope)
                 val output = scope.async { session.readOutput() }
                 val child = scope
                     .async {
@@ -119,14 +284,16 @@ public class TerminalEmulatorSession private constructor(
                         status
                     }
                 val input = scope.launch { session.writeInput() }
-                val resize = scope.launch { session.applySizes() }
                 val ended = try {
                     val status = child.await()
                     output.await()
                     TerminalSessionState.Exited(status)
                 } finally {
                     input.cancel()
-                    resize.cancel()
+                    session.synchronizationDeadline?.cancel()
+                    session.synchronizationDeadline = None
+                    session.clipboardBridge.close()
+                    session.deadlineScope = None
                 }
                 ended
             }
@@ -135,22 +302,35 @@ public class TerminalEmulatorSession private constructor(
         } catch (error: Throwable) {
             TerminalSessionState.Failed(error)
         }
+        val finalState = nonCancellableScope { session.finishSession(result) }
+        publish(finalState)
+    }
+
+    private suspend fun finishSession(initial: TerminalSessionState): TerminalSessionState {
+        var result = when (modelFailure) {
+            case Some(val error) -> TerminalSessionState.Failed(error)
+            case None -> initial
+        }
         try {
             pty.close()
         } catch (error: Throwable) {
-            result = when (result) {
-                case Failed(val primary) ->
-                    TerminalSessionState.Failed(ResourceUseException(primary, error))
-                case _ -> TerminalSessionState.Failed(error)
+            result = sessionFailure(result, error)
+        }
+        inputEnded = true
+        outgoing.clear()
+        if (!model.isClosing) {
+            try {
+                model.submit(TerminalModelCommand.Finish)
+            } catch (error: Throwable) {
+                result = sessionFailure(result, modelFailure ?: error)
             }
         }
-        outgoing.clear()
-        publish(result)
+        return result
     }
 
     private fun publish(state: TerminalSessionState) {
         current = state
-        observer?.invoke()
+        notifyObservers()
     }
 
     private suspend fun readOutput() {
@@ -160,26 +340,84 @@ public class TerminalEmulatorSession private constructor(
                 buffer.clear()
                 val count = pty.readInto(buffer)
                 if (count == 0L) {
-                    apply(terminal.finishOutput())
+                    model.submit(TerminalModelCommand.Finish)
                     return
                 }
-                apply(terminal.feed(buffer.readBytes(count)))
-                yieldCoroutine()
+                model.submit(TerminalModelCommand.Feed(buffer.readBytes(count)))
             }
         } finally {
             buffer.close()
         }
     }
 
-    private fun apply(update: TerminalUpdate) {
+    private suspend fun apply(publication: TerminalModelPublication) {
+        val update = publication.update
         for (effect in update.effects) {
             when (effect) {
                 case Reply(val bytes) -> enqueue(bytes)
                 case Title(val title) -> onTitle(title)
                 case Bell -> onBell()
+                case ClipboardReadRequested(val request) -> clipboardBridge.read(request)
+                case ClipboardWriteRequested(val request) -> clipboardBridge.write(request)
+                case WorkingDirectoryChanged(val directory) -> onWorkingDirectory(directory)
+                case ProgressChanged(val progress) -> onProgress(progress)
+                case Diagnostic(val message) -> onDiagnostic(message)
             }
         }
-        if (update.changed) observer?.invoke()
+        enqueue(publication.input)
+        if (publication.completedResize != None && requestedSize == publication.completedResize)
+            requestedSize = None
+        updateSynchronizationDeadline(publication)
+        if (update.changed || publication.binding != None) notifyObservers()
+        if (publication.resizePty && running && !childExited && !closed) {
+            try {
+                pty.resize(publication.size.columns, publication.size.rows)
+            } catch (_: IoClosedException) {
+                childExited = true
+            }
+        }
+    }
+
+    private fun clipboardDeadline(expire: () -> Unit): Disposable? {
+        val scope = deadlineScope ?: return None
+        val duration = clipboardReadTimeout
+        return Some(
+            JobDisposable(
+                scope
+                    .launch {
+                        currentEventLoop().sleep(duration)
+                        expire()
+                    }
+            )
+        )
+    }
+
+    private fun updateSynchronizationDeadline(publication: TerminalModelPublication) {
+        if (publication.synchronizedSince == None) {
+            synchronizationDeadline?.cancel()
+            synchronizationDeadline = None
+            return
+        }
+        val generation = publication.synchronizationGeneration
+        if (generation == deadlineGeneration) return
+        val scope = deadlineScope ?: return
+        deadlineGeneration = generation
+        synchronizationDeadline?.cancel()
+        val session = this
+        val deadline = publication.synchronizedSince!! + synchronizedOutputTimeout
+        synchronizationDeadline = Some(
+            scope
+                .launch {
+                    val remaining = deadline - MonotonicTimeSource.now()
+                    if (remaining > Duration.ZERO) currentEventLoop().sleep(remaining)
+                    if (!session.closed && !session.model.isClosing) {
+                        session.synchronizationDeadline = None
+                        session
+                            .model
+                            .submit(TerminalModelCommand.ReleaseSynchronization(generation))
+                    }
+                }
+        )
     }
 
     private suspend fun writeInput() {
@@ -188,7 +426,7 @@ public class TerminalEmulatorSession private constructor(
             while (true) {
                 writeReady.receive()
                 while (outgoing.size != 0L) {
-                    val bytes = outgoing.removeFirst()
+                    val bytes = outgoing.take() ?: break
                     var offset = 0L
                     while (offset < bytes.size) {
                         buffer.clear()
@@ -204,33 +442,27 @@ public class TerminalEmulatorSession private constructor(
         } catch (error: PlatformException) {
             if (error.kind != PlatformErrorKind.BrokenPipe) throw error
             inputEnded = true
+            clipboardBridge.close()
             outgoing.clear()
         } finally {
             buffer.close()
         }
     }
+}
 
-    private suspend fun applySizes() {
-        while (true) {
-            resizeReady.receive()
-            val next = requestedSize ?: continue
-            requestedSize = None
-            if (resizeModel(next.columns, next.rows) && !childExited) {
-                try {
-                    pty.resize(next.columns, next.rows)
-                } catch (error: IoClosedException) {
-                    // A naturally closing ConPTY can still deliver output.
-                    childExited = true
-                }
-            }
-        }
+private fun sessionFailure(previous: TerminalSessionState, error: Throwable): TerminalSessionState =
+    when (previous) {
+        case Failed(val primary) ->
+            if (primary === error)
+                previous
+            else
+                TerminalSessionState.Failed(ResourceUseException(primary, error))
+        case _ -> TerminalSessionState.Failed(error)
     }
 
-    private fun resizeModel(columns: Long, rows: Long): Boolean {
-        if (columns == terminal.columns && rows == terminal.rows) return false
-        terminal.resize(columns, rows, restoreHistory = operatingSystem != OperatingSystem.Windows)
-        observer?.invoke()
-        return true
+private class JobDisposable(private val job: Job) : Disposable {
+    public override fun dispose() {
+        job.cancel()
     }
 }
 
@@ -242,4 +474,8 @@ private class ViewAttachment(private val detach: () -> Unit) : Disposable {
             detach()
         }
     }
+}
+
+private class SessionObservation(val changed: () -> Unit) {
+    var active = true
 }

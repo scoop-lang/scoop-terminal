@@ -1,0 +1,191 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class ReflowTest {
+    @Test
+    fun narrowingAndWideningPreserveContentCursorAndAnchors() {
+        val terminal = Terminal(10L, 3L)
+        terminal.feed("abcdefghij".toByteArray())
+        val anchor = terminal.anchorAt(0L, 8L)!!
+        val original = terminal.lines(0L, 1L)[0L]
+        terminal.resize(5L, 3L)
+        assertEquals("abcde", text(terminal, 0L))
+        assertEquals("fghij", text(terminal, 1L))
+        assertEquals(Some(TerminalPosition(1L, 3L)), terminal.resolve(anchor))
+        assertEquals(TerminalCursor(1L, 4L, true), terminal.cursor)
+        assertEquals(original.textVersion, terminal.lines(0L, 1L)[0L].textVersion)
+        terminal.resize(10L, 3L)
+        assertEquals("abcdefghij", text(terminal, 0L))
+        assertEquals(Some(TerminalPosition(0L, 8L)), terminal.resolve(anchor))
+        assertEquals(TerminalCursor(0L, 9L, true), terminal.cursor)
+        terminal.feed("K".toByteArray())
+        assertEquals("K", text(terminal, 1L))
+    }
+
+    @Test
+    fun existingWrapsJoinButHardNewlinesStaySeparate() {
+        val terminal = Terminal(4L, 4L)
+        terminal.feed("abcdef\r\nGH".toByteArray())
+        val anchor = terminal.anchorAt(1L, 1L)!!
+        terminal.resize(8L, 4L)
+        assertEquals("abcdef", text(terminal, 0L))
+        assertEquals("GH", text(terminal, 1L))
+        assertEquals(Some(TerminalPosition(0L, 5L)), terminal.resolve(anchor))
+        assertEquals(TerminalCursor(1L, 2L, true), terminal.cursor)
+    }
+
+    @Test
+    fun wideWrapPaddingIsNotContentAndExplicitSpacesSurvive() {
+        val terminal = Terminal(5L, 4L)
+        terminal.feed("abcd中e  ".toByteArray())
+        val lines = terminal.lines(0L, 2L)
+        assertEquals(4L, lines[0L].usedColumns)
+        assertEquals(4L, lines[1L].logicalOffset)
+        val wide = terminal.anchorAt(1L, 1L, TerminalAffinity.Before)!!
+        terminal.resize(12L, 4L)
+        assertEquals("abcd中e  ", text(terminal, 0L))
+        assertEquals(Some(TerminalPosition(0L, 4L)), terminal.resolve(wide))
+        terminal.resize(3L, 5L)
+        terminal.resize(12L, 5L)
+        assertEquals("abcd中e  ", text(terminal, terminal.historySize))
+    }
+
+    @Test
+    fun oneColumnPreservesWideGraphemesForLaterExpansion() {
+        val terminal = Terminal(4L, 6L)
+        terminal.feed("中e\u0301".toByteArray())
+        val wide = terminal.anchorAt(0L, 0L)!!
+        terminal.resize(1L, 6L)
+        val cell = terminal.lines(0L, 1L)[0L].cells[0L]
+        assertEquals("中", cell.text)
+        assertEquals("�", cell.displayText)
+        assertEquals(1L, cell.width)
+        assertEquals(2L, cell.logicalWidth)
+        terminal.resize(6L, 6L)
+        assertEquals("中e\u0301", text(terminal, 0L))
+        assertEquals(2L, terminal.lines(0L, 1L)[0L].cells[0L].width)
+        assertEquals(TerminalCursor(0L, 3L, true), terminal.cursor)
+        assertEquals(Some(TerminalPosition(0L, 0L)), terminal.resolve(wide))
+        val initiallyNarrow = Terminal(1L, 4L)
+        for (byte in "👩‍💻".toByteArray())
+            initiallyNarrow.feed([byte])
+        initiallyNarrow.resize(4L, 4L)
+        assertEquals("👩‍💻", text(initiallyNarrow, 0L))
+    }
+
+    @Test
+    fun boundaryAffinityAndWideEndpointsAreUnambiguous() {
+        val terminal = Terminal(4L, 3L)
+        terminal.feed("中abX".toByteArray())
+        val before = terminal.anchorAt(0L, 4L, TerminalAffinity.Before)!!
+        val after = terminal.anchorAt(0L, 4L, TerminalAffinity.After)!!
+        assertEquals(Some(TerminalPosition(0L, 4L)), terminal.resolve(before))
+        assertEquals(Some(TerminalPosition(1L, 0L)), terminal.resolve(after))
+        assertEquals(
+            Some(TerminalPosition(0L, 0L)),
+            terminal.resolve(terminal.anchorAt(0L, 1L, TerminalAffinity.Before)!!)
+        )
+        assertEquals(
+            Some(TerminalPosition(0L, 2L)),
+            terminal.resolve(terminal.anchorAt(0L, 1L, TerminalAffinity.After)!!)
+        )
+        terminal.resize(8L, 3L)
+        assertEquals(Some(TerminalPosition(0L, 4L)), terminal.resolve(before))
+        assertEquals(Some(TerminalPosition(0L, 4L)), terminal.resolve(after))
+    }
+
+    @Test
+    fun historyReflowsAndEvictedPrefixesInvalidateOnlyLostAnchors() {
+        val terminal = Terminal(4L, 2L, 3L)
+        terminal.feed("abcdefghi".toByteArray())
+        val lost = terminal.anchorAt(0L, 0L)!!
+        val retained = terminal.anchorAt(1L, 0L)!!
+        terminal.resize(2L, 2L)
+        assertEquals(3L, terminal.historySize)
+        assertEquals(Some(TerminalPosition(2L, 0L)), terminal.resolve(retained))
+        terminal.feed("jklm".toByteArray())
+        assertEquals(None, terminal.resolve(lost))
+        assertTrue(terminal.resolve(retained) != None)
+        assertTrue(terminal.lines(0L, 1L)[0L].logicalOffset > 0L)
+    }
+
+    @Test
+    fun savedCursorAndStyleMoveWithLogicalContent() {
+        val terminal = Terminal(10L, 4L)
+        terminal.feed("\u001b[31mabcdefgh\u001b7\r\nQ".toByteArray())
+        terminal.resize(4L, 4L)
+        terminal.feed("\u001b8".toByteArray())
+        assertEquals(TerminalCursor(2L, 0L, true), terminal.cursor)
+        terminal.feed("Z".toByteArray())
+        assertEquals("Z", text(terminal, 2L))
+        assertEquals(
+            TerminalColor.Indexed(1),
+            terminal.lines(2L, 1L)[0L].cells[0L].style.foreground
+        )
+        terminal.resize(12L, 4L)
+        assertEquals("abcdefghZ", text(terminal, 0L))
+    }
+
+    @Test
+    fun alternateScreenClipsAndResetChangesBufferIdentity() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("abcdefgh".toByteArray())
+        val anchor = terminal.anchorAt(0L, 6L)!!
+        terminal.feed("\u001b[?1049h12345678".toByteArray())
+        assertEquals(None, terminal.resolve(anchor))
+        terminal.resize(4L, 3L)
+        assertEquals("1234", text(terminal, 0L))
+        terminal.feed("\u001b[?1049l".toByteArray())
+        assertEquals("abcd", text(terminal, 0L))
+        assertEquals("efgh", text(terminal, 1L))
+        assertEquals(Some(TerminalPosition(1L, 2L)), terminal.resolve(anchor))
+        terminal.feed("\u001bc".toByteArray())
+        assertEquals(None, terminal.resolve(anchor))
+    }
+
+    @Test
+    fun repeatedWidthChangesPreserveEveryWrittenGrapheme() {
+        val terminal = Terminal(9L, 4L, 100L)
+        val original = "α  中e\u0301👩‍💻   fin"
+        terminal.feed(original.toByteArray())
+        for (width in [1L, 2L, 7L, 3L, 12L, 4L, 10L]) {
+            terminal.resize(width, 4L)
+            val combined = StringBuilder()
+            for (index in 0L..<terminal.historySize + terminal.rows)
+                combined.append(text(terminal, index))
+            assertEquals(original, combined.toString())
+        }
+    }
+
+    @Test
+    fun backgroundErasureRemainsStyledThroughReflow() {
+        val terminal = Terminal(6L, 2L)
+        terminal.feed("\u001b[41m\u001b[2K".toByteArray())
+        terminal.resize(3L, 3L)
+        for (index in 0L..<2L) {
+            for (cell in terminal.lines(index, 1L)[0L].cells)
+                assertEquals(TerminalColor.Indexed(1), cell.style.background)
+        }
+    }
+
+    @Test
+    fun heightReductionKeepsNonemptyRowsInHistory() {
+        val terminal = Terminal(4L, 4L)
+        terminal.feed("a\r\nb\r\nc\r\nd\u001b[H".toByteArray())
+        terminal.resize(4L, 2L)
+        assertEquals(2L, terminal.historySize)
+        assertEquals("a", text(terminal, 0L))
+        assertEquals("d", text(terminal, 3L))
+        assertEquals(0L, terminal.cursor.row)
+    }
+}
+
+private fun text(terminal: Terminal, row: Long): String {
+    val output = StringBuilder()
+    for (cell in terminal.lines(row, 1L)[0L].cells) {
+        if (cell.width > 0L) output.append(cell.text)
+    }
+    return output.toString()
+}

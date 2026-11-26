@@ -1,8 +1,66 @@
 package scoop.terminal.emulator
 
-/** An incremental VT emulator with physical-row scrollback. All access is serialized by its owner. */
-public class Terminal public constructor(columns: Long, rows: Long, historyLimit: Long = 10000L) {
-    private val state = createState(columns, rows, historyLimit)
+import scoop.charset.unicodeTerminalDataVersion
+
+public enum TerminalAmbiguousWidth {
+    Narrow, Wide
+}
+
+/** An incremental VT emulator with reflowable main-screen scrollback. All access is serialized by its owner. */
+public class Terminal public constructor(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long = 10000L,
+    snapshotLimits: TerminalSnapshotLimits = TerminalSnapshotLimits(),
+    parserLimits: TerminalParserLimits = TerminalParserLimits(),
+    ambiguousWidth: TerminalAmbiguousWidth = TerminalAmbiguousWidth.Narrow,
+    colors: TerminalColors = TerminalColors(),
+    clipboardPolicy: TerminalClipboardPolicy = TerminalClipboardPolicy(),
+    linkLimits: TerminalLinkLimits = TerminalLinkLimits(),
+    trackingLimits: TerminalTrackingLimits = TerminalTrackingLimits(),
+    commandLimits: TerminalCommandLimits = TerminalCommandLimits(),
+    imageLimits: TerminalImageLimits = TerminalImageLimits(),
+    graphics: TerminalGraphicsSupport = TerminalGraphicsSupport(),
+    imageDecoder: TerminalImageDecoder? = None
+) : Closeable {
+    private var closed = false
+    private val state = createState(
+        columns,
+        rows,
+        historyLimit,
+        parserLimits,
+        ambiguousWidth,
+        colors, clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits, graphics,
+        imageDecoder
+    )
+    private val snapshots = TerminalSnapshotPool(snapshotLimits)
+
+    /** Borrowed committed reading; acquire a snapshot when retaining it beyond the current use. */
+    public val reading: TerminalReading get() = state.reading
+    public fun snapshot(): TerminalSnapshot = snapshots.acquire(state.reading)
+
+    /** Registers component-owned positions; edits migrate them without retaining an edit journal. */
+    public fun track(
+        range: TerminalRange,
+        kind: TerminalTrackingKind = TerminalTrackingKind.Content,
+        source: TerminalReading? = None
+    ): TerminalTrackedRange {
+        checkOpen()
+        return state
+            .tracking
+            .register(
+                state.screen,
+                source ?: reading, range, kind, reading.presentationVersion
+            )
+    }
+
+    public val unicodeVersion: String = unicodeTerminalDataVersion()
+    public val ambiguousWidth: TerminalAmbiguousWidth get() = state.ambiguousWidth
+    public val pixelSize: TerminalPixelSize? get() = state.pixelSize
+    /** Latest parsed host metadata; the reading retains the committed metadata generation. */
+    public val metadata: TerminalMetadata get() = state.metadata
+    public val synchronizedOutput: Boolean get() = state.synchronizedOutput
+    public val synchronizationGeneration: Long get() = state.synchronizationGeneration
 
     public val columns: Long get() = state.screen.columns
     public val rows: Long get() = state.screen.rows
@@ -11,25 +69,60 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
     /** Version of the cells, physical rows and scrollback, independent of cursor-only output. */
     public val screenRevision: Long get() = state.screenRevision
     public val alternateScreen: Boolean get() = state.alternateScreen
+    public val bufferEpoch: Long get() = state.screen.bufferEpoch
     public val mouseReporting: Boolean
-        get() = state.modes.mouseTracking != 0 && state.modes.sgrMouse
+        get() = state.modes.mouseTracking != 0
     public val cursor: TerminalCursor
         get() {
             val screen = state.screen
-            return TerminalCursor(screen.row, screen.column, state.modes.cursorVisible)
+            return TerminalCursor(
+                screen.row, screen.column, state.modes.cursorVisible,
+                state.modes.cursorShape, state.modes.cursorBlink
+            )
         }
 
     /** Processes output in order, retaining incomplete UTF-8, escape sequences and graphemes. */
-    public fun feed(bytes: List<Byte>): TerminalUpdate = state.feed(bytes)
+    public fun feed(bytes: List<Byte>): TerminalUpdate {
+        checkOpen();
+        return state.feed(bytes)
+    }
 
     /** Completes pending text when the output stream ends. */
-    public fun finishOutput(): TerminalUpdate = state.finishOutput()
+    public fun finishOutput(): TerminalUpdate {
+        checkOpen();
+        return state.finishOutput()
+    }
 
-    /** Resizes physical lines and optionally restores history when the main screen grows taller. */
-    public fun resize(columns: Long, rows: Long, restoreHistory: Boolean = true) {
+    /** Host-clock expiry and lifecycle events may release an unfinished synchronized frame. */
+    public fun releaseSynchronizedOutput(): TerminalUpdate {
+        checkOpen();
+        return state.releaseSynchronizedOutput()
+    }
+    public fun setColors(colors: TerminalColors): TerminalUpdate {
+        checkOpen();
+        return state.setColors(colors)
+    }
+
+    /** Remeasures both buffers and history while preserving stable text anchors. */
+    public fun setAmbiguousWidth(width: TerminalAmbiguousWidth): TerminalUpdate {
+        checkOpen()
+        return state.changeAmbiguousWidth(width)
+    }
+
+    /** Reflows the main screen; the alternate screen retains its two-dimensional grid semantics. */
+    public fun resize(
+        columns: Long,
+        rows: Long,
+        restoreHistory: Boolean = true,
+        pixels: TerminalPixelSize? = None
+    ): TerminalUpdate {
+        checkOpen()
         checkSize(columns, rows)
-        if (columns != this.columns || rows != this.rows)
-            state.resize(columns, rows, restoreHistory)
+        checkPixels(pixels)
+        return if (columns != this.columns || rows != this.rows || pixels != pixelSize)
+            state.resize(columns, rows, restoreHistory, pixels)
+        else
+            state.releaseSynchronizedOutput()
     }
 
     /** Reads zero-based physical rows, starting at the oldest retained scrollback row. */
@@ -42,14 +135,62 @@ public class Terminal public constructor(columns: Long, rows: Long, historyLimit
 
     public fun findLine(id: Long): Long? = state.screen.findLine(id)
 
+    /** Creates an anchor; wide-cell endpoints expand according to affinity. Invalid coordinates return None. */
+    public fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity = TerminalAffinity.After
+    ): TerminalAnchor? = state.screen.anchorAt(row, column, affinity)
+
+    /** Resolves retained content in the active buffer. Reset or eviction makes the anchor unavailable. */
+    public fun resolve(anchor: TerminalAnchor): TerminalPosition? = state.screen.resolve(anchor)
+
     /** Encodes a host input using the modes active at the moment of the call. */
-    public fun encodeInput(input: TerminalInput): Array<Byte> = encode(state, input)
+    public fun encodeInput(input: TerminalInput): Array<Byte> {
+        checkOpen();
+        return encode(state, input)
+    }
+
+    private fun checkOpen() {
+        if (closed) throw IllegalStateException(Some("terminal is closed"))
+    }
+
+    /** Releases mutable graphics and the borrowed image frame; owned snapshots remain available. */
+    public override fun close() {
+        if (closed) return
+        closed = true
+        state.close()
+    }
 }
 
-private fun createState(columns: Long, rows: Long, historyLimit: Long): TerminalState {
+private fun createState(
+    columns: Long,
+    rows: Long,
+    historyLimit: Long,
+    parserLimits: TerminalParserLimits,
+    ambiguousWidth: TerminalAmbiguousWidth,
+    colors: TerminalColors,
+    clipboardPolicy: TerminalClipboardPolicy,
+    linkLimits: TerminalLinkLimits,
+    trackingLimits: TerminalTrackingLimits,
+    commandLimits: TerminalCommandLimits,
+    imageLimits: TerminalImageLimits,
+    graphics: TerminalGraphicsSupport,
+    imageDecoder: TerminalImageDecoder?
+): TerminalState {
     checkSize(columns, rows)
+    checkClipboardPolicy(clipboardPolicy)
     if (historyLimit < 0L) throw IllegalArgumentException(Some("negative terminal history limit"))
-    return TerminalState(columns, rows, historyLimit)
+    return TerminalState(
+        columns,
+        rows,
+        historyLimit,
+        parserLimits,
+        ambiguousWidth,
+        colors,
+        clipboardPolicy, linkLimits, trackingLimits, commandLimits, imageLimits, graphics,
+        imageDecoder
+    )
 }
 
 private fun checkSize(columns: Long, rows: Long) {

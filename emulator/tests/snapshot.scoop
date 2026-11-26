@@ -1,0 +1,128 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class SnapshotTest {
+    @Test
+    fun retainedReadingsOutliveEditsEvictionResizeAndReset() {
+        val terminal = Terminal(6L, 2L, 3L)
+        terminal.feed("one\r\ntwo\r\nthree".toByteArray())
+        val snapshot = terminal.snapshot()
+        try {
+            val old = snapshot.lines(0L, 3L)
+            val anchor = snapshot.anchorAt(0L, 0L)!!
+            assertTrue(old[1L].cells === terminal.reading.lines(1L, 1L)[0L].cells)
+            terminal.feed("\r\nfour\r\nfive\r\nsix\r\nseven".toByteArray())
+            terminal.resize(3L, 3L)
+            terminal.feed("\u001bc".toByteArray())
+            assertEquals("o", snapshot.lines(0L, 1L)[0L].cells[0L].text)
+            assertEquals(6L, snapshot.columns)
+            assertEquals(1L, snapshot.historySize)
+            assertEquals(Some(TerminalPosition(0L, 0L)), snapshot.resolve(anchor))
+            assertEquals(None, terminal.reading.resolve(anchor))
+            assertEquals(Some(0L), snapshot.findLine(old[0L].id))
+            assertTrue(snapshot.presentationVersion < terminal.reading.presentationVersion)
+        } finally {
+            snapshot.close()
+        }
+        snapshot.close()
+        assertTrue(snapshot.isClosed)
+        assertFailsWith<IllegalStateException> {
+            snapshot.lines(0L, 1L);
+            Unit
+        }
+    }
+
+    @Test
+    fun snapshotLimitsChargeSharedGenerationsOnceAndReleaseOnClose() {
+        val terminal = Terminal(1L, 1L, snapshotLimits = TerminalSnapshotLimits(2L, 10000L))
+        val first = terminal.snapshot()
+        val second = terminal.snapshot()
+        assertFailsWith<IllegalStateException> {
+            terminal.snapshot();
+            Unit
+        }
+        second.close()
+        terminal.feed("a".toByteArray())
+        assertFailsWith<IllegalStateException> {
+            terminal.snapshot();
+            Unit
+        }
+        first.close()
+        terminal
+            .snapshot()
+            .use { latest -> assertEquals("a", latest.lines(0L, 1L)[0L].cells[0L].text) }
+        assertFailsWith<IllegalArgumentException> {
+            val invalid = Terminal(1L, 1L, snapshotLimits = TerminalSnapshotLimits(-1L));
+            Unit
+        }
+    }
+
+    @Test
+    fun textAndPresentationVersionsSeparateCursorAndStyleChanges() {
+        val terminal = Terminal(8L, 3L)
+        val first = terminal.feed("x".toByteArray())
+        assertEquals(1L, first.damage.rows.size)
+        val text = terminal.reading.textRevision
+        val screen = terminal.reading.screenRevision
+        val cursor = terminal.feed("\u001b[2;1H".toByteArray())
+        assertEquals(0L, cursor.damage.rows.size)
+        assertTrue(cursor.damage.cursorChanged)
+        assertEquals(text, terminal.reading.textRevision)
+        assertEquals(screen, terminal.reading.screenRevision)
+        val styled = terminal.feed("\u001b[H\u001b[31mx".toByteArray())
+        assertEquals(1L, styled.damage.rows.size)
+        assertEquals(text, terminal.reading.textRevision)
+        assertTrue(terminal.reading.screenRevision > screen)
+        val resize = terminal.resize(5L, 3L)
+        assertTrue(resize.damage.resized)
+        assertEquals(text, terminal.reading.textRevision)
+        assertEquals(0L, terminal.feed("\u001b]2;title\u0007".toByteArray()).damage.rows.size)
+    }
+
+    @Test
+    fun historyPagesAndLogicalVersionsStayFrozenAcrossFurtherWrapping() {
+        val terminal = Terminal(2L, 2L, 200L)
+        for (index in 0L..<140L)
+            terminal.feed("ab".toByteArray())
+        val old = terminal.snapshot()
+        try {
+            val first = old.lines(0L, 1L)[0L]
+            val last = old.lines(old.historySize + 1L, 1L)[0L]
+            assertEquals(first.textVersion, last.textVersion)
+            for (index in 0L..<100L)
+                terminal.feed("cd".toByteArray())
+            assertEquals(first.textVersion, old.lines(0L, 1L)[0L].textVersion)
+            assertEquals(Some(0L), old.findLine(first.id))
+            assertEquals(None, terminal.reading.findLine(first.id))
+            val reading = terminal.reading
+            assertEquals(
+                reading.lines(0L, 1L)[0L].textVersion,
+                reading.lines(reading.historySize, 1L)[0L].textVersion
+            )
+        } finally {
+            old.close()
+        }
+    }
+
+    @Test
+    fun persistentIndicesPreserveOldRootsAndRemainBalanced() {
+        var root: SnapshotIndex<Long>? = None
+        for (index in 0L..<1024L)
+            root = Some(indexUpdated(root, (index * 37L) % 1024L, index))
+        val frozen = root
+        for (key in 0L..<1024L) {
+            if (key % 2L == 0L)
+                root = indexRemoved(root, key)
+            else
+                root = Some(indexUpdated(root, key, -1L))
+        }
+        assertTrue(root!!.height <= 12)
+        for (index in 0L..<1024L) {
+            val key = (index * 37L) % 1024L
+            assertEquals(Some(index), indexValue(frozen, key))
+            assertEquals(if (key % 2L == 0L) None else Some(-1L), indexValue(root, key))
+        }
+    }
+}

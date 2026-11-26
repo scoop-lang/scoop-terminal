@@ -1,0 +1,185 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.native.macos.MetalContext
+import scoop.platform.time.MonotonicTimeSource
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.tests.terminal.TerminalMetalProbe
+import scoop.tests.terminal.withTerminalMetalPool
+
+@Test
+private class TerminalMetalResourceBenchmark {
+    @Test
+    @Ignore("manual Metal resource measurement")
+    fun metalPng4k() {
+        metalResourceBenchmark("png")
+    }
+    @Test
+    @Ignore("manual Metal resource measurement")
+    fun metalSixel4k() {
+        metalResourceBenchmark("sixel")
+    }
+    @Test
+    @Ignore("manual Metal resource measurement")
+    fun metalPlacements() {
+        metalResourceBenchmark("placements")
+    }
+}
+
+private class MetalResourceSamples {
+    val times = ArrayList<Long>()
+    var firstNs = 0L
+    var uploads = 0L
+    var nativeBytes = 0L
+    var gpuBaseline = 0L
+    var gpuTarget = 0L
+    var gpuFirst = 0L
+    var gpuCached = 0L
+    var gpuPeak = 0L
+    var gpuCacheCleared = 0L
+    var gpuContextClosed = 0L
+    var gpuTargetReleased = 0L
+}
+
+private fun metalResourceBenchmark(kind: String) {
+    terminalTestFonts()
+        .use { fonts ->
+            val appearance = terminalTestAppearance()
+            val decoder = ResourceDecoder()
+            Terminal(
+                120L, 40L, graphics = TerminalGraphicsSupport(sixel = true, kitty = true),
+                imageDecoder = Some(decoder)
+            )
+                .use { terminal ->
+                    terminal.setColors(appearance.colorTheme())
+                    terminal
+                        .resize(120L, 40L, pixels = Some(TerminalPixelSize(960L, 640L, 8L, 16L)))
+                    resourceFeedGraphics(terminal, kind)
+                    val glyphs = TerminalGlyphCache(fonts, appearance)
+                    val sample = try {
+                        measureTerminalMetal(kind, terminal.reading, appearance, glyphs)
+                    } finally {
+                        glyphs.release()
+                    }
+                    assertEquals(if (kind == "sixel") 0L else 1L, decoder.calls)
+                    terminal.feed("\u001bc".toByteArray())
+                    assertEquals(0L, terminal.reading.images.placementCount)
+                    resourceReport(
+                        "metal-" + kind, sample.times,
+                        f"first_frame_ns=${sample.firstNs} decoder_calls=${decoder.calls} uploads=${
+                            sample.uploads
+                        } " +
+                            f"native_estimated_bytes=${sample.nativeBytes} gpu_baseline_bytes=${
+                                sample.gpuBaseline
+                            } " +
+                            f"gpu_target_bytes=${sample.gpuTarget} gpu_first_frame_bytes=${
+                                sample.gpuFirst
+                            } " +
+                            f"gpu_cached_frame_bytes=${sample.gpuCached} gpu_peak_bytes=${
+                                sample.gpuPeak
+                            } " +
+                            f"gpu_after_cache_clear_bytes=${sample.gpuCacheCleared} " +
+                            f"gpu_after_context_close_bytes=${sample.gpuContextClosed} " +
+                            f"gpu_after_target_release_bytes=${sample.gpuTargetReleased}"
+                    )
+                }
+        }
+}
+
+private fun measureTerminalMetal(
+    kind: String,
+    reading: TerminalReading,
+    appearance: TerminalAppearance,
+    glyphs: TerminalGlyphCache
+): MetalResourceSamples {
+    val rows = TerminalRowCache(glyphs)
+    val images = TerminalImageCache()
+    val sample = MetalResourceSamples()
+    try {
+        TerminalMetalProbe
+            .create(960, 640)
+            .use { probe ->
+                sample.gpuBaseline = probe.baselineBytes
+                sample.gpuTarget = probe.allocatedBytes
+                withTerminalMetalPool {
+                    @Unsafe {
+                        val context = MetalContext.create(probe.device(), probe.queue())
+                        try {
+                            val target = context.target(probe.texture(), 960, 640, 1.0)
+                            try {
+                                val geometry = resourceGeometry(reading, reading.historySize)
+                                for (iteration in 0L..<33L) {
+                                    val started = MonotonicTimeSource.now()
+                                    withTerminalMetalPool {
+                                        val frame = TerminalFrame(
+                                            geometry, 1L, reading.cursor, 0L,
+                                            appearance, glyphs, imageCache = Some(images),
+                                            onImageError = { error -> throw error }, rowCache =
+                                                Some(rows)
+                                        )
+                                        try {
+                                            frame.shape([], "")
+                                            target.draw { canvas -> frame.drawScreen(canvas) }
+                                            target.submit()
+                                            // Include GPU completion, not just command submission.
+                                            context.drain()
+                                        } finally {
+                                            frame.close()
+                                        }
+                                    }
+                                    val elapsed = (MonotonicTimeSource.now() - started)
+                                        .inWholeNanoseconds
+                                    val allocated = probe.allocatedBytes
+                                    if (allocated > sample.gpuPeak) sample.gpuPeak = allocated
+                                    if (iteration == 0L) {
+                                        sample.firstNs = elapsed
+                                        sample.uploads = images.uploadCount
+                                        sample.gpuFirst = allocated
+                                    } else {
+                                        sample.times.add(elapsed)
+                                        sample.gpuCached = allocated
+                                        assertEquals(sample.uploads, images.uploadCount)
+                                    }
+                                }
+                                if (kind != "placements")
+                                    assertImageTestPixel(
+                                        target.readPixels(),
+                                        960L,
+                                        10L,
+                                        10L,
+                                        0,
+                                        255,
+                                        0
+                                    )
+                                sample.nativeBytes = images.retainedBytes
+                                images.clear()
+                                assertEquals(0L, images.retainedBytes)
+                                context.drain()
+                                sample.gpuCacheCleared = probe.allocatedBytes
+                            } finally {
+                                target.close()
+                            }
+                        } finally {
+                            context.close()
+                        }
+                    }
+                }
+                sample.gpuContextClosed = probe.allocatedBytes
+                probe.releaseTarget()
+                sample.gpuTargetReleased = probe.allocatedBytes
+                assertTrue(
+                    sample.gpuTargetReleased <= sample.gpuTarget,
+                    Some(
+                        f"GPU bytes after release ${sample.gpuTargetReleased}, target baseline ${
+                            sample.gpuTarget
+                        }"
+                    )
+                )
+            }
+        return sample
+    } finally {
+        images.close();
+        rows.close()
+    }
+}

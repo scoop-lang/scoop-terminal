@@ -4,7 +4,6 @@ import scoop.graphics.*
 import scoop.graphics.text.FontCollection
 import scoop.platform.system.OperatingSystem
 import scoop.platform.system.operatingSystem
-import scoop.platform.time.MonotonicInstant
 import scoop.platform.time.MonotonicTimeSource
 import scoop.surface.*
 import scoop.terminal.emulator.*
@@ -13,49 +12,95 @@ import scoop.ui.*
 import scoop.window.*
 import scoop.window.accessibility.*
 
-private val outputQuietInterval = Duration.milliseconds(24L)
-
-private val outputRefreshInterval = Duration.milliseconds(96L)
-
 /** Embeds one active view of the session, optionally focusing it on its first placement. */
 public fun terminalView(
     session: TerminalEmulatorSession,
     appearance: TerminalAppearance = TerminalAppearance(),
-    autoFocus: Boolean = false
+    autoFocus: Boolean = false,
+    options: TerminalViewOptions = TerminalViewOptions(),
+    controller: TerminalViewController? = None
 ): View = element(
-    TerminalViewProps(session, appearance, autoFocus),
+    TerminalViewProps(session, appearance, autoFocus, options, controller),
     { props, scope -> TerminalViewElement(props, scope) }
 )
 
 private struct TerminalViewProps(
     val session: TerminalEmulatorSession,
     val appearance: TerminalAppearance,
-    val autoFocus: Boolean
+    val autoFocus: Boolean,
+    val options: TerminalViewOptions,
+    val controller: TerminalViewController?
 )
+
+private class TerminalViewLayout(val frame: TerminalFrame) {
+    val decorations = TerminalSelectionDecorations(frame.geometry)
+}
 
 private class TerminalViewElement(
     private val props: Props<TerminalViewProps>,
     scope: ComponentScope
-) : Element<TerminalFrame>(scope) {
+) : Element<TerminalViewLayout>(scope) {
     private var session = props.value.session
-    private var viewport = TerminalViewport(session.terminal)
+    private var controller = props.value.controller ?: TerminalViewController(session)
+    private var ownsController = when (props.value.controller) {
+        case None -> true;
+        case Some(_) -> false
+    }
+    private val viewport: TerminalViewport get() = controller.viewport
     private var attachment: Disposable? = None
+    private var clipboardAdapter: WindowTerminalClipboardAdapter? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
-    private var observedScreen = session.terminal.screenRevision
-    private var observedCursor = session.terminal.cursor
+    private var rowCache: TerminalRowCache? = None
+    private val commandSeparators = TerminalCommandSeparators()
+    private var imageCache: TerminalImageCache? = None
+    private var fontSubscription: Closeable? = None
+    private var observedScreen = session.reading.screenRevision
+    private var observedCursor = session.reading.cursor
+    private var observedColors = session.reading.colors
+    private var observedCommands = session.reading.commandVersion
+    private var observedImages = session.reading.images.version
+    private var themeAppearance = props.value.appearance
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
+    private var screenPaintRevision = 0L
+    private var screenPaintFrame = -1L
+    private var screenPaintCursor = -1L
+    private var screenPaintBlink = false
     private var selecting = false
+    private val selectionScroll = TerminalSelectionScroll()
+    private val selectionDeadline = scope.createDeadline { scrollSelection() }
     private var reported = TerminalMouseButton.NonePressed
+    private var lastMouse: TerminalMouse? = None
+    private val linkGesture = TerminalLinkGesture()
+    private var hovered: TerminalLink? = None
+    private var pointerPoint: Point? = None
+    private var pointerModifiers: Modifiers? = None
     private var wheelRemainder = 0.0
+    private var horizontalWheelRemainder = 0.0
     private val area = scope
         .createArea(focusable = true, textInput = true) { context, event -> route(context, event) }
     private val focus = scope.focusTarget(area)
     private val semantics = scope.semantics(SemanticRole.Text)
-    private var lastOutput = MonotonicInstant(0L, 0)
-    private var outputRefreshLimit: MonotonicInstant? = None
-    private val refreshDeadline = scope.createDeadline { refreshOutput() }
+    private var cursorBlinkVisible = true
+    private var textBlinkVisible = true
+    private val cursorBlinkDeadline = scope.createDeadline { blinkCursor() }
+    private val textBlinkDeadline = scope.createDeadline { blinkText() }
+    private var visibleTextBlinks = false
+    private val activitySubscription = scope
+        .observeWindowActivity { activity ->
+            if (!activity.focused || !activity.visible || activity.occluded) {
+                cursorBlinkDeadline.cancel()
+                textBlinkDeadline.cancel()
+                cursorBlinkVisible = true
+                textBlinkVisible = true
+                cancelInteraction()
+                scope.requestFrame()
+            } else {
+                resetCursorBlink()
+                scope.requestFrame()
+            }
+        }
     private val composition = TerminalComposition(
         scope.nativeWindow, area,
         { value -> session.send(TerminalInput.Text(value)) },
@@ -64,80 +109,212 @@ private class TerminalViewElement(
 
     public override fun onMount() {
         area.scope.defaultAction = area.scope.handler
+        area.scope.onEventFinished = { event -> finishedEvent(event) }
         semantics.bindFocus(Some(focus))
         attach()
+        resetCursorBlink()
         if (props.value.autoFocus) focus.handle.requestFocus()
     }
 
     private fun attach() {
-        observedScreen = session.terminal.screenRevision
-        observedCursor = session.terminal.cursor
-        attachment = Some(session.attach { if (scope.isMounted) modelChanged() })
+        themeAppearance = props.value.appearance
+        session.setColors(themeAppearance.colorTheme())
+        observedScreen = session.reading.screenRevision
+        observedCursor = session.reading.cursor
+        observedColors = session.reading.colors
+        observedCommands = session.reading.commandVersion
+        observedImages = session.reading.images.version
+        clipboardAdapter?.close()
+        val clipboard = WindowTerminalClipboardAdapter(scope.nativeWindow)
+        clipboardAdapter = Some(clipboard)
+        attachment = Some(session.attach(Some(clipboard)) { if (scope.isMounted) modelChanged() })
+        controller
+            .bind(session) { invalidation ->
+                if (scope.isMounted) {
+                    when (invalidation) {
+                        case Reset -> {
+                            cancelInteraction();
+                            refresh()
+                        }
+
+                        case Layout -> refresh()
+                        case Frame -> scope.requestFrame()
+                    }
+                }
+            }
         refresh()
     }
 
     public override fun update(): UiInvalidation {
+        val appearance = props.value.appearance
+        if (appearance.foreground !=
+            themeAppearance.foreground ||
+            appearance.background !=
+            themeAppearance.background ||
+            appearance.cursor !=
+            themeAppearance.cursor ||
+            appearance.palette !==
+            themeAppearance.palette
+        ) {
+            themeAppearance = appearance
+            session.setColors(appearance.colorTheme())
+        }
         val next = props.value.session
-        if (next !== session) {
+        val nextController = props.value.controller
+        val controllerChanged = when (nextController) {
+            case Some(val value) -> value !== controller
+            case None -> !ownsController
+        }
+        if (next !== session || controllerChanged) {
+            cancelInteraction()
             attachment?.dispose()
+            controller.unbind()
+            if (ownsController) controller.close()
             accepted = None
+            rowCache?.clear()
+            commandSeparators.clear()
+            imageCache?.clear()
             selecting = false
             reported = TerminalMouseButton.NonePressed
             composition.restart()
             session = next
-            viewport = TerminalViewport(next.terminal)
+            controller = nextController ?: TerminalViewController(next)
+            ownsController = when (nextController) {
+                case None -> true;
+                case Some(_) -> false
+            }
             attach()
         }
         return UiInvalidation.Layout
     }
 
     public override fun onUnmount() {
+        cancelInteraction()
+        cursorBlinkDeadline.cancel()
+        textBlinkDeadline.cancel()
+        activitySubscription.close()
         attachment?.dispose()
         attachment = None
+        controller.unbind()
+        if (ownsController) controller.close()
+        clipboardAdapter?.close()
+        clipboardAdapter = None
         accepted = None
+        fontSubscription?.close()
+        fontSubscription = None
+        rowCache?.close()
+        rowCache = None
+        commandSeparators.clear()
         glyphCache?.release()
         glyphCache = None
+        imageCache?.close()
+        imageCache = None
     }
 
     private fun modelChanged() {
-        val terminal = session.terminal
+        val interaction = controller.synchronize()
+        if (interaction.resetInteraction || (selecting && !viewport.dragging)) cancelInteraction()
+        val terminal = session.reading
+        val colorsChanged = observedColors !== terminal.colors
+        observedColors = terminal.colors
+        val commandsChanged = observedCommands != terminal.commandVersion
+        observedCommands = terminal.commandVersion
+        val imagesChanged = observedImages != terminal.images.version
+        observedImages = terminal.images.version
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
+        if (moved) resetCursorBlink()
         observedCursor = cursor
+        updateBlinkSchedules(cursor)
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
-            if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
+            if (colorsChanged || imagesChanged)
+                refresh()
+            else if (commandsChanged || (moved && viewport.atBottom)) scope.requestFrame()
             return
         }
         observedScreen = screen
-        viewport.update()
-        val now = MonotonicTimeSource.now()
-        lastOutput = now
-        if (outputRefreshLimit == None) {
-            outputRefreshLimit = Some(now + outputRefreshInterval)
-            refreshDeadline.schedule(now + outputQuietInterval)
+        refresh()
+    }
+
+    private fun resetCursorBlink() {
+        cursorBlinkVisible = true
+        cursorBlinkDeadline.cancel()
+    }
+
+    private fun canBlink(): Boolean {
+        if (!scope.isMounted ||
+            !scope.isFrameEnabled ||
+            !area.isFocusActive ||
+            area.visibleBounds ==
+            None ||
+            !scope.nativeWindow.isVisible ||
+            scope.nativeWindow.isOccluded
+        )
+            return false
+        return when (session.state) {
+            case Running -> true
+            case _ -> false
         }
     }
 
-    private fun refreshOutput() {
-        // Coalesce a burst until it quiets down, with a deadline for sustained output.
-        val limit = outputRefreshLimit ?: return
-        val quiet = lastOutput + outputQuietInterval
-        val next = if (quiet < limit) quiet else limit
-        if (MonotonicTimeSource.now() < next) {
-            refreshDeadline.schedule(next)
+    private fun cursorCanBlink(cursor: TerminalCursor): Boolean = canBlink() &&
+        viewport.atBottom &&
+        cursor.visible &&
+        cursor.blink &&
+        area.visibleCaretBounds !=
+        None &&
+        composition.text ==
+        ""
+
+    private fun updateBlinkSchedules(cursor: TerminalCursor, arm: Boolean = false) {
+        val wasCursorVisible = cursorBlinkVisible
+        val wasTextVisible = textBlinkVisible
+        if (cursorCanBlink(cursor)) {
+            if (arm && !cursorBlinkDeadline.isScheduled)
+                cursorBlinkDeadline
+                    .schedule(MonotonicTimeSource.now() + Duration.milliseconds(500L))
         } else {
-            outputRefreshLimit = None
-            refresh()
+            cursorBlinkDeadline.cancel()
+            cursorBlinkVisible = true
         }
+        if (canBlink() && visibleTextBlinks) {
+            if (arm && !textBlinkDeadline.isScheduled)
+                textBlinkDeadline.schedule(MonotonicTimeSource.now() + Duration.milliseconds(600L))
+        } else {
+            textBlinkDeadline.cancel()
+            textBlinkVisible = true
+        }
+        if (wasCursorVisible != cursorBlinkVisible || wasTextVisible != textBlinkVisible)
+            scope.requestFrame()
+    }
+
+    private fun blinkCursor() {
+        if (!cursorCanBlink(session.reading.cursor)) return
+        cursorBlinkVisible = !cursorBlinkVisible
+        scope.requestFrame()
+        // Only a successfully presented scene may request another tick.
+    }
+
+    private fun blinkText() {
+        if (!canBlink() || !visibleTextBlinks) return
+        textBlinkVisible = !textBlinkVisible
+        scope.requestFrame()
     }
 
     private fun refresh() {
-        if (outputRefreshLimit != None) {
-            outputRefreshLimit = None
-            refreshDeadline.cancel()
-        }
-        val visible = viewport.visibleText()
+        controller.synchronize()
+        area.setCaret(None, Some(composition.revision))
+        // The UI root coalesces layout requests until its next eligible frame.
+        scope.requestLayout()
+    }
+
+    private fun refreshSelection() {
+        controller.synchronize()
+        scope.requestFrame()
+    }
+
+    private fun updateSemantics(visible: VisibleText) {
         semantics
             .update(
                 SemanticProperties(
@@ -145,8 +322,6 @@ private class TerminalViewElement(
                     readOnly = true, selection = visible.selection
                 )
             )
-        area.setCaret(None, Some(composition.revision))
-        scope.requestLayout()
     }
 
     private fun glyphs(fonts: FontCollection, appearance: TerminalAppearance): TerminalGlyphCache {
@@ -156,17 +331,48 @@ private class TerminalViewElement(
             case None -> {}
         }
         val next = TerminalGlyphCache(fonts, appearance)
+        val subscription = try {
+            fonts.observeChanges { _ -> if (scope.isMounted) scope.requestLayout() }
+        } catch (error: Throwable) {
+            next.release()
+            throw error
+        }
+        fontSubscription?.close()
+        fontSubscription = Some(subscription)
         glyphCache = Some(next)
         previous?.release()
         return next
     }
 
+    private fun rows(glyphs: TerminalGlyphCache): TerminalRowCache {
+        when (rowCache) {
+            case Some(val cache) -> if (cache.canReuse(glyphs)) return cache
+            case None -> {}
+        }
+        rowCache?.close()
+        val cache = TerminalRowCache(glyphs)
+        rowCache = Some(cache)
+        return cache
+    }
+
     public override fun measure(context: MeasureContext, constraints: Constraints): LayoutResult<
-        TerminalFrame
+        TerminalViewLayout
     > {
         val appearance = props.value.appearance
         val glyphs = glyphs(scope.defaultFonts, appearance)
-        val terminal = session.terminal
+        val images = when (imageCache) {
+            case Some(val cache) -> {
+                cache.configure(props.value.options.imageCacheLimits);
+                cache
+            }
+
+            case None -> {
+                val cache = TerminalImageCache(props.value.options.imageCacheLimits)
+                imageCache = Some(cache)
+                cache
+            }
+        }
+        val terminal = session.reading
         val metrics = glyphs.metrics
         val size = constraints
             .constrain(
@@ -181,26 +387,31 @@ private class TerminalViewElement(
         val visible = terminal.lines(first, clamp(rows, 0L, terminal.rows))
         val geometry = GridGeometry(
             size, metrics, first, visible, columns, rows, terminal.screenRevision,
-            first == terminal.historySize
+            first == terminal.historySize, terminal, scope.nativeWindow.metrics?.scaleFactor ?: 1.0
         )
         paintRevision += 1L
+        controller.layoutStarted(paintRevision)
         val frame = TerminalFrame(
-            geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs
+            geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
+            false, Some(images), props.value.options.onImageError,
+            Some(rows(glyphs))
         )
         try {
-            frame.shape(viewport.range(), composition.text)
-            return LayoutResult(LayoutMetrics(size), frame, { frame.close() })
+            frame.shape([], composition.text)
+            val layout = TerminalViewLayout(frame)
+            return LayoutResult(LayoutMetrics(size), layout, { frame.close() })
         } catch (error: Throwable) {
             frame.close()
             throw error
         }
     }
 
-    public override fun scene(context: SceneContext, measured: TerminalFrame) {
+    public override fun scene(context: SceneContext, layout: TerminalViewLayout) {
+        val measured = layout.frame
         val bounds = Rect(0.0, 0.0, context.size.width, context.size.height)
         val owner = session
-        val geometry = measured.geometry
-        val terminal = owner.terminal
+        val terminal = owner.reading
+        val geometry = measured.geometry.withCommittedMetadata(terminal)
         // The live cursor belongs to this grid only until pending screen output changes it.
         val cursor = if (geometry.screenRevision == terminal.screenRevision)
             terminal.cursor
@@ -210,17 +421,57 @@ private class TerminalViewElement(
         area.setCaret(caret, Some(measured.inputRevision))
         context.place(area, bounds)
         context.semantics(semantics, bounds)
+        visibleTextBlinks = measured.hasBlink
+        updateBlinkSchedules(cursor)
+        val textVisible = !area.isFocusActive || textBlinkVisible || !measured.hasBlink
+        val textCursor = measured.textCursorKey(cursor)
+        if (screenPaintFrame !=
+            measured.paintRevision ||
+            screenPaintCursor !=
+            textCursor ||
+            screenPaintBlink !=
+            textVisible
+        ) {
+            screenPaintRevision += 1L
+            screenPaintFrame = measured.paintRevision
+            screenPaintCursor = textCursor
+            screenPaintBlink = textVisible
+        }
         context
-            .drawLayer(screenPaint, bounds, measured.paintRevision) { paint ->
-                measured.drawScreen(paint.canvas)
-            }
+            .drawLayer(
+                screenPaint,
+                bounds,
+                screenPaintRevision
+            ) { paint -> measured.drawScreen(paint.canvas, textVisible, Some(cursor)) }
+        val selection = layout.decorations.update(viewport.selectionIn(geometry.reading))
+        if (selection.rects.size > 0L)
+            context.draw { paint -> measured.drawSelection(paint.canvas, selection.rects) }
+        if (props.value.options.commandSeparators) {
+            val separators = commandSeparators.rows(geometry)
+            if (separators.size > 0L)
+                context.draw { paint -> measured.drawCommandSeparators(paint.canvas, separators) }
+        }
+        val link = hovered
+        val highlights = controller.visibleHighlights(geometry)
+        if (highlights.size > 0L)
+            context.draw { paint -> measured.drawSearchHighlights(paint.canvas, highlights) }
+        context.draw { paint -> measured.drawLinks(paint.canvas, link) }
         when (caret) {
             case Some(val rect) -> {
                 val focused = area.isFocusActive
-                context
-                    .draw { paint ->
-                        measured.drawCursor(paint.canvas, rect, cursor.visible, focused)
-                    }
+                val blinkVisible = cursorBlinkVisible
+                val glyph = if (focused) measured.cursorGlyph(cursor) else None
+                try {
+                    context
+                        .draw { paint ->
+                            measured
+                                .drawCursor(
+                                    paint.canvas, rect, cursor, focused, blinkVisible, glyph
+                                )
+                        }
+                } finally {
+                    glyph?.close()
+                }
             }
 
             case None -> {}
@@ -234,8 +485,54 @@ private class TerminalViewElement(
                     FrameSubmission.Accepted
                 ) {
                     accepted = Some(geometry)
+                    updateSemantics(selection.text)
+                    controller.frameAccepted(geometry, measured.paintRevision)
+                    updateBlinkSchedules(cursor, arm = true)
+                    updateHover(geometry)
                     if (geometry.columns > 0L && geometry.requestedRows > 0L)
-                        owner.requestSize(geometry.columns, geometry.requestedRows)
+                        owner
+                            .requestSize(
+                                geometry.columns,
+                                geometry.requestedRows,
+                                Some(
+                                    TerminalPixelSize(
+                                        clamp(
+                                            (
+                                                geometry.columns.toDouble() *
+                                                    geometry.metrics.width *
+                                                    geometry.scaleFactor +
+                                                    0.5
+                                            )
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (
+                                                geometry.requestedRows.toDouble() *
+                                                    geometry.metrics.height *
+                                                    geometry.scaleFactor +
+                                                    0.5
+                                            )
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (geometry.metrics.width * geometry.scaleFactor + 0.5)
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        ),
+                                        clamp(
+                                            (geometry.metrics.height * geometry.scaleFactor + 0.5)
+                                                .toLong(),
+                                            1L,
+                                            2147483647L
+                                        )
+                                    )
+                                )
+                            )
                 }
             }
     }
@@ -246,10 +543,27 @@ private class TerminalViewElement(
                 case TextInput(val text) -> composition.input(text)
 
                 case FocusChanged(val active) -> {
+                    if (!active) cancelInteraction()
                     session.send(TerminalInput.Focus(active))
                     // The surface also delivers focus loss during retirement.
-                    if (scope.isMounted) scope.requestFrame()
+                    if (scope.isMounted) {
+                        resetCursorBlink()
+                        updateBlinkSchedules(session.reading.cursor)
+                        scope.requestFrame()
+                    }
                 }
+
+                case Pointer(val pointer) ->
+                    when (pointer) {
+                        case Cancelled(_, _) -> cancelInteraction()
+
+                        case Left(_) -> {
+                            if (!selecting && !linkGesture.active) pointerPoint = None
+                            setHovered(None)
+                        }
+
+                        case _ -> {}
+                    }
 
                 else -> {}
             }
@@ -288,7 +602,7 @@ private class TerminalViewElement(
 
     private fun clipboardCommand(command: TextEditCommand): Boolean = when (command) {
         case Copy -> {
-            val text = viewport.copy()
+            val text = controller.copySelection()
             if (text != None) scope.nativeWindow.clipboard.writeText(text!!)
             true
         }
@@ -303,24 +617,37 @@ private class TerminalViewElement(
     }
 
     private fun pointerEvent(context: RoutedEventContext, event: InputPointerEvent): Boolean {
-        when (event) {
-            case Cancelled(_, _) -> {
-                selecting = false
-                reported = TerminalMouseButton.NonePressed
-                return false
-            }
-
-            case _ -> {}
-        }
         val frame = accepted ?: return false
         val point = context.localPosition ?: return false
-        val(row, column) = frame.hit(point) ?: return false
+        pointerPoint = Some(point)
+        val modifiers = when (event) {
+            case Button(val pointer, _, _, _) -> pointer.state.modifiers
+            case Moved(val pointer) -> pointer.state.modifiers
+            case Wheel(val pointer, _, _, _) -> pointer.state.modifiers
+            case _ -> return false
+        }
+        pointerModifiers = Some(modifiers)
+        updateHover(frame)
+        val pixels = TerminalPixelPosition(
+            (point.x * frame.scaleFactor).toLong(), (point.y * frame.scaleFactor).toLong()
+        )
+        val hit = frame.hit(point)
+        val(row, column) = when (hit) {
+            case Some(val value) -> value
+
+            case None -> {
+                if (!selecting && !linkGesture.active && reported == TerminalMouseButton.NonePressed
+                )
+                    return false
+                frame.clampedHit(point) ?: return false
+            }
+        }
         return when (event) {
-            case Button(val pointer, val button, val state, _) ->
-                button(frame, row, column, pointer.state.modifiers, button, state)
-            case Moved(val pointer) -> motion(frame, row, column, pointer.state.modifiers)
+            case Button(val pointer, val button, val state, val count) ->
+                button(frame, row, column, pixels, pointer.state.modifiers, button, state, count)
+            case Moved(val pointer) -> motion(frame, row, column, pixels, pointer.state.modifiers)
             case Wheel(val pointer, val delta, _, _) ->
-                wheel(frame, row, column, pointer.state.modifiers, delta)
+                wheel(frame, row, column, pixels, pointer.state.modifiers, delta)
             case _ -> false
         }
     }
@@ -329,9 +656,11 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers,
         mouse: MouseButton,
-        state: ElementState
+        state: ElementState,
+        count: Int
     ): Boolean {
         val mapped = when (mouse) {
             case Left -> TerminalMouseButton.Left
@@ -342,30 +671,87 @@ private class TerminalViewElement(
         if (state == ElementState.Pressed) {
             area.requestFocus(FocusOrigin.Pointer)
             if (reportMouse(frame, modifiers)) {
+                if (!area.scope.claimPointer(mouse)) return false
                 reported = mapped
-                sendMouse(TerminalMouseAction.Press, mapped, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Press, mapped, row, column, pixels, modifiers)
                 return true
             }
             if (mapped == TerminalMouseButton.Left) {
+                if (!area.scope.claimPointer(mouse)) return false
+                controller.cancelReveal()
                 val location = location(frame, row, column)
-                if (modifiers.shift && viewport.range() != None)
-                    viewport.extend(location)
+                val activate = if (operatingSystem == OperatingSystem.Darwin)
+                    modifiers.superKey
                 else
-                    viewport.select(location)
-                selecting = true
-                refresh()
+                    modifiers.control
+                when (val link = frame.reading.linkAt(frame.first + row, column)) {
+                    case Some(val value) ->
+                        if (activate) {
+                            linkGesture.begin(value, location, pixels, frame.scaleFactor)
+                            return true
+                        }
+                    case None -> {}
+                }
+                selecting = if (modifiers.shift && viewport.selection?.mode != None)
+                    viewport
+                        .extend(
+                            location,
+                            props.value.options.additionalWordCharacters,
+                            Some(frame.reading)
+                        )
+                else
+                    viewport
+                        .select(
+                            location,
+                            if (modifiers.alt)
+                                TerminalSelectionUnit.Grapheme
+                            else if (count >= 3)
+                                TerminalSelectionUnit.LogicalLine
+                            else if (count == 2)
+                                TerminalSelectionUnit.Word
+                            else
+                                TerminalSelectionUnit.Grapheme,
+                            if (modifiers.alt)
+                                TerminalSelectionMode.Rectangular
+                            else
+                                TerminalSelectionMode.Linear,
+                            props.value.options.additionalWordCharacters, Some(frame.reading)
+                        )
+                refreshSelection()
                 return true
             }
         } else {
+            if (mapped == TerminalMouseButton.Left && linkGesture.active) {
+                val link = linkGesture
+                    .release(
+                        when (val point = pointerPoint) {
+                            case Some(val value) -> frame.linkAt(value)
+                            case None -> None
+                        },
+                        pixels
+                    )
+                when (link) {
+                    case Some(val value) -> props.value.options.onLinkActivated(value)
+                    case None -> {}
+                }
+                return true
+            }
             if (reported == mapped) {
                 reported = TerminalMouseButton.NonePressed
-                sendMouse(TerminalMouseAction.Release, mapped, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Release, mapped, row, column, pixels, modifiers)
                 return true
             }
             if (mapped == TerminalMouseButton.Left && selecting) {
                 selecting = false
-                viewport.extend(location(frame, row, column))
-                refresh()
+                viewport
+                    .extend(
+                        location(frame, row, column),
+                        props.value.options.additionalWordCharacters,
+                        Some(frame.reading)
+                    )
+                viewport.endDrag()
+                stopSelectionScroll()
+                refreshSelection()
                 return true
             }
         }
@@ -376,15 +762,30 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ): Boolean {
+        when (val origin = linkGesture.drag(pixels)) {
+            case Some(val value) -> {
+                selecting = viewport.select(value)
+            }
+
+            case None -> {}
+        }
+        if (linkGesture.active) return true
         if (selecting) {
-            viewport.extend(location(frame, row, column))
-            refresh()
+            viewport
+                .extend(
+                    location(frame, row, column),
+                    props.value.options.additionalWordCharacters,
+                    Some(frame.reading)
+                )
+            updateSelectionScroll(frame)
+            refreshSelection()
             return true
         }
         if (reportMouse(frame, modifiers)) {
-            sendMouse(TerminalMouseAction.Move, reported, row, column, modifiers)
+            sendMouse(TerminalMouseAction.Move, reported, row, column, pixels, modifiers)
             return true
         }
         return false
@@ -394,17 +795,21 @@ private class TerminalViewElement(
         frame: GridGeometry,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers,
         delta: InputScrollDelta
     ): Boolean {
-        val lines = when (delta) {
-            case Lines(_, val y) -> y
-            case Pixels(_, val y) -> y / frame.metrics.height
+        val(horizontal, lines) = when (delta) {
+            case Lines(val x, val y) -> (x, y)
+            case Pixels(val x, val y) -> (x / frame.metrics.width, y / frame.metrics.height)
         }
         wheelRemainder += lines
-        val steps = wheelRemainder.toLong()
+        val steps = clamp(wheelRemainder.toLong(), -128L, 128L)
         wheelRemainder -= steps.toDouble()
-        if (steps == 0L) return lines != 0.0
+        horizontalWheelRemainder += horizontal
+        val horizontalSteps = clamp(horizontalWheelRemainder.toLong(), -128L, 128L)
+        horizontalWheelRemainder -= horizontalSteps.toDouble()
+        if (steps == 0L && horizontalSteps == 0L) return lines != 0.0 || horizontal != 0.0
         if (reportMouse(frame, modifiers)) {
             val mouse = if (steps > 0L)
                 TerminalMouseButton.WheelUp
@@ -412,10 +817,24 @@ private class TerminalViewElement(
                 TerminalMouseButton.WheelDown
             val count = if (steps > 0L) steps else -steps
             for (index in 0L..<count)
-                sendMouse(TerminalMouseAction.Press, mouse, row, column, modifiers)
+                sendMouse(TerminalMouseAction.Press, mouse, row, column, pixels, modifiers)
+            val horizontalMouse = if (horizontalSteps > 0L)
+                TerminalMouseButton.WheelLeft
+            else
+                TerminalMouseButton.WheelRight
+            val horizontalCount = if (horizontalSteps > 0L) horizontalSteps else -horizontalSteps
+            for (index in 0L..<horizontalCount)
+                sendMouse(
+                    TerminalMouseAction.Press,
+                    horizontalMouse,
+                    row,
+                    column,
+                    pixels,
+                    modifiers
+                )
             return true
         }
-        if (viewport.scroll(-steps)) {
+        if (controller.scroll(-steps)) {
             refresh()
             return true
         }
@@ -423,14 +842,17 @@ private class TerminalViewElement(
     }
 
     private fun reportMouse(frame: GridGeometry, modifiers: Modifiers): Boolean {
-        val terminal = session.terminal
+        val terminal = session.reading
         return !modifiers.shift &&
+            frame.atBottom &&
             viewport.atBottom &&
-            terminal.mouseReporting &&
+            session.mouseReporting &&
             frame.columns ==
             terminal.columns &&
             frame.requestedRows ==
-            terminal.rows
+            terminal.rows &&
+            frame.scaleFactor ==
+            (scope.nativeWindow.metrics?.scaleFactor ?: 1.0)
     }
 
     private fun sendMouse(
@@ -438,23 +860,159 @@ private class TerminalViewElement(
         button: TerminalMouseButton,
         row: Long,
         column: Long,
+        pixels: TerminalPixelPosition,
         modifiers: Modifiers
     ) {
-        session
-            .send(
-                TerminalInput
-                    .Mouse(
-                        TerminalMouse(
-                            action, button, row, column,
-                            modifiers.terminalModifiers()
-                        )
-                    )
+        val value = TerminalMouse(
+            action,
+            button,
+            row,
+            column,
+            modifiers.terminalModifiers(),
+            Some(pixels)
+        )
+        lastMouse = Some(value)
+        session.send(TerminalInput.Mouse(value))
+    }
+
+    private fun setHovered(value: TerminalLink?) {
+        if (hovered?.key == value?.key) return
+        hovered = value
+        props.value.options.onLinkHovered(value)
+        if (scope.isMounted) scope.requestFrame()
+    }
+
+    private fun updateHover(frame: GridGeometry) {
+        val point = pointerPoint
+        val captured = when (val modifiers = pointerModifiers) {
+            case Some(val value) -> reportMouse(frame, value)
+            case None -> false
+        }
+        setHovered(
+            if (captured)
+                None
+            else
+                when (point) {
+                    case Some(val value) -> frame.linkAt(value)
+                    case None -> None
+                }
+        )
+    }
+
+    private fun updateSelectionScroll(frame: GridGeometry) {
+        val point = pointerPoint ?: return
+        selectionScroll
+            .update(point.y, frame.size.height, frame.metrics.height, MonotonicTimeSource.now())
+        when (selectionScroll.deadline) {
+            case Some(val value) -> selectionDeadline.schedule(value)
+            case None -> selectionDeadline.cancel()
+        }
+    }
+
+    private fun scrollSelection() {
+        if (!scope.isMounted || !selecting || !viewport.dragging) {
+            stopSelectionScroll();
+            return
+        }
+        val frame = accepted ?: return
+        val point = pointerPoint ?: return
+        val lines = selectionScroll.tick(MonotonicTimeSource.now())
+        if (lines != 0L) {
+            if (!controller.scroll(lines)) {
+                stopSelectionScroll();
+                return
+            }
+            val(visibleRow, column) = frame.clampedHit(point) ?: return
+            val reading = session.reading
+            val row = clamp(
+                viewport.first + visibleRow,
+                0L,
+                reading.historySize + reading.rows - 1L
             )
+            val line = reading.lines(row, 1L)[0L]
+            val visualColumn = clamp(column, 0L, line.cells.size - 1L)
+            val start = if (line.cells[visualColumn].width == 0L)
+                visualColumn - 1L
+            else
+                visualColumn
+            viewport
+                .extend(
+                    CellLocation(line.id, visualColumn, reading.anchorAt(row, start)),
+                    props.value.options.additionalWordCharacters
+                )
+            refresh()
+        }
+        updateSelectionScroll(frame)
+    }
+
+    private fun stopSelectionScroll() {
+        selectionScroll.cancel();
+        selectionDeadline.cancel()
+    }
+
+    private fun cancelInteraction() {
+        selecting = false
+        stopSelectionScroll()
+        viewport.endDrag()
+        linkGesture.cancel()
+        val button = reported
+        reported = TerminalMouseButton.NonePressed
+        when (val last = lastMouse) {
+            case Some(val value) ->
+                if (button != TerminalMouseButton.NonePressed)
+                    session
+                        .send(
+                            TerminalInput
+                                .Mouse(value.{action: TerminalMouseAction.Release, button: button})
+                        )
+            case None -> {}
+        }
+        lastMouse = None
+        pointerPoint = None
+        setHovered(None)
+        area.scope.cancelPointerClaim()
+    }
+
+    private fun finishedEvent(event: InputEvent) {
+        when (event) {
+            case Pointer(val pointer) ->
+                when (pointer) {
+                    case Button(_, val button, val state, _) ->
+                        if (state ==
+                            ElementState.Released &&
+                            (
+                                (button == MouseButton.Left && (selecting || linkGesture.active)) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Left &&
+                                            button ==
+                                            MouseButton.Left
+                                    ) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Middle &&
+                                            button ==
+                                            MouseButton.Middle
+                                    ) ||
+                                    (
+                                        reported ==
+                                            TerminalMouseButton.Right &&
+                                            button ==
+                                            MouseButton.Right
+                                    )
+                            )
+                        )
+                            cancelInteraction()
+                    case _ -> {}
+                }
+            case _ -> {}
+        }
     }
 }
 
 private fun location(frame: GridGeometry, row: Long, column: Long): CellLocation {
     val line = frame.rows[row]
     val index = clamp(column, 0L, line.cells.size - 1L)
-    return CellLocation(line.id, if (line.cells[index].width == 0L) index - 1L else index)
+    val start = if (line.cells[index].width == 0L) index - 1L else index
+    return CellLocation(line.id, index, frame.reading.anchorAt(frame.first + row, start))
 }

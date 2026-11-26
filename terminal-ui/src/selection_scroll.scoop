@@ -1,0 +1,43 @@
+package scoop.ui.terminal
+
+import scoop.platform.time.MonotonicInstant
+import scoop.time.Duration
+
+/** Absolute deadlines keep pointer motion from postponing an already scheduled scroll. */
+internal class TerminalSelectionScroll {
+    private var direction = 0L
+    private var period = Duration.milliseconds(250L)
+    private var next: MonotonicInstant? = None
+    val deadline: MonotonicInstant? get() = next
+
+    fun update(y: Double, height: Double, cellHeight: Double, now: MonotonicInstant) {
+        val sign = if (y < 0.0) -1L else if (y >= height) 1L else 0L
+        if (sign == 0L || height <= 0.0 || cellHeight <= 0.0) {
+            cancel();
+            return
+        }
+        val distance = if (sign < 0L) -y else y - height
+        val speed = clamp((4.0 + distance / cellHeight * 12.0).toLong(), 4L, 120L)
+        period = Duration.nanoseconds(1000000000L / speed)
+        val proposed = now + period
+        next = when (next) {
+            case Some(val previous) ->
+                if (direction == sign && previous < proposed) Some(previous) else Some(proposed)
+            case None -> Some(proposed)
+        }
+        direction = sign
+    }
+
+    fun tick(now: MonotonicInstant): Long {
+        val due = next ?: return 0L
+        if (now < due) return 0L
+        // A delayed UI callback advances one row, never an unbounded catch-up burst.
+        next = Some(now + period)
+        return direction
+    }
+
+    fun cancel() {
+        direction = 0L;
+        next = None
+    }
+}

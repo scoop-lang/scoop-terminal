@@ -1,0 +1,432 @@
+package scoop.ui.terminal
+
+import scoop.collections.sorted
+import scoop.compiler.includeBytes
+import scoop.graphics.*
+import scoop.io.encoding.Base64
+import scoop.platform.time.MonotonicTimeSource
+import scoop.terminal.emulator.*
+import scoop.test.*
+import scoop.text.endsWith
+import scoop.text.substring
+
+@Test
+private class TerminalResourceBenchmark {
+    @Test
+    @Ignore("manual performance measurement")
+    fun historySearch100k() {
+        Terminal(120L, 40L, 100000L)
+            .use { terminal ->
+                val batch = StringBuilder()
+                for (index in 0L..<1000L)
+                    batch.append(if (index % 100L == 0L) "needle\r\n" else "log\r\n")
+                val bytes = batch.toString().toByteArray()
+                for (_ in 0L..<101L)
+                    terminal.feed(bytes)
+                assertEquals(100000L, terminal.historySize)
+                terminal
+                    .snapshot()
+                    .use { snapshot ->
+                        val times = ArrayList<Long>()
+                        val matches = ArrayList<TerminalSearchMatch>()
+                        snapshot
+                            .search("needle")
+                            .use { query ->
+                                while (query.status == TerminalSearchStatus.Searching) {
+                                    val start = MonotonicTimeSource.now()
+                                    val page = query
+                                        .nextPage(maxMatches = 128L, scanBudget = 65536L)
+                                    times
+                                        .add((MonotonicTimeSource.now() - start).inWholeNanoseconds)
+                                    for (match in page.matches)
+                                        matches.add(match)
+                                }
+                                assertEquals(TerminalSearchStatus.Complete, query.status)
+                            }
+                        assertEquals(1000L, matches.size)
+                        val cancelled = snapshot.search("absent")
+                        cancelled.nextPage(scanBudget = 4096L)
+                        val cancelStart = MonotonicTimeSource.now()
+                        cancelled.cancel()
+                        val cancelNs = (MonotonicTimeSource.now() - cancelStart).inWholeNanoseconds
+                        assertEquals(TerminalSearchStatus.Cancelled, cancelled.nextPage().status)
+                        cancelled.close()
+                        val controller = TerminalViewController(testViewport(terminal))
+                        val dragging = ArrayList<Long>()
+                        try {
+                            controller.setSearchHighlights(matches.toArray())
+                            for (index in 0L..<128L) {
+                                val start = MonotonicTimeSource.now()
+                                val first = index * 7919L % 100000L
+                                controller.viewport.setTop(first)
+                                val reading = terminal.reading
+                                val range = TerminalRange(
+                                    reading.anchorAt(first, 0L)!!,
+                                    reading.anchorAt(first + 2L, 3L)!!
+                                )
+                                assertTrue(controller.select(range))
+                                val geometry = testGrid(reading, first)
+                                val decoration = TerminalSelectionDecorations(geometry)
+                                    .update(controller.selection)
+                                assertEquals(3L, decoration.rects.size)
+                                controller.visibleHighlights(geometry)
+                                dragging.add((MonotonicTimeSource.now() - start).inWholeNanoseconds)
+                            }
+                        } finally {
+                            controller.close()
+                        }
+                        val drag = dragging.sorted()
+                        resourceReport(
+                            "historySearch100k",
+                            times,
+                            f"matches=${matches.size} history=100000 drag_samples=${
+                                drag.size
+                            } drag_p95=${drag[(drag.size - 1L) * 95L / 100L]} cancel_ns=${cancelNs}"
+                        )
+                    }
+            }
+    }
+
+    @Test
+    @Ignore("manual performance measurement")
+    fun reflowDecorations() {
+        terminalTestFonts()
+            .use { fonts ->
+                val appearance = terminalTestAppearance()
+                Terminal(
+                    120L,
+                    40L,
+                    100000L,
+                    graphics = TerminalGraphicsSupport(kitty = true),
+                    imageDecoder = Some(TerminalCpuImageDecoder())
+                )
+                    .use { terminal ->
+                        terminal.setColors(appearance.colorTheme())
+                        val batch = StringBuilder()
+                        for (_ in 0L..<100L)
+                            batch
+                                .append(
+                                    "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n"
+                                )
+                        val bytes = batch.toString().toByteArray()
+                        for (_ in 0L..<100L)
+                            terminal.feed(bytes)
+                        terminal
+                            .feed(
+                                "needle abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n"
+                                    .toByteArray()
+                            )
+                        resourceTransmit(
+                            terminal,
+                            "a=T,i=1,f=100,c=10,r=2,C=1",
+                            includeBytes("data/images/rgba.png")
+                        )
+                        terminal.feed("image anchor\r\ntail\r\n".toByteArray())
+                        val match = searchMatches(terminal, "needle")[0L]
+                        val controller = TerminalViewController(testViewport(terminal))
+                        val glyphs = TerminalGlyphCache(fonts, appearance)
+                        val rows = TerminalRowCache(glyphs)
+                        val images = TerminalImageCache()
+                        val surface = RasterSurface(1920, 640)
+                        try {
+                            assertTrue(controller.select(match.range))
+                            controller.setSearchHighlights([match], Some(match))
+                            controller
+                                .viewport
+                                .setTop(terminal.reading.resolve(match.range.start)!!.row)
+                            val times = ArrayList<Long>()
+                            for (_ in 0L..<12L)
+                                for (columns in [40L, 240L]) {
+                                    val start = MonotonicTimeSource.now()
+                                    terminal
+                                        .resize(
+                                            columns,
+                                            40L,
+                                            pixels = Some(
+                                                TerminalPixelSize(columns * 8L, 640L, 8L, 16L)
+                                            )
+                                        )
+                                    controller.synchronize()
+                                    val reading = terminal.reading
+                                    val geometry = resourceGeometry(
+                                        reading,
+                                        controller.viewport.first
+                                    )
+                                    TerminalFrame(
+                                        geometry,
+                                        1L,
+                                        reading.cursor,
+                                        0L,
+                                        appearance,
+                                        glyphs,
+                                        imageCache = Some(images),
+                                        onImageError = { error -> throw error },
+                                        rowCache = Some(rows)
+                                    )
+                                        .use { frame ->
+                                            frame.shape([], "")
+                                            val selection = TerminalSelectionDecorations(geometry)
+                                                .update(controller.selection)
+                                            val highlights = controller.visibleHighlights(geometry)
+                                            assertTrue(highlights.size > 0L)
+                                            assertTrue(selection.rects.size > 0L)
+                                            assertEquals(Some("needle"), controller.copySelection())
+                                            assertEquals(
+                                                TerminalSearchMatchStatus.Current,
+                                                match.status(reading)
+                                            )
+                                            assertEquals(1L, reading.images.placementCount)
+                                            assertTrue(
+                                                reading
+                                                    .resolve(
+                                                        reading.images.placements(0L, 1L)[0L].anchor
+                                                    ) !=
+                                                    None
+                                            )
+                                            surface
+                                                .draw { canvas ->
+                                                    frame.drawScreen(canvas);
+                                                    frame.drawSelection(canvas, selection.rects);
+                                                    frame.drawSearchHighlights(canvas, highlights)
+                                                }
+                                        }
+                                    times
+                                        .add((MonotonicTimeSource.now() - start).inWholeNanoseconds)
+                                }
+                            assertEquals(1L, images.uploadCount)
+                            resourceReport(
+                                "reflowDecorations",
+                                times,
+                                f"history=${terminal.historySize} uploads=${
+                                    images.uploadCount
+                                } native_estimated_bytes=${images.retainedBytes}"
+                            )
+                        } finally {
+                            surface.close();
+                            images.close();
+                            rows.close();
+                            glyphs.release();
+                            controller.close()
+                        }
+                        assertEquals(0L, images.retainedBytes)
+                    }
+            }
+    }
+
+    @Test
+    @Ignore("manual performance measurement")
+    fun graphicsPng4k() {
+        resourceGraphics("png")
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun graphicsSixel4k() {
+        resourceGraphics("sixel")
+    }
+    @Test
+    @Ignore("manual performance measurement")
+    fun graphicsPlacements() {
+        resourceGraphics("placements")
+    }
+}
+
+internal class ResourceDecoder : TerminalImageDecoder {
+    private val decoder = TerminalCpuImageDecoder()
+    var calls = 0L
+    public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long = decoder
+        .peakBytes(size, encodedBytes)
+    public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
+        calls += 1L
+        return decoder.decodePng(encoded, size)
+    }
+}
+
+internal fun resourceFeedGraphics(terminal: Terminal, kind: String) {
+    if (kind == "sixel") {
+        terminal.feed("\u001b[?80h".toByteArray())
+        val input = StringBuilder().append("\u001bP7;1q\"1;1;3840;2160#1;2;0;100;0")
+        for (band in 0L..<360L) {
+            if (band != 0L) input.append('-')
+            input.append("!3840~")
+        }
+        input.append("\u001b\\")
+        val update = terminal.feed(input.toString().toByteArray())
+        for (effect in update.effects)
+            when (effect) {
+                case Diagnostic(val text) -> fail(Some(text))
+                case _ -> {}
+            }
+    } else if (kind == "png") {
+        resourceTransmit(
+            terminal,
+            "a=T,i=1,f=100,c=120,r=40,C=1",
+            includeBytes("data/images/uhd.png")
+        )
+    } else {
+        resourceTransmit(
+            terminal,
+            "a=t,i=1,f=100",
+            includeBytes("data/images/rgba.png")
+        )
+        for (index in 0L..<1024L) {
+            terminal
+                .feed(
+                    f"\u001b[${index / 80L + 1L};${index % 80L + 1L}H\u001b_Ga=p,i=1,p=${
+                        index + 1L
+                    },c=2,r=1,C=1;\u001b\\"
+                        .toByteArray()
+                )
+        }
+    }
+}
+
+private fun resourceGraphics(kind: String) {
+    terminalTestFonts()
+        .use { fonts ->
+            val appearance = terminalTestAppearance()
+            val decoder = ResourceDecoder()
+            Terminal(
+                120L,
+                40L,
+                graphics = TerminalGraphicsSupport(sixel = true, kitty = true),
+                imageDecoder = Some(decoder)
+            )
+                .use { terminal ->
+                    terminal.setColors(appearance.colorTheme())
+                    terminal
+                        .resize(120L, 40L, pixels = Some(TerminalPixelSize(960L, 640L, 8L, 16L)))
+                    val started = MonotonicTimeSource.now()
+                    resourceFeedGraphics(terminal, kind)
+                    val decodedNs = (MonotonicTimeSource.now() - started).inWholeNanoseconds
+                    val reading = terminal.reading
+                    assertEquals(1L, reading.images.imageCount)
+                    val placements = if (kind == "placements") 1024L else 1L
+                    assertEquals(placements, reading.images.placementCount)
+                    val image = reading
+                        .images
+                        .image(reading.images.placements(0L, 1L)[0L].imageKey)!!
+                    assertEquals(if (kind == "placements") 3 else 3840, image.size.width)
+                    assertEquals(if (kind == "placements") 2 else 2160, image.size.height)
+                    val glyphs = TerminalGlyphCache(fonts, appearance)
+                    val rows = TerminalRowCache(glyphs)
+                    val images = TerminalImageCache()
+                    val surface = RasterSurface(960, 640)
+                    try {
+                        val geometry = resourceGeometry(reading, reading.historySize)
+                        val times = ArrayList<Long>()
+                        var firstNs = 0L
+                        var expectedUploads = 0L
+                        for (iteration in 0L..<33L) {
+                            val start = MonotonicTimeSource.now()
+                            val frame = TerminalFrame(
+                                geometry,
+                                1L,
+                                reading.cursor,
+                                0L,
+                                appearance,
+                                glyphs,
+                                imageCache = Some(images),
+                                onImageError = { error -> throw error },
+                                rowCache = Some(rows)
+                            )
+                            try {
+                                frame.shape([], "")
+                                surface.draw { canvas -> frame.drawScreen(canvas) }
+                            } finally {
+                                frame.close()
+                            }
+                            val elapsed = (MonotonicTimeSource.now() - start).inWholeNanoseconds
+                            if (iteration == 0L) {
+                                firstNs = elapsed;
+                                expectedUploads = images.uploadCount
+                            } else {
+                                times.add(elapsed)
+                                assertEquals(expectedUploads, images.uploadCount)
+                            }
+                        }
+                        if (kind != "placements")
+                            assertImageTestPixel(surface.readPixels(), 960L, 10L, 10L, 0, 255, 0)
+                        assertEquals(if (kind == "sixel") 0L else 1L, decoder.calls)
+                        val nativeBytes = images.retainedBytes
+                        val uploads = images.uploadCount
+                        images.clear()
+                        assertEquals(0L, images.retainedBytes)
+                        terminal.feed("\u001bc".toByteArray())
+                        assertEquals(0L, terminal.reading.images.placementCount)
+                        resourceReport(
+                            kind,
+                            times,
+                            f"decode_ns=${decodedNs} first_frame_ns=${firstNs} decoder_calls=${
+                                decoder.calls
+                            } placements=${placements} rgba_equivalent_bytes=${
+                                image.size.rgbaBytes
+                            } uploads=${uploads} native_estimated_bytes=${
+                                nativeBytes
+                            } released_native_bytes=${images.retainedBytes}"
+                        )
+                    } finally {
+                        surface.close();
+                        images.close();
+                        rows.close();
+                        glyphs.release()
+                    }
+                }
+        }
+}
+
+internal fun resourceGeometry(reading: TerminalReading, first: Long): GridGeometry = GridGeometry(
+    Size(reading.columns.toDouble() * 8.0, reading.rows.toDouble() * 16.0), CellMetrics(
+        8.0,
+        16.0,
+        12.0
+    ), first,
+    reading.lines(first, reading.rows), reading.columns, reading.rows, reading.screenRevision,
+    first == reading.historySize, reading
+)
+
+internal fun resourceTransmit(terminal: Terminal, control: String, data: Array<Byte>) {
+    val encoded = Base64.Default.encode(data)
+    var offset = 0L
+    while (offset < encoded.charLength) {
+        val end = clamp(offset + 4096L, 0L, encoded.charLength)
+        val prefix = if (offset == 0L) control + "," else ""
+        val more = if (end < encoded.charLength) "1" else "0"
+        val update = terminal
+            .feed(
+                (
+                    "\u001b_G" +
+                        prefix +
+                        "m=" +
+                        more +
+                        ";" +
+                        encoded.substring(offset, end) +
+                        "\u001b\\"
+                )
+                    .toByteArray()
+            )
+        for (effect in update.effects)
+            when (effect) {
+                case Reply(val bytes) ->
+                    assertTrue(
+                        String.fromUtf8(bytes).endsWith(";OK\u001b\\"),
+                        Some(String.fromUtf8(bytes))
+                    )
+                case Diagnostic(val text) -> fail(Some(text))
+                case _ -> {}
+            }
+        offset = end
+    }
+}
+
+internal fun resourceReport(name: String, times: ArrayList<Long>, extra: String) {
+    val samples = times.sorted()
+    var total = 0L
+    for (time in samples)
+        total += time
+    val last = samples.size - 1L
+    println(
+        f"BENCH name=${name} bytes=0 samples=${samples.size} ns=${total} p50=${
+            samples[last / 2L]
+        } p95=${samples[last * 95L / 100L]} p99=${samples[last * 99L / 100L]} ${extra}"
+    )
+}

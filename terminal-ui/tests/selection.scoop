@@ -1,0 +1,242 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalSelectionTest {
+    @Test fun historyEvictionClipsSelectionAndKeepsShiftExtensionUsable() {
+        for (mode in [TerminalSelectionMode.Linear, TerminalSelectionMode.Rectangular]) {
+            val terminal = Terminal(4L, 2L, 2L)
+            terminal.feed("a\r\nb\r\nc\r\nd".toByteArray())
+            val viewport = testViewport(terminal)
+            try {
+                viewport.select(at(terminal, 0L, 0L), mode = mode)
+                viewport.extend(at(terminal, 2L, 0L))
+                viewport.endDrag()
+                terminal.feed("\r\ne".toByteArray())
+                viewport.update()
+                assertEquals(Some("b\nc"), viewport.copy())
+                assertTrue(viewport.extend(at(terminal, 2L, 0L)))
+                assertEquals(Some("b\nc\nd"), viewport.copy())
+            } finally {
+                viewport.close()
+            }
+        }
+        val terminal = Terminal(3L, 2L, 1L)
+        terminal.feed("abcdefghijkl".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            viewport.select(at(terminal, 0L, 0L), TerminalSelectionUnit.LogicalLine)
+            assertEquals(Some("defghijkl"), viewport.copy())
+        } finally {
+            viewport.close()
+        }
+    }
+    @Test fun unicodeWordsAndAdditionalPathCharacters() {
+        val terminal = Terminal(60L, 3L)
+        terminal.feed("can't /one/two e\u0301 👩‍💻 こんにちは世界".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            assertTrue(viewport.select(at(terminal, 0L, 2L), TerminalSelectionUnit.Word))
+            assertEquals(Some("can't"), viewport.copy())
+            assertTrue(viewport.select(at(terminal, 0L, 8L), TerminalSelectionUnit.Word))
+            assertEquals(Some("one"), viewport.copy())
+            assertTrue(
+                viewport
+                    .select(
+                        at(terminal, 0L, 8L), TerminalSelectionUnit.Word,
+                        additionalWordCharacters = "/-"
+                    )
+            )
+            assertEquals(Some("/one/two"), viewport.copy())
+            viewport.select(at(terminal, 0L, 15L), TerminalSelectionUnit.Word)
+            assertEquals(Some("e\u0301"), viewport.copy())
+            viewport.select(at(terminal, 0L, 18L), TerminalSelectionUnit.Word)
+            assertEquals(Some("👩‍💻"), viewport.copy())
+            viewport.select(at(terminal, 0L, 22L), TerminalSelectionUnit.Word)
+            assertEquals(Some("こんにちは"), viewport.copy())
+        } finally {
+            viewport.close()
+        }
+    }
+
+    @Test fun wordAndLogicalLineDraggingJoinSoftWraps() {
+        val terminal = Terminal(6L, 4L)
+        terminal.feed("first second\r\nnext".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            viewport.select(at(terminal, 1L, 1L), TerminalSelectionUnit.Word)
+            assertEquals(Some("second"), viewport.copy())
+            viewport.extend(at(terminal, 0L, 1L))
+            assertEquals(Some("first second"), viewport.copy())
+            assertTrue(viewport.selection!!.reversed)
+            viewport.select(at(terminal, 1L, 3L), TerminalSelectionUnit.LogicalLine)
+            assertEquals(Some("first second"), viewport.copy())
+            viewport.extend(at(terminal, 2L, 0L))
+            assertEquals(Some("first second\nnext"), viewport.copy())
+        } finally {
+            viewport.close()
+        }
+    }
+
+    @Test fun rectangularRangesExpandWideCellsAndKeepRowCopyAfterReflow() {
+        val terminal = Terminal(8L, 3L)
+        terminal.feed("a中bc\r\n12xyzz\r\nq".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            viewport.select(at(terminal, 0L, 2L), mode = TerminalSelectionMode.Rectangular)
+            viewport.extend(at(terminal, 1L, 4L))
+            assertEquals(Some("中bc\nxyz"), viewport.copy())
+            assertEquals(2L, viewport.selection!!.ranges.size)
+            assertEquals(None, viewport.visibleText().selection)
+            terminal.resize(4L, 4L)
+            viewport.update()
+            assertFalse(viewport.dragging)
+            assertEquals(Some("中bc\nxyz"), viewport.copy())
+            terminal.resize(16L, 3L)
+            viewport.update()
+            assertEquals(Some("中bc\nxyz"), viewport.copy())
+        } finally {
+            viewport.close()
+        }
+    }
+
+    @Test fun controllerMigratesSelectionAndNotifiesOverwrite() {
+        val terminal = Terminal(12L, 3L)
+        terminal.feed("abcdef".toByteArray())
+        val controller = TerminalViewController(testViewport(terminal))
+        val changes = ArrayList<TerminalViewChange>()
+        controller.onChanged = { change ->
+            changes.add(change);
+            Unit
+        }
+        try {
+            assertTrue(
+                controller
+                    .select(
+                        TerminalRange(
+                            terminal.anchorAt(0L, 2L)!!,
+                            terminal.anchorAt(0L, 5L, TerminalAffinity.Before)!!
+                        )
+                    )
+            )
+            terminal.feed("\r\u001b[2@".toByteArray())
+            assertEquals(Some("cde"), controller.copySelection())
+            assertEquals(
+                4L,
+                terminal.reading.resolve(controller.selection!!.ranges[0L].start)!!.column
+            )
+            terminal.feed("\u001b[1;6HX".toByteArray())
+            assertEquals(None, controller.copySelection())
+            assertEquals(
+                TerminalViewChange.SelectionInvalidated(TerminalInvalidation.Overwritten),
+                changes[changes.size - 1L]
+            )
+        } finally {
+            controller.close()
+        }
+        assertFailsWith<IllegalStateException> {
+            controller.selectAll();
+            Unit
+        }
+    }
+
+    @Test fun copyPreservesPrintedSpacesAndCanKeepGridPadding() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("a  \r\nb".toByteArray())
+        val controller = TerminalViewController(testViewport(terminal))
+        try {
+            controller
+                .select(
+                    TerminalRange(
+                        terminal.anchorAt(0L, 0L)!!,
+                        terminal.anchorAt(1L, 1L, TerminalAffinity.Before)!!
+                    )
+                )
+            assertEquals(Some("a  \nb"), controller.copySelection())
+            assertEquals(Some("a       \nb"), controller.copySelection(TerminalCopyOptions(false)))
+            controller.selectAll()
+            assertEquals(Some("a  \nb"), controller.copySelection())
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test fun buffersKeepIndependentViewportAndSelection() {
+        val terminal = Terminal(6L, 2L, 5L)
+        terminal.feed("a\r\nb\r\nc\r\nd".toByteArray())
+        val viewport = testViewport(terminal)
+        try {
+            viewport.scroll(-1L)
+            viewport.select(at(terminal, 1L, 0L))
+            viewport.endDrag()
+            terminal.feed("\u001b[?47hZ".toByteArray())
+            viewport.update()
+            assertTrue(viewport.atBottom)
+            assertEquals(None, viewport.copy())
+            viewport.select(at(terminal, 0L, 0L))
+            assertEquals(Some("Z"), viewport.copy())
+            terminal.feed("\u001b[?47l".toByteArray())
+            viewport.update()
+            assertEquals(1L, viewport.first)
+            assertEquals(Some("b"), viewport.copy())
+            terminal.feed("\u001b[?47h".toByteArray())
+            viewport.update()
+            assertEquals(Some("Z"), viewport.copy())
+            terminal.feed("\u001bc".toByteArray())
+            viewport.update()
+            assertEquals(None, viewport.copy())
+        } finally {
+            viewport.close()
+        }
+    }
+
+    @Test fun selectionUsesCommittedTextAndRejectsChangedAcceptedFrames() {
+        val terminal = Terminal(12L, 2L)
+        terminal.feed("abcdef".toByteArray())
+        val viewport = testViewport(terminal)
+        val displayed = terminal.snapshot()
+        try {
+            viewport.select(at(terminal, 0L, 2L))
+            viewport.extend(at(terminal, 0L, 4L))
+            terminal.feed("\u001b[?2026h\rZZZZZZ".toByteArray())
+            viewport.update()
+            assertEquals(Some("cde"), viewport.copy())
+            val old = CellLocation(displayed.lines(0L, 1L)[0L].id, 2L, displayed.anchorAt(0L, 2L))
+            assertFalse(viewport.select(old, source = Some(displayed)))
+            assertEquals(Some("cde"), viewport.copy())
+            terminal.feed("\u001b[?2026l".toByteArray())
+            assertEquals(Some(TerminalInvalidation.Overwritten), viewport.update().invalidated)
+            assertEquals(None, viewport.copy())
+        } finally {
+            displayed.close();
+            viewport.close()
+        }
+    }
+
+    @Test fun oldAcceptedFrameCanRegisterAfterPureReflow() {
+        val terminal = Terminal(12L, 2L)
+        terminal.feed("abcdefghij".toByteArray())
+        val displayed = terminal.snapshot()
+        val viewport = testViewport(terminal)
+        try {
+            terminal.resize(4L, 3L)
+            val location = CellLocation(
+                displayed.lines(0L, 1L)[0L].id,
+                6L,
+                displayed.anchorAt(0L, 6L)
+            )
+            assertTrue(viewport.select(location, source = Some(displayed)))
+            assertEquals(Some("g"), viewport.copy())
+        } finally {
+            displayed.close();
+            viewport.close()
+        }
+    }
+}
+
+private fun at(terminal: Terminal, row: Long, column: Long): CellLocation = CellLocation(
+    terminal.lines(row, 1L)[0L].id,
+    column
+)

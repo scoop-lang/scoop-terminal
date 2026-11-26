@@ -1,0 +1,46 @@
+package scoop.ui.terminal
+
+import scoop.collections.ArrayDeque
+
+/** A single-use position in the PTY stream. Completion cannot move it past later input. */
+internal class TerminalWriteTicket {
+    var active = true
+    var bytes: Array<Byte>? = None
+    fun complete(value: Array<Byte>): Boolean {
+        if (!active) return false
+        when (bytes) {
+            case Some(_) -> return false
+            case None -> {}
+        }
+        bytes = Some(value)
+        return true
+    }
+}
+
+internal class TerminalWriteQueue {
+    private val entries = ArrayDeque<TerminalWriteTicket>()
+    val size: Long get() = entries.size
+    fun reserve(): TerminalWriteTicket {
+        val ticket = TerminalWriteTicket()
+        entries.addLast(ticket)
+        return ticket
+    }
+    fun append(bytes: Array<Byte>) {
+        if (bytes.size != 0L) reserve().complete(bytes)
+    }
+    fun take(): Array<Byte>? {
+        val entry = entries.firstOrNone() ?: return None
+        val bytes = entry.bytes ?: return None
+        entries.removeFirst()
+        entry.active = false
+        entry.bytes = None
+        return Some(bytes)
+    }
+    fun clear() {
+        while (entries.size != 0L) {
+            val entry = entries.removeFirst()
+            entry.active = false
+            entry.bytes = None
+        }
+    }
+}

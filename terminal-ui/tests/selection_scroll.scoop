@@ -1,0 +1,39 @@
+package scoop.ui.terminal
+
+import scoop.platform.time.MonotonicInstant
+import scoop.time.Duration
+import scoop.test.*
+
+@Test
+private class TerminalSelectionScrollTest {
+    @Test fun distanceControlsSpeedWithoutPointerMotionStarvation() {
+        val scroll = TerminalSelectionScroll()
+        val now = MonotonicInstant(10L, 0)
+        scroll.update(-10.0, 100.0, 10.0, now)
+        val first = scroll.deadline!!
+        assertEquals(now + Duration.nanoseconds(62500000L), first)
+        scroll.update(-10.0, 100.0, 10.0, now + Duration.milliseconds(40L))
+        assertEquals(Some(first), scroll.deadline)
+        assertEquals(0L, scroll.tick(now))
+        assertEquals(-1L, scroll.tick(first))
+        val later = scroll.deadline!!
+        scroll.update(-1000.0, 100.0, 10.0, first)
+        assertTrue(scroll.deadline!! < later)
+        assertEquals(-1L, scroll.tick(now + Duration.seconds(100L)))
+        assertTrue(scroll.deadline!! > now + Duration.seconds(100L))
+    }
+
+    @Test fun reentryDirectionChangeAndCancellationRetireDeadlines() {
+        val scroll = TerminalSelectionScroll()
+        val now = MonotonicInstant(10L, 0)
+        scroll.update(-10.0, 100.0, 10.0, now)
+        scroll.update(110.0, 100.0, 10.0, now)
+        assertEquals(1L, scroll.tick(scroll.deadline!!))
+        scroll.update(50.0, 100.0, 10.0, now)
+        assertEquals(None, scroll.deadline)
+        scroll.update(120.0, 100.0, 10.0, now)
+        scroll.cancel()
+        assertEquals(None, scroll.deadline)
+        assertEquals(0L, scroll.tick(now + Duration.seconds(100L)))
+    }
+}

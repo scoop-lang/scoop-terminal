@@ -1,0 +1,134 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class TerminalImageRegionTest {
+    @Test fun croppedRgbaUsesSourceStrideAndKeepsItsOwnBudgetedPixels() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val bytes = ImageBytes
+            .create(memory, 70L * 70L * 4L) {
+                Array<Byte>(70L * 70L * 4L) { offset -> (offset % 251L).toByte() }
+            }
+        val image = TerminalImage.raster(1L, 1L, 0L, ImageRaster(TerminalImageSize(70, 70), bytes))
+        val region = TerminalImageRect(63L, 62L, 7L, 8L)
+        val pixels = image.pixels(region)
+        try {
+            assertEquals(7, pixels.size.width)
+            assertEquals(8, pixels.size.height)
+            for (offset in 0L..<pixels.bytes.size) {
+                val source = ((62L + offset / 4L / 7L) * 70L + 63L + offset / 4L % 7L) *
+                    4L +
+                    offset %
+                    4L
+                assertEquals((source % 251L).toByte(), pixels.bytes[offset])
+            }
+            val tile = image.tile(1L, 1L)
+            assertEquals(64L, tile.source.x)
+            assertEquals(6L, tile.source.width)
+            assertEquals(6L, tile.source.height)
+            assertEquals(image.version, tile.contentVersion)
+            for (
+                invalid in [
+                    TerminalImageRect(-1L, 0L, 1L, 1L),
+                    TerminalImageRect(0L, 0L, Long.MAX_VALUE, 1L),
+                    TerminalImageRect(69L, 69L, 2L, 2L),
+                    TerminalImageRect(0L, 0L, 0L, 1L)
+                ]
+            ) {
+                assertFailsWith<IllegalArgumentException> { image.pixels(invalid) }
+            }
+            assertFailsWith<IndexOutOfBoundsException> { image.tile(Long.MAX_VALUE, 0L) }
+            image.close()
+            assertEquals(pixels.bytes.size + ImageBytes.overhead, memory.bytes)
+            assertEquals(224L, pixels.bytes.size)
+        } finally {
+            pixels.close()
+            image.close()
+        }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun indexedUploadsConvertOnlyTheVisibleRegionAndKeepStableTileVersions() {
+        val memory = ImageMemory(TerminalImageLimits())
+        val palette = SixelRegisters(memory)
+        palette.define(1L, 2L, 100L, 0L, 0L)
+        val builder = ImageIndexedBuilder(memory, -1)
+        builder.extent(192L, 70L)
+        builder.set(63L, 63L, 1)
+        builder.set(64L, 64L, 1)
+        val first = TerminalImage.indexed(1L, builder.finish()!!, palette.snapshot())
+        val changed = first.erased(63L, 63L, 64L, 64L)
+        try {
+            assertNotEquals(first.tile(0L, 0L).contentVersion, changed.tile(0L, 0L).contentVersion)
+            assertEquals(first.tile(1L, 1L).contentVersion, changed.tile(1L, 1L).contentVersion)
+            assertTrue(first.tile(2L, 0L).transparent)
+            first
+                .pixels(TerminalImageRect(63L, 63L, 2L, 2L))
+                .use { pixels ->
+                    for (index in [0L, 12L]) {
+                        assertEquals(255, pixels.bytes[index].toInt() and 255)
+                        assertEquals(255, pixels.bytes[index + 3L].toInt() and 255)
+                    }
+                    assertEquals(0, pixels.bytes[7L].toInt() and 255)
+                    assertEquals(0, pixels.bytes[11L].toInt() and 255)
+                }
+            palette.define(1L, 2L, 0L, 100L, 0L)
+            palette
+                .snapshot()
+                .use { colors ->
+                    val recolored = changed.recolored(colors)
+                    try {
+                        assertEquals(
+                            changed.tile(1L, 1L).contentVersion,
+                            recolored.tile(1L, 1L).contentVersion
+                        )
+                        assertNotEquals(
+                            changed.tile(1L, 1L).paletteVersion,
+                            recolored.tile(1L, 1L).paletteVersion
+                        )
+                        recolored
+                            .pixels(TerminalImageRect(64L, 64L, 1L, 1L))
+                            .use { pixels ->
+                                assertEquals(255, pixels.bytes[1L].toInt() and 255)
+                                assertEquals(0, pixels.bytes[0L].toInt() and 255)
+                            }
+                    } finally {
+                        recolored.close()
+                    }
+                }
+        } finally {
+            first.close();
+            changed.close();
+            palette.close()
+        }
+        assertEquals(0L, memory.bytes)
+    }
+
+    @Test fun sparseLargeImagesUploadSmallTilesWithoutAllocatingAFullRgbaCopy() {
+        val memory = ImageMemory(TerminalImageLimits(maxCpuBytes = 1048576L))
+        val other = ImageMemory(TerminalImageLimits())
+        assertNotEquals(memory.namespace, other.namespace)
+        val palette = SixelRegisters(memory)
+        val builder = ImageIndexedBuilder(memory, 0)
+        builder.extent(4096L, 4096L)
+        val image = TerminalImage.indexed(1L, builder.finish()!!, palette.snapshot())
+        try {
+            assertFalse(image.tile(63L, 63L).transparent)
+            val before = memory.bytes
+            assertFailsWith<TerminalImageException> { image.pixels() }
+            assertEquals(before, memory.bytes)
+            image
+                .pixels(image.tile(63L, 63L).source)
+                .use { pixels ->
+                    assertEquals(before + 16384L + ImageBytes.overhead, memory.bytes)
+                    assertEquals(255, pixels.bytes[3L].toInt() and 255)
+                }
+            assertEquals(before, memory.bytes)
+        } finally {
+            image.close();
+            palette.close()
+        }
+        assertEquals(0L, memory.bytes)
+    }
+}

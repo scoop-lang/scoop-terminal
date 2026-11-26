@@ -1,0 +1,91 @@
+package scoop.tests.terminal
+
+/** Bounds native temporary objects just as a desktop event-loop turn does. */
+public fun withTerminalMetalPool(action: () -> Unit) {
+    @Unsafe {
+        val callback = foreignCallback<(Ptr<Unit>) -> Int>(
+            {
+                action();
+                0
+            }, 0,
+            ForeignCallbackMode.Reusable
+        )
+        try {
+            metalPool(callback.function, callback.context)
+            when (foreignCallbackFailure(callback)) {
+                case Some(val error) -> throw error
+                case None -> {}
+            }
+        } finally {
+            releaseForeignCallback(callback)
+        }
+    }
+}
+
+/** Real device allocations for manual Metal benchmarks; no production terminal dependency. */
+public class TerminalMetalProbe private constructor(private var handle: Ptr<Unit>?) : Closeable {
+    @Unsafe public fun device(): Ptr<Unit> = metalObject(handle!!, 0)
+    @Unsafe public fun queue(): Ptr<Unit> = metalObject(handle!!, 1)
+    @Unsafe public fun texture(): Ptr<Unit> = metalObject(handle!!, 2)
+    public val allocatedBytes: Long
+        get() {
+            @Unsafe {
+                return metalBytes(handle!!, false).toLong()
+            }
+        }
+    public val baselineBytes: Long
+        get() {
+            @Unsafe {
+                return metalBytes(handle!!, true).toLong()
+            }
+        }
+    public fun releaseTarget() {
+        @Unsafe {
+            metalReleaseTarget(handle!!)
+        }
+    }
+    public override fun close() {
+        when (handle) {
+            case Some(val value) -> {
+                handle = None
+                @Unsafe {
+                    metalClose(value)
+                }
+            }
+
+            case None -> {}
+        }
+    }
+    public companion object {
+        public fun create(width: Int, height: Int): TerminalMetalProbe {
+            @Unsafe {
+                return TerminalMetalProbe(
+                    Some(
+                        metalCreate(width, height) ?:
+                            throw IllegalStateException(
+                                Some("Metal device or texture creation failed")
+                            )
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Extern(name = "terminal_test_metal_create")
+private fun metalCreate(width: Int, height: Int): Ptr<Unit>?
+
+@Extern(name = "terminal_test_metal_pool")
+private fun metalPool(callback: FunPtr<(Ptr<Unit>) -> Int>, context: Ptr<Unit>)
+
+@Extern(name = "terminal_test_metal_object")
+private fun metalObject(owner: Ptr<Unit>, kind: Int): Ptr<Unit>
+
+@Extern(name = "terminal_test_metal_bytes")
+private fun metalBytes(owner: Ptr<Unit>, baseline: Boolean): ULong
+
+@Extern(name = "terminal_test_metal_release_target")
+private fun metalReleaseTarget(owner: Ptr<Unit>)
+
+@Extern(name = "terminal_test_metal_close")
+private fun metalClose(owner: Ptr<Unit>)

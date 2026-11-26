@@ -1,0 +1,67 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class StorageTest {
+    @Test
+    fun publishedRowsAreSharedUntilTheRowChanges() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("hello".toByteArray())
+        val before = terminal.lines(0L, 2L)
+        val again = terminal.lines(0L, 2L)
+        assertTrue(before[0L].cells === again[0L].cells)
+        terminal.feed("\u001b[1;1HX".toByteArray())
+        val after = terminal.lines(0L, 2L)
+        assertEquals("h", before[0L].cells[0L].text)
+        assertEquals("X", after[0L].cells[0L].text)
+        assertTrue(after[0L].contentVersion > before[0L].contentVersion)
+        assertTrue(before[1L].cells === after[1L].cells)
+        terminal.feed("\u001b[1;1HX".toByteArray())
+        assertTrue(after[0L].cells === terminal.lines(0L, 1L)[0L].cells)
+    }
+
+    @Test
+    fun pagedHistoryKeepsIndicesAcrossEvictionAndRestoration() {
+        val history = LineHistory()
+        val changes = ScreenChanges()
+        for (index in 0L..<300L)
+            history.addLast(ScreenRow(index, 2L, TerminalStyle(), changes))
+        for (index in 0L..<137L) {
+            assertEquals(index, history.removeFirst().id)
+            assertEquals(None, history.find(index))
+        }
+        for (index in 0L..<history.size) {
+            assertEquals(index + 137L, history[index].id)
+            assertEquals(Some(index), history.find(index + 137L))
+        }
+        for (index in 0L..<80L)
+            assertEquals(299L - index, history.removeLast().id)
+        for (index in 300L..<500L)
+            history.addLast(ScreenRow(index, 2L, TerminalStyle(), changes))
+        assertEquals(283L, history.size)
+        assertEquals(Some(83L), history.find(300L))
+        assertEquals(499L, history[history.size - 1L].id)
+        while (history.size > 0L)
+            history.removeFirst()
+        history.addLast(ScreenRow(900L, 2L, TerminalStyle(), changes))
+        assertEquals(Some(0L), history.find(900L))
+        assertEquals(900L, history.removeLast().id)
+        assertEquals(0L, history.size)
+    }
+
+    @Test
+    fun readingNearTheEndOfLargeHistoryKeepsContentAndIdentity() {
+        val terminal = Terminal(12L, 2L, 1000L)
+        for (index in 0L..<1400L)
+            terminal.feed(f"${index}\r\n".toByteArray())
+        assertEquals(1000L, terminal.historySize)
+        val rows = terminal.lines(998L, 4L)
+        assertEquals("1", rows[0L].cells[0L].text)
+        for (index in 0L..<4L)
+            assertEquals(Some(998L + index), terminal.findLine(rows[index].id))
+        terminal.resize(12L, 5L)
+        assertEquals(997L, terminal.historySize)
+        assertEquals(Some(998L), terminal.findLine(rows[0L].id))
+    }
+}

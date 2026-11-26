@@ -1,8 +1,29 @@
 package scoop.terminal.emulator
 
 internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
+    if (command.intermediate == '$'.code && command.final == 'p'.code) {
+        queryModes(terminal, command)
+        return false
+    }
+    if (command.intermediate == ' '.code && command.final == 'q'.code && command.prefix == 0) {
+        val value = command.argument(0L, 0)
+        if (value < 0 || value > 6) return false
+        terminal.modes.cursorShape = if (value <= 2)
+            TerminalCursorShape.Block
+        else if (value <= 4) TerminalCursorShape.Underline else TerminalCursorShape.Bar
+        terminal.modes.cursorBlink = value == 0 || value % 2 == 1
+        return true
+    }
+    if (command.intermediate == '!'.code && command.final == 'p'.code && command.prefix == 0) {
+        terminal.softReset()
+        return true
+    }
     if (command.intermediate != 0) return false
     val final = command.final.toChar()
+    if (final == 'S' && command.prefix == '?'.code) {
+        queryGraphics(terminal, command)
+        return false
+    }
     if (final == 'c' || final == 'n') {
         query(terminal, command)
         return false
@@ -25,34 +46,33 @@ internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
 
         case 'E' -> {
             screen.move(count, 0L)
-            screen.moveColumn(0L)
+            screen.carriageReturn()
         }
 
         case 'F' -> {
             screen.move(-count, 0L)
-            screen.moveColumn(0L)
+            screen.carriageReturn()
         }
 
-        case 'G' -> screen.moveColumn(count - 1L)
+        case 'G' -> screen.positionColumn(count - 1L)
         case 'H' -> screen.position(count - 1L, command.count(1L).toLong() - 1L)
         case 'I' -> terminal.tab(count, true)
         case 'J' -> screen.eraseDisplay(mode, style)
         case 'K' -> screen.eraseLine(mode, style)
 
         case 'L' -> {
-            if (screen.row >= screen.top && screen.row <= screen.bottom)
-                screen.scrollDown(screen.row, screen.bottom, count, style)
+            if (screen.insideMargins) screen.scrollDown(screen.row, screen.bottom, count, style)
             screen.pendingWrap = false
         }
 
         case 'M' -> {
-            if (screen.row >= screen.top && screen.row <= screen.bottom)
+            if (screen.insideMargins)
                 screen.scrollUp(screen.row, screen.bottom, count, style, false)
             screen.pendingWrap = false
         }
 
         case 'P' -> {
-            screen.current.shift(screen.column, count, false, style)
+            screen.shiftColumns(count, false, style)
             screen.pendingWrap = false
         }
 
@@ -67,10 +87,10 @@ internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
         }
 
         case 'Z' -> terminal.tab(count, false)
-        case '`' -> screen.moveColumn(count - 1L)
+        case '`' -> screen.positionColumn(count - 1L)
         case 'a' -> screen.move(0L, count)
         case 'b' -> terminal.repeat(count)
-        case 'd' -> screen.position(count - 1L, screen.column)
+        case 'd' -> screen.positionRow(count - 1L)
         case 'e' -> screen.move(count, 0L)
         case 'f' -> screen.position(count - 1L, command.count(1L).toLong() - 1L)
         case 'g' -> terminal.eraseTabs(mode)
@@ -85,11 +105,27 @@ internal fun executeCsi(terminal: TerminalState, command: VtCsi): Boolean {
             screen.setMargins(count - 1L, if (last == 0) screen.rows - 1L else last.toLong() - 1L)
         }
 
-        case 's' -> terminal.saveCursor()
+        case 's' -> {
+            if (terminal.modes.horizontalMargins) {
+                val last = command.argument(1L, screen.columns.toInt())
+                screen
+                    .setHorizontalMargins(
+                        count - 1L,
+                        if (last == 0) screen.columns - 1L else last.toLong() - 1L
+                    )
+            } else
+                terminal.saveCursor()
+        }
+
         case 'u' -> terminal.restoreCursor()
 
+        case 't' -> {
+            queryWindow(terminal, command)
+            return false
+        }
+
         case '@' -> {
-            screen.current.shift(screen.column, count, true, style)
+            screen.shiftColumns(count, true, style)
             screen.pendingWrap = false
         }
 
@@ -123,18 +159,25 @@ private fun applyModes(terminal: TerminalState, command: VtCsi, enabled: Boolean
             }
 
             case 9 -> updateMouse(modes, value, enabled)
+            case 12 -> modes.cursorBlink = enabled
             case 25 -> modes.cursorVisible = enabled
             case 47 -> terminal.switchScreen(enabled, false, false)
             case 66 -> modes.applicationKeypad = enabled
+            case 69 -> terminal.setHorizontalMargins(enabled)
             case 1000 -> updateMouse(modes, value, enabled)
             case 1002 -> updateMouse(modes, value, enabled)
             case 1003 -> updateMouse(modes, value, enabled)
             case 1004 -> modes.focusEvents = enabled
             case 1006 -> modes.sgrMouse = enabled
+            case 1016 -> modes.pixelMouse = enabled
             case 1047 -> terminal.switchScreen(enabled, false, true)
             case 1048 -> if (enabled) terminal.saveCursor() else terminal.restoreCursor()
             case 1049 -> terminal.switchScreen(enabled, true, true)
             case 2004 -> modes.bracketedPaste = enabled
+            case 2026 -> terminal.setSynchronizedOutput(enabled)
+            case 80 -> if (terminal.graphics.sixel) modes.sixelDisplay = enabled
+            case 1070 -> if (terminal.graphics.sixel) modes.sixelPrivateColors = enabled
+            case 8452 -> if (terminal.graphics.sixel) modes.sixelMovesRight = enabled
             case _ -> {}
         }
     }
@@ -150,7 +193,7 @@ private fun query(terminal: TerminalState, command: VtCsi) {
     val value = command.argument(0L, 0)
     if (command.final == 'c'.code && value == 0) {
         if (command.prefix == 0)
-            terminal.reply("\u001b[?1;2c")
+            terminal.reply(if (terminal.graphics.sixel) "\u001b[?1;2;4c" else "\u001b[?1;2c")
         else if (command.prefix == 0x3e) terminal.reply("\u001b[>0;1;0c")
     } else if (command.final == 'n'.code) {
         if (value == 5 && command.prefix == 0) terminal.reply("\u001b[0n")
@@ -158,7 +201,12 @@ private fun query(terminal: TerminalState, command: VtCsi) {
             val screen = terminal.screen
             val row = screen.row + 1L - if (screen.origin) screen.top else 0L
             val prefix = if (command.prefix == 0x3f) "?" else ""
-            terminal.reply(f"\u001b[${prefix}${row};${screen.column + 1L}R")
+            terminal
+                .reply(
+                    f"\u001b[${prefix}${row};${
+                        screen.column + 1L - if (screen.origin) screen.left else 0L
+                    }R"
+                )
         }
     }
 }

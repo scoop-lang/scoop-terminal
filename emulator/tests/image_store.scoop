@@ -1,0 +1,387 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class TerminalImageStoreTest {
+    @Test fun committedPicturesRespectSynchronizationDamageAndOwnedSnapshotLifetime() {
+        val state = TerminalState(
+            8L, 4L, 2L, TerminalParserLimits(), TerminalAmbiguousWidth.Narrow,
+            TerminalColors(), TerminalClipboardPolicy(), TerminalLinkLimits(),
+            TerminalTrackingLimits(),
+            TerminalCommandLimits(), TerminalImageLimits()
+        )
+        val memory = state.images.memory
+        val bytes = ImageBytes
+            .create(memory, 4L) { [255.toByte(), 0.toByte(), 0.toByte(), 255.toByte()] }
+        val key = state.images.key()
+        state
+            .images
+            .install(
+                state.screen,
+                TerminalImage
+                    .raster(
+                        key, 1L, 0L,
+                        ImageRaster(TerminalImageSize(1, 1), bytes)
+                    )
+            )
+        val placement = state
+            .images
+            .place(
+                state.screen,
+                TerminalImagePlacement(
+                    state.images.key(), key, 0L,
+                    state.screen.anchorAt(0L, 0L, TerminalAffinity.After)!!, TerminalImageRect(
+                        0L,
+                        0L,
+                        1L,
+                        1L
+                    )
+                )
+            )
+        val added = state.feed([])
+        assertTrue(added.damage.imagesChanged)
+        assertEquals(0L, added.damage.rows.size)
+        val snapshot = TerminalSnapshotPool().acquire(state.reading)
+        state.feed("\u001b[?2026h".toByteArray())
+        state.images.removePlacement(placement.record.key, freeData = true)
+        assertFalse(state.feed("x".toByteArray()).changed)
+        assertEquals(1L, state.reading.images.placementCount)
+        val released = state.feed("\u001b[?2026l".toByteArray())
+        assertTrue(released.damage.imagesChanged)
+        assertEquals(0L, state.reading.images.placementCount)
+        assertEquals("x", state.reading.lines(0L, 1L)[0L].cells[0L].text)
+        state.close()
+        assertTrue(memory.bytes > 0L)
+        snapshot
+            .images
+            .image(key)!!
+            .pixels()
+            .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 0L)) }
+        snapshot.close()
+        assertEquals(0L, memory.bytes)
+        Terminal(2L, 1L)
+            .use { terminal ->
+                terminal.feed("ok".toByteArray());
+                Unit
+            }
+    }
+
+    @Test fun explicitCellDimensionsPreserveAspectAndDoNotAddPixelOffsetsToTheirBox() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                val key = f.raster(f.main, 1L, width = 2L, height = 1L)
+                val entry = f.put(f.main, key, 0L, 0L)
+                val placement = entry.record.{columns: 4L, rows: 4L, offsetX: 2L, offsetY: 1L}
+                val area = imageGeometry(placement, TerminalPosition(1L, 2L), 8.0, 16.0)
+                assertEquals(18.0, area.destination.x)
+                assertEquals(17.0, area.destination.y)
+                assertEquals(30.0, area.destination.width)
+                assertEquals(15.0, area.destination.height)
+                assertEquals(4L, area.occupiedColumns)
+                assertEquals(4L, area.occupiedRows)
+                val derived = imageGeometry(
+                    placement.{rows: 0L},
+                    TerminalPosition(0L, 0L),
+                    8.0,
+                    16.0
+                )
+                assertEquals(1L, derived.occupiedRows)
+                val scaled = imageGeometry(
+                    entry.record.{scaleX: 2L, scaleY: 3L},
+                    TerminalPosition(0L, 0L), 1.0, 1.0
+                )
+                assertEquals(4.0, scaled.destination.width)
+                assertEquals(3.0, scaled.destination.height)
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun bufferIdentitiesReplacementAndNumberLookupKeepTheirProtocolMeaning() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                val first = f.raster(f.main, 11L, 70L)
+                val old = f.put(f.main, first, 0L, 1L, 9L)
+                val before = f.store.snapshot(f.main)
+                val second = f.raster(f.main, 12L, 70L)
+                f.put(f.main, first, 2L, 1L, 10L)
+                assertEquals(second, f.store.kitty(f.main.bufferEpoch, 0L, 70L)!!.key)
+                f.put(f.main, first, 1L, 2L, 9L)
+                assertEquals(2L, f.store.placementCount)
+                assertTrue(old.point.isClosed)
+                val alt = f.raster(f.alternate, 11L)
+                f.put(f.alternate, alt, 0L, 0L)
+                assertEquals(first, f.store.kitty(f.main.bufferEpoch, 11L)!!.key)
+                assertEquals(alt, f.store.kitty(f.alternate.bufferEpoch, 11L)!!.key)
+                val replacement = f.raster(f.main, 11L)
+                assertNotEquals(first, replacement)
+                assertEquals(1L, f.store.placementCount)
+                assertEquals(1L, before.placementCount)
+                before
+                    .image(first)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 0L)) }
+                before.release()
+                f.alternate.reset(TerminalStyle())
+                assertEquals(0L, f.store.placementCount)
+                assertEquals(replacement, f.store.kitty(f.main.bufferEpoch, 11L)!!.key)
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun fullScrollKeepsHistoryThenClipsOnlyTheEvictedFragment() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                val key = f.raster(f.main, 1L, width = 2L, height = 3L)
+                f.put(f.main, key, 0L, 0L)
+                val frozen = f.store.snapshot(f.main)
+                f.main.scrollUp(0L, 3L, 2L, TerminalStyle())
+                assertEquals(2L, f.main.historySize)
+                assertEquals(0.0, f.store.geometry(f.store.entries(f.main)[0L])!!.visible.y)
+                f.main.scrollUp(0L, 3L, 1L, TerminalStyle())
+                val cropped = f.store.geometry(f.store.entries(f.main)[0L])!!
+                assertEquals(-1.0, cropped.destination.y)
+                assertEquals(0.0, cropped.visible.y)
+                assertEquals(2.0, cropped.visible.height)
+                assertEquals(0.0, frozen.placements(0L, 1L)[0L].clipTop)
+                f.main.scrollUp(0L, 3L, 4L, TerminalStyle())
+                assertEquals(0L, f.store.placementCount)
+                assertEquals(1L, frozen.placementCount)
+                frozen.release()
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun rectangularScrollMovesContainedImagesAndLeavesCrossingImagesInPlace() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                val contained = f.raster(f.main, 1L, width = 2L, height = 2L)
+                val crossing = f.raster(f.main, 2L, width = 4L, height = 4L)
+                val first = f.put(f.main, contained, 1L, 2L)
+                val other = f.put(f.main, crossing, 0L, 1L)
+                f.main.setMargins(1L, 3L)
+                f.main.setHorizontalMargins(2L, 5L)
+                f.main.scrollUp(1L, 3L, 1L, TerminalStyle())
+                val moved = f.store.geometry(first)!!
+                assertEquals(1.0, moved.visible.y)
+                assertEquals(1.0, moved.visible.height)
+                assertEquals(0.0, f.store.geometry(other)!!.destination.y)
+                assertEquals(1.0, f.store.geometry(other)!!.destination.x)
+                assertEquals(0L, f.main.historySize)
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun scrollingKeepsAnImageAtTheTailColumnOfAWideGlyph() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                f.main.current.put(0L, "界", 2L, TerminalStyle())
+                val image = f.raster(f.main, 1L)
+                val entry = f.put(f.main, image, 0L, 0L)
+                entry.record = entry.record.{columnOffset: 1L}
+                assertEquals(1.0, f.store.geometry(entry)!!.destination.x)
+                f.main.scrollUp(0L, 3L, 1L, TerminalStyle())
+                assertEquals(1.0, f.store.geometry(entry)!!.destination.x)
+                assertEquals(0.0, f.store.geometry(entry)!!.destination.y)
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun sameTextAndBlankErasureClearSixelButPreserveKittyAndFrozenPixels() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                val cell = TerminalCell("a", 1L, TerminalStyle())
+                f.main.current.putCell(0L, cell)
+                val sixel = f.indexed()
+                val placed = f.put(f.main, sixel, 0L, 0L)
+                val kitty = f.raster(f.main, 10L)
+                f.put(f.main, kitty, 0L, 0L)
+                val old = f.store.snapshot(f.main)
+                f.main.current.putCell(0L, cell)
+                f.main.rowAt(1L).erase(3L, 4L, TerminalStyle())
+                f
+                    .store
+                    .get(sixel)!!
+                    .pixels()
+                    .use { pixels ->
+                        assertEquals(0, imageByte(pixels.bytes, 3L))
+                        assertEquals(255, imageByte(pixels.bytes, 7L))
+                        assertEquals(0, imageByte(pixels.bytes, 31L))
+                    }
+                old
+                    .image(sixel)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 3L)) }
+                f
+                    .store
+                    .get(kitty)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 3L)) }
+                // In-row text insertion must not move a grid image's origin.
+                f.main.current.shift(0L, 1L, true, TerminalStyle(), 2L)
+                assertEquals(0.0, f.store.geometry(placed)!!.destination.x)
+                f.main.eraseDisplay(2, TerminalStyle())
+                assertEquals(0L, f.store.placementCount)
+                old.release()
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun sharedColorsAndReflowPublishNewVersionsWithoutMutatingOldFrames() {
+        val fixture = StoreFixture()
+        fixture
+            .use { f ->
+                f.main.current.put(0L, "a", 1L, TerminalStyle())
+                f.main.current.put(1L, "b", 1L, TerminalStyle())
+                f.main.current.put(2L, "c", 1L, TerminalStyle())
+                f.main.current.put(3L, "d", 1L, TerminalStyle())
+                val key = f.indexed()
+                val entry = f.put(f.main, key, 0L, 3L)
+                val old = f.store.snapshot(f.main)
+                f.store.palette().define(1L, 2L, 0L, 100L, 0L)
+                f.store.refreshPalette()
+                old
+                    .image(key)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 0L)) }
+                f
+                    .store
+                    .get(key)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 1L)) }
+                f.main.resize(2L, 4L, true, TerminalStyle())
+                val position = f.store.position(entry)!!
+                assertEquals(1L, position.row)
+                assertEquals(1L, position.column)
+                assertEquals(4.0, f.store.geometry(entry)!!.destination.width)
+                f
+                    .store
+                    .get(key)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 3L)) }
+                old.release()
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+
+    @Test fun evictionPrefersUnplacedDataAndEraseFailureDoesNotStopText() {
+        val fixture = StoreFixture(TerminalImageLimits(maxCpuBytes = 40000L))
+        fixture
+            .use { f ->
+                val unplaced = f.raster(f.main, 8L)
+                val visible = f.raster(f.main, 9L)
+                f.put(f.main, visible, 0L, 0L)
+                f.store.makeRoom(f.memory.limits.maxCpuBytes - f.memory.bytes + 1L, f.main)
+                assertTrue(
+                    when (f.store.get(unplaced)) {
+                        case None -> true;
+                        case Some(_) -> false
+                    }
+                )
+                assertEquals(visible, f.store.kitty(f.main.bufferEpoch, 9L)!!.key)
+                f.store.removeResource(visible)
+                val sixel = f.indexed()
+                f.put(f.main, sixel, 0L, 0L)
+                val frozen = f.store.snapshot(f.main)
+                f.main.current.put(0L, "x", 1L, TerminalStyle())
+                assertEquals("x", f.main.current[0L].text)
+                assertEquals(0L, f.store.placementCount)
+                assertEquals(1L, f.diagnostics.size)
+                frozen
+                    .image(sixel)!!
+                    .pixels()
+                    .use { pixels -> assertEquals(255, imageByte(pixels.bytes, 3L)) }
+                frozen.release()
+            }
+        assertEquals(0L, fixture.memory.bytes)
+    }
+}
+
+private class StoreFixture(limits: TerminalImageLimits = TerminalImageLimits()) : Closeable {
+    val memory = ImageMemory(limits)
+    private val ids = RowIds()
+    private val changes = ScreenChanges()
+    val main = Screen(8L, 4L, 2L, ids, changes, true)
+    val alternate = Screen(8L, 4L, 0L, ids, changes)
+    val diagnostics = ArrayList<String>()
+    val store = TerminalImageStore(
+        memory,
+        changes.tracking,
+        { text ->
+            diagnostics.add(text);
+            Unit
+        }
+    )
+    init {
+        changes.images = Some(store)
+        store.attach([main, alternate])
+        store.setPixels(Some(TerminalPixelSize(8L, 4L, 1L, 1L)))
+    }
+    fun raster(
+        screen: Screen,
+        id: Long,
+        number: Long = 0L,
+        width: Long = 2L,
+        height: Long = 2L
+    ): Long {
+        val bytes = ImageBytes
+            .create(memory, width * height * 4L) {
+                Array<Byte>(width * height * 4L) { index ->
+                    if (index % 4L == 0L || index % 4L == 3L) 255.toByte() else 0.toByte()
+                }
+            }
+        val key = store.key()
+        store
+            .install(
+                screen,
+                TerminalImage
+                    .raster(
+                        key,
+                        id,
+                        number,
+                        ImageRaster(TerminalImageSize(width.toInt(), height.toInt()), bytes)
+                    )
+            )
+        return key
+    }
+    fun indexed(): Long {
+        val palette = store.palette()
+        palette.define(1L, 2L, 100L, 0L, 0L)
+        val builder = ImageIndexedBuilder(memory, -1)
+        builder.extent(4L, 2L)
+        for (y in 0L..<2L)
+            for (x in 0L..<4L)
+                builder.set(x, y, 1)
+        val key = store.key()
+        store
+            .install(main, TerminalImage.indexed(key, builder.finish()!!, palette.snapshot()), true)
+        return key
+    }
+    fun put(
+        screen: Screen,
+        image: Long,
+        row: Long,
+        column: Long,
+        id: Long = 0L
+    ): StoredImagePlacement {
+        val source = store.get(image)!!.size
+        return store
+            .place(
+                screen,
+                TerminalImagePlacement(
+                    store.key(), image, id,
+                    screen.anchorAt(row, column, TerminalAffinity.After)!!,
+                    TerminalImageRect(0L, 0L, source.width.toLong(), source.height.toLong())
+                )
+            )
+    }
+    public override fun close() {
+        store.close()
+    }
+}

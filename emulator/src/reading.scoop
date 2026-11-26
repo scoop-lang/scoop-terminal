@@ -1,0 +1,196 @@
+package scoop.terminal.emulator
+
+/** An immutable, committed terminal generation. Long-lived consumers acquire an owned snapshot. */
+public interface TerminalReading {
+    public val columns: Long
+    public val rows: Long
+    public val historySize: Long
+    public val bufferEpoch: Long
+    public val alternateScreen: Boolean
+    public val ambiguousWidth: TerminalAmbiguousWidth
+    public val revision: Long
+    public val screenRevision: Long
+    public val textRevision: Long
+    public val presentationVersion: Long
+    public val cursor: TerminalCursor
+    public val mouseReporting: Boolean
+    public val pixelSize: TerminalPixelSize?
+    public val colors: TerminalColors
+    public val images: TerminalImages
+    public val metadata: TerminalMetadata
+    public val linkCount: Long
+    public fun link(key: Long): TerminalLink?
+    public val trackingVersion: Long
+    public fun trackedRange(id: Long): TerminalTrackingState?
+    public val commandCount: Long
+    public val commandVersion: Long
+    public fun command(id: Long): TerminalCommandBlock?
+    public fun commands(start: Long, count: Long): Array<TerminalCommandBlock>
+    public fun lines(start: Long, count: Long): Array<TerminalLine>
+    public fun findLine(id: Long): Long?
+    public fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity = TerminalAffinity.After
+    ): TerminalAnchor?
+    public fun resolve(anchor: TerminalAnchor): TerminalPosition?
+    /** The retained part of a logical line, including its final grid padding. */
+    public fun logicalLineRange(id: Long): TerminalRange?
+}
+
+/** Shares immutable text and metadata without retaining any image resources or a parent reading. */
+public fun TerminalReading.withoutImages(): TerminalReading = when {
+    this is TerminalReadingData -> textProjection()
+    this is TerminalSnapshot -> available().textProjection()
+    else -> throw IllegalArgumentException(Some("reading was not produced by the terminal core"))
+}
+
+internal class TerminalReadingData(
+    public override val columns: Long,
+    public override val bufferEpoch: Long,
+    public override val alternateScreen: Boolean,
+    public override val revision: Long,
+    public override val screenRevision: Long,
+    public override val textRevision: Long,
+    public override val presentationVersion: Long,
+    public override val cursor: TerminalCursor,
+    public override val mouseReporting: Boolean,
+    private val history: HistoryReading,
+    val screenLines: Array<TerminalLine>,
+    public override val pixelSize: TerminalPixelSize?,
+    public override val colors: TerminalColors,
+    public override val metadata: TerminalMetadata,
+    private val links: LinkReading,
+    private val tracking: TrackingReading,
+    private val commandData: CommandReading,
+    public override val ambiguousWidth: TerminalAmbiguousWidth,
+    public override val images: TerminalImages = TerminalImages.Empty
+) : TerminalReading {
+    private val textual = AtomicRef<TextReadingReference>(TextReadingReference(None))
+
+    /** Sharing text never retains a parent reading or its image data. */
+    internal fun textProjection(): TerminalReadingData {
+        if (images === TerminalImages.Empty) return this
+        when (val previous = textual.load().value) {
+            case Some(val reading) -> return reading
+            case None -> {}
+        }
+        val next = TextReadingReference(Some(withImages(TerminalImages.Empty)))
+        while (true) {
+            val previous = textual.load()
+            when (val reading = previous.value) {
+                case Some(val reading) -> return reading
+                case None -> {}
+            }
+            if (textual.compareAndSet(previous, next)) return next.value!!
+        }
+    }
+
+    internal fun withImages(value: TerminalImages): TerminalReadingData = TerminalReadingData(
+        columns, bufferEpoch, alternateScreen, revision, screenRevision, textRevision,
+        presentationVersion, cursor, mouseReporting, history, screenLines, pixelSize, colors,
+        metadata, links, tracking, commandData, ambiguousWidth, value
+    )
+    public override val rows: Long get() = screenLines.size
+    public override val historySize: Long get() = history.size
+    public override val linkCount: Long get() = links.count
+    public override val trackingVersion: Long get() = tracking.version
+    public override fun trackedRange(id: Long): TerminalTrackingState? = tracking.get(id)
+    public override val commandCount: Long get() = commandData.count
+    public override val commandVersion: Long get() = commandData.version
+    public override fun command(id: Long): TerminalCommandBlock? = commandData.command(id, this)
+    public override fun commands(start: Long, count: Long): Array<TerminalCommandBlock> {
+        if (start < 0L || count < 0L || start > commandCount || count > commandCount - start)
+            throw IndexOutOfBoundsException()
+        return Array<TerminalCommandBlock>(count) { offset -> commandData.at(start + offset, this) }
+    }
+    public override fun link(key: Long): TerminalLink? = links.get(key)
+    val retainedBytes: Long = readingBytes(history, screenLines) +
+        8392L +
+        metadataBytes(metadata) +
+        links.bytes +
+        tracking.count *
+        256L +
+        commandData.bytes +
+        images.retainedBytes
+
+    private fun line(index: Long): TerminalLine = if (index < historySize)
+        history[index]
+    else
+        screenLines[index - historySize]
+
+    public override fun lines(start: Long, count: Long): Array<TerminalLine> {
+        val total = historySize + rows
+        if (start < 0L || start > total || count < 0L || count > total - start)
+            throw IndexOutOfBoundsException()
+        return Array<TerminalLine>(count) { offset -> line(start + offset) }
+    }
+
+    public override fun findLine(id: Long): Long? {
+        when (val found = history.find(id)) {
+            case Some(_) -> return found
+            case None -> {}
+        }
+        for (index in 0L..<rows) {
+            if (screenLines[index].id == id) return Some(historySize + index)
+        }
+        return None
+    }
+
+    public override fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity
+    ): TerminalAnchor? {
+        if (row < 0L || row >= historySize + rows) return None
+        return anchorInLine(bufferEpoch, line(row), column, affinity)
+    }
+
+    public override fun resolve(anchor: TerminalAnchor): TerminalPosition? {
+        if (anchor.bufferEpoch != bufferEpoch || anchor.cellOffset < 0L) return None
+        val span = logicalSpan(anchor.logicalLineId) ?: return None
+        return resolveInLines(anchor, span, { index -> line(index) })
+    }
+
+    public override fun logicalLineRange(id: Long): TerminalRange? {
+        val span = logicalSpan(id) ?: return None
+        return Some(
+            TerminalRange(
+                anchorAt(span.first, 0L)!!,
+                anchorAt(span.last, line(span.last).cells.size, TerminalAffinity.Before)!!
+            )
+        )
+    }
+
+    private fun logicalSpan(id: Long): LogicalSpan? {
+        val stored = history.findLogical(id)
+        var first = stored?.first ?: -1L
+        var last = stored?.last ?: -1L
+        for (index in 0L..<rows) {
+            if (screenLines[index].logicalLineId == id) {
+                if (first < 0L) first = historySize + index
+                last = historySize + index
+            }
+        }
+        if (first < 0L) return None
+        return Some(LogicalSpan(first, last))
+    }
+}
+
+private class TextReadingReference(val value: TerminalReadingData?)
+
+private fun readingBytes(history: HistoryReading, rows: Array<TerminalLine>): Long {
+    var bytes = history.retainedBytes
+    for (line in rows)
+        bytes += line.retainedBytes
+    return bytes
+}
+
+private fun metadataBytes(metadata: TerminalMetadata): Long {
+    val directory = metadata.workingDirectory ?: return 128L
+    return 128L +
+        directory.uri.byteLength +
+        directory.host.byteLength +
+        directory.encodedPath.byteLength +
+        directory.path.byteLength
+}

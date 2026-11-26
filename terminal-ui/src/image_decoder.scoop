@@ -1,0 +1,66 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.terminal.emulator.*
+
+/** No Application, GPU context or persistent native object; safe to call on the model worker. */
+public class TerminalCpuImageDecoder public constructor() : TerminalImageDecoder {
+    public override fun peakBytes(size: TerminalImageSize, encodedBytes: Long): Long {
+        // A copied encoded buffer, up to eight-byte codec pixels, a four-byte raster surface,
+        // mutable readback plus its immutable copy, and codec row/filter/metadata work.
+        val pixels = size.rgbaBytes
+        if (size.width <=
+            0 ||
+            size.height <=
+            0 ||
+            encodedBytes <
+            0L ||
+            pixels >
+            (Long.MAX_VALUE - 1048576L - size.width.toLong() * 16L) /
+            5L
+        )
+            throw IllegalArgumentException(Some("invalid PNG allocation size"))
+        val working = pixels * 5L + size.width.toLong() * 16L + 1048576L
+        if (encodedBytes > Long.MAX_VALUE - working)
+            throw IllegalArgumentException(Some("PNG allocation size overflow"))
+        return working + encodedBytes
+    }
+
+    public override fun decodePng(encoded: Array<Byte>, size: TerminalImageSize): Array<Byte> {
+        try {
+            return Image
+                .decode(encoded)
+                .use { image ->
+                    if (image.width != size.width || image.height != size.height)
+                        throw TerminalImageException(
+                            TerminalImageFailure.InvalidData,
+                            "decoded PNG dimensions differ from IHDR"
+                        )
+                    RasterSurface(size.width, size.height)
+                        .use { surface ->
+                            surface
+                                .draw { canvas ->
+                                    canvas.clear(Color.Transparent)
+                                    canvas
+                                        .drawImage(
+                                            image,
+                                            Rect(
+                                                0.0,
+                                                0.0,
+                                                size.width.toDouble(),
+                                                size.height.toDouble()
+                                            ),
+                                            ImageSampling.Nearest
+                                        )
+                                }
+                            surface.readPixels()
+                        }
+                }
+        } catch (error: GraphicsException) {
+            throw TerminalImageException(
+                TerminalImageFailure.InvalidData,
+                "PNG codec rejected the image", Some(error)
+            )
+        }
+    }
+}

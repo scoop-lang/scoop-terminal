@@ -13,19 +13,23 @@ public enum TerminalKey {
 }
 
 public enum TerminalMouseButton {
-    Left, Middle, Right, NonePressed, WheelUp, WheelDown
+    Left, Middle, Right, NonePressed, WheelUp, WheelDown, WheelLeft, WheelRight
 }
 
 public enum TerminalMouseAction {
     Press, Release, Move
 }
 
+/** Zero-based device pixels relative to the accepted terminal content area. */
+public struct TerminalPixelPosition(val x: Long, val y: Long)
+
 public struct TerminalMouse(
     val action: TerminalMouseAction,
     val button: TerminalMouseButton,
     val row: Long,
     val column: Long,
-    val modifiers: TerminalModifiers = TerminalModifiers()
+    val modifiers: TerminalModifiers = TerminalModifiers(),
+    val pixels: TerminalPixelPosition? = None
 )
 
 public enum TerminalInput {
@@ -43,7 +47,7 @@ internal fun encode(terminal: TerminalState, input: TerminalInput): Array<Byte> 
             if (modes.bracketedPaste) "\u001b[200~" + value + "\u001b[201~" else value
         case Focus(val focused) ->
             if (!modes.focusEvents) "" else if (focused) "\u001b[I" else "\u001b[O"
-        case Mouse(val event) -> mouseSequence(terminal, event)
+        case Mouse(val event) -> return mouseSequence(terminal, event)
     }
     return text.toByteArray()
 }
@@ -62,8 +66,8 @@ private fun keySequence(
         case Character(val character) -> meta + keyCharacter(character, modifiers.control)
         case Escape -> meta + "\u001b"
         case Enter -> meta + if (modes.lineFeedNewLine) "\r\n" else "\r"
-        case Tab -> if (modifiers.shift) "\u001b[Z" else meta + "\t"
-        case Backspace -> meta + "\u007f"
+        case Tab -> meta + if (modifiers.shift) "\u001b[Z" else "\t"
+        case Backspace -> meta + if (modifiers.control) "\u0008" else "\u007f"
         case Up -> cursorKey('A', parameter, modes.applicationCursor)
         case Down -> cursorKey('B', parameter, modes.applicationCursor)
         case Right -> cursorKey('C', parameter, modes.applicationCursor)
@@ -84,8 +88,11 @@ private fun keyCharacter(character: Char, control: Boolean): String {
     val code = character.code
     if (code >= 0x61 && code <= 0x7a) return (code - 0x60).toChar().toString()
     if (code >= 0x40 && code <= 0x5f) return (code - 0x40).toChar().toString()
-    if (character == ' ') return "\u0000"
-    if (character == '?') return "\u007f"
+    if (character == ' ' || character == '2') return "\u0000"
+    if (character >= '3' && character <= '7')
+        return (character.code - '3'.code + 0x1b).toChar().toString()
+    if (character == '-') return "\u001f"
+    if (character == '?' || character == '/' || character == '8') return "\u007f"
     return character.toString()
 }
 
@@ -121,17 +128,18 @@ private fun keypadKey(character: Char, parameter: Int, application: Boolean): St
             case '+' -> 'k'
             case '-' -> 'm'
             case '/' -> 'o'
+            case ',' -> 'l'
+            case '=' -> 'X'
             case _ -> return character.toString()
         }
     return cursorKey(final, parameter, true)
 }
 
-private fun mouseSequence(terminal: TerminalState, event: TerminalMouse): String {
+private fun mouseSequence(terminal: TerminalState, event: TerminalMouse): Array<Byte> {
     val modes = terminal.modes
     val tracking = modes.mouseTracking
     val grid = terminal.screen
-    if (!modes.sgrMouse ||
-        tracking ==
+    if (tracking ==
         0 ||
         event.row <
         0L ||
@@ -142,13 +150,13 @@ private fun mouseSequence(terminal: TerminalState, event: TerminalMouse): String
         event.column >=
         grid.columns
     )
-        return ""
-    if (tracking == 9 && event.action != TerminalMouseAction.Press) return ""
+        return []
+    if (tracking == 9 && event.action != TerminalMouseAction.Press) return []
     if (event.action ==
         TerminalMouseAction.Move &&
         (tracking < 1002 || (tracking == 1002 && event.button == TerminalMouseButton.NonePressed))
     )
-        return ""
+        return []
     val button = when (event.button) {
         case Left -> 0
         case Middle -> 1
@@ -156,12 +164,36 @@ private fun mouseSequence(terminal: TerminalState, event: TerminalMouse): String
         case NonePressed -> 3
         case WheelUp -> 64
         case WheelDown -> 65
+        case WheelLeft -> 66
+        case WheelRight -> 67
     }
-    val code = button +
+    if (button >= 64 && event.action != TerminalMouseAction.Press) return []
+    if (button == 3 && event.action != TerminalMouseAction.Move) return []
+    val modifier = if (tracking == 9)
+        0
+    else
         (if (event.modifiers.shift) 4 else 0) +
-        (if (event.modifiers.alt) 8 else 0) +
-        (if (event.modifiers.control) 16 else 0) +
-        (if (event.action == TerminalMouseAction.Move) 32 else 0)
+            (if (event.modifiers.alt) 8 else 0) +
+            (if (event.modifiers.control) 16 else 0)
+    val code = button + modifier + (if (event.action == TerminalMouseAction.Move) 32 else 0)
     val suffix = if (event.action == TerminalMouseAction.Release) 'm' else 'M'
-    return f"\u001b[<${code};${event.column + 1L};${event.row + 1L}${suffix}"
+    if (modes.pixelMouse) {
+        val point = event.pixels ?: return []
+        if (point.x < 0L || point.y < 0L || point.x >= 2147483647L || point.y >= 2147483647L)
+            return []
+        return f"\u001b[<${code};${point.x + 1L};${point.y + 1L}${suffix}".toByteArray()
+    }
+    if (modes.sgrMouse)
+        return f"\u001b[<${code};${event.column + 1L};${event.row + 1L}${suffix}".toByteArray()
+    if (event.column > 222L || event.row > 222L) return []
+    val legacyCode = if (event.action == TerminalMouseAction.Release) 3 + modifier else code
+    // These are protocol bytes, including values above 127, not UTF-8 text.
+    return [
+        0x1b.toByte(),
+        0x5b.toByte(),
+        0x4d.toByte(),
+        (legacyCode + 32).toByte(),
+        (event.column + 33L).toByte(),
+        (event.row + 33L).toByte()
+    ]
 }

@@ -1,0 +1,65 @@
+package scoop.ui.terminal
+
+import scoop.terminal.emulator.*
+
+/** Component behavior only; URI policy and any preview belong to the embedding application. */
+public struct TerminalViewOptions(
+    val onLinkActivated: (TerminalLink) -> Unit = {},
+    val onLinkHovered: (TerminalLink?) -> Unit = {},
+    val commandSeparators: Boolean = false,
+    val additionalWordCharacters: String = "",
+    val imageCacheLimits: TerminalImageCacheLimits = TerminalImageCacheLimits(),
+    val onImageError: (Throwable) -> Unit = {}
+)
+
+private struct LinkPress(
+    val link: TerminalLink,
+    val origin: CellLocation,
+    val pixels: TerminalPixelPosition,
+    val threshold: Double
+)
+
+/** A claimed pointer sequence activates only if it ends over the pressed record without dragging. */
+internal class TerminalLinkGesture {
+    private var press: LinkPress? = None
+    val active: Boolean
+        get() = when (press) {
+            case Some(_) -> true;
+            case None -> false
+        }
+
+    fun begin(
+        link: TerminalLink,
+        origin: CellLocation,
+        pixels: TerminalPixelPosition,
+        scale: Double
+    ) {
+        press = Some(LinkPress(link, origin, pixels, 3.0 * scale))
+    }
+
+    fun drag(pixels: TerminalPixelPosition): CellLocation? {
+        val previous = press ?: return None
+        if (!moved(previous, pixels)) return None
+        press = None
+        return Some(previous.origin)
+    }
+
+    fun release(link: TerminalLink?, pixels: TerminalPixelPosition): TerminalLink? {
+        val previous = press ?: return None
+        press = None
+        return if (link?.key == Some(previous.link.key) && !moved(previous, pixels))
+            Some(previous.link)
+        else
+            None
+    }
+
+    fun cancel() {
+        press = None
+    }
+
+    private fun moved(previous: LinkPress, pixels: TerminalPixelPosition): Boolean {
+        val dx = pixels.x.toDouble() - previous.pixels.x.toDouble()
+        val dy = pixels.y.toDouble() - previous.pixels.y.toDouble()
+        return dx * dx + dy * dy >= previous.threshold * previous.threshold
+    }
+}

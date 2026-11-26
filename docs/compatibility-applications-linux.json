@@ -1,0 +1,115 @@
+{
+  "runs": [
+    {
+      "timestamp": "2026-11-26T11:34:49.797327+00:00",
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.43",
+      "commit": "d01cb832e5aa39683d0690187ab2fbb7fcaa4186",
+      "working_tree_changes": true,
+      "term": "scoop-terminal",
+      "results": [
+        {
+          "case": "shell",
+          "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu)",
+          "command": [
+            "/usr/bin/bash",
+            "--noprofile",
+            "--rcfile",
+            "<temporary>/bashrc",
+            "-i"
+          ],
+          "result": "SMOKE case=shell columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "vim",
+          "version": "NVIM v0.11.6",
+          "command": [
+            "/usr/bin/vim",
+            "-N",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "<temporary>/input.txt"
+          ],
+          "result": "SMOKE case=vim columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "nvim",
+          "version": "NVIM v0.11.6",
+          "command": [
+            "/usr/bin/nvim",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "<temporary>/input.txt"
+          ],
+          "result": "SMOKE case=nvim columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "less",
+          "version": "less 668 (GNU regular expressions)",
+          "command": [
+            "/usr/bin/less",
+            "-R",
+            "-X",
+            "<temporary>/input.txt"
+          ],
+          "result": "SMOKE case=less columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "progress",
+          "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu)",
+          "command": [
+            "/usr/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "for i in 0 10 50 100; do printf '\\r\\033[Kprogress:%s%%\\033]9;4;1;%s\\007' \"$i\" \"$i\"; sleep .02; done; printf '\\033]9;4;0\\007\\n'"
+          ],
+          "result": "SMOKE case=progress columns=80 rows=24 images=0 diagnostics=0"
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-26T11:34:50.512385+00:00",
+      "platform": "Linux-7.0.0-44-generic-x86_64-with-glibc2.43",
+      "commit": "d01cb832e5aa39683d0690187ab2fbb7fcaa4186",
+      "working_tree_changes": true,
+      "term": "xterm-256color",
+      "results": [
+        {
+          "case": "shell",
+          "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu)",
+          "command": [
+            "/usr/bin/bash",
+            "--noprofile",
+            "--rcfile",
+            "<temporary>/bashrc",
+            "-i"
+          ],
+          "result": "SMOKE case=shell columns=100 rows=30 images=0 diagnostics=0"
+        },
+        {
+          "case": "nvim",
+          "version": "NVIM v0.11.6",
+          "command": [
+            "/usr/bin/nvim",
+            "-u",
+            "NONE",
+            "-i",
+            "NONE",
+            "-n",
+            "+set nomore",
+            "<temporary>/input.txt"
+          ],
+          "result": "SMOKE case=nvim columns=100 rows=30 images=0 diagnostics=0"
+        }
+      ]
+    }
+  ]
+}

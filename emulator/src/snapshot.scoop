@@ -1,0 +1,235 @@
+package scoop.terminal.emulator
+
+/** Conservative retained-content accounting; shared handles of one generation are charged once. */
+public struct TerminalSnapshotLimits(
+    val maxHandles: Long = 16L,
+    val maxRetainedBytes: Long = 268435456L
+)
+
+/** A bounded lease pool for immutable readings, shared safely by a model and its consumers. */
+public class TerminalSnapshotPool public constructor(
+    limits: TerminalSnapshotLimits = TerminalSnapshotLimits()
+) {
+    private val budget = SnapshotBudget(limits)
+
+    /** Retains a core-produced reading without accessing or moving the mutable terminal. */
+    public fun acquire(reading: TerminalReading): TerminalSnapshot = when {
+        reading is TerminalReadingData -> budget.acquire(reading)
+        reading is TerminalSnapshot -> budget.acquire(reading.available())
+        else ->
+            throw IllegalArgumentException(Some("reading was not produced by the terminal core"))
+    }
+}
+
+private class SnapshotRetention(val reading: TerminalReadingData?)
+
+/** An owned immutable reading. close releases its lease; reading after close is an error. */
+public class TerminalSnapshot internal constructor(
+    reading: TerminalReadingData,
+    private val budget: SnapshotBudget,
+    private val imageLease: TerminalImageLease
+) : TerminalReading, Closeable {
+    private val retained = AtomicRef<SnapshotRetention>(SnapshotRetention(Some(reading)))
+    public val isClosed: Boolean
+        get() = when (retained.load().reading) {
+            case None -> true;
+            case Some(_) -> false
+        }
+    internal fun available(): TerminalReadingData = retained.load().reading ?:
+        throw IllegalStateException(Some("terminal snapshot is closed"))
+
+    /** Search owns a separate bounded lease; closing this snapshot does not cancel that search. */
+    public fun search(
+        query: String,
+        options: TerminalSearchOptions = TerminalSearchOptions()
+    ): TerminalSearch {
+        val pattern = searchPattern(query, options)
+        val lease = budget.acquire(available().textProjection())
+        val working = pattern.size * 256L + 4096L
+        var reserved = false
+        try {
+            budget.reserveWorking(working)
+            reserved = true
+            return TerminalSearch(
+                lease,
+                query,
+                options,
+                pattern,
+                budget.nextSearch(),
+                budget,
+                working
+            )
+        } catch (error: Throwable) {
+            lease.close()
+            if (reserved) budget.releaseWorking(working)
+            throw error
+        }
+    }
+    public override val columns: Long get() = available().columns
+    public override val rows: Long get() = available().rows
+    public override val historySize: Long get() = available().historySize
+    public override val bufferEpoch: Long get() = available().bufferEpoch
+    public override val alternateScreen: Boolean get() = available().alternateScreen
+    public override val ambiguousWidth: TerminalAmbiguousWidth get() = available().ambiguousWidth
+    public override val revision: Long get() = available().revision
+    public override val screenRevision: Long get() = available().screenRevision
+    public override val textRevision: Long get() = available().textRevision
+    public override val presentationVersion: Long get() = available().presentationVersion
+    public override val cursor: TerminalCursor get() = available().cursor
+    public override val mouseReporting: Boolean get() = available().mouseReporting
+    public override val pixelSize: TerminalPixelSize? get() = available().pixelSize
+    public override val colors: TerminalColors get() = available().colors
+    public override val images: TerminalImages
+        get() {
+            available()
+            return imageLease.images
+        }
+    public override val metadata: TerminalMetadata get() = available().metadata
+    public override val linkCount: Long get() = available().linkCount
+    public override val trackingVersion: Long get() = available().trackingVersion
+    public override val commandCount: Long get() = available().commandCount
+    public override val commandVersion: Long get() = available().commandVersion
+    public override fun command(id: Long): TerminalCommandBlock? = available().command(id)
+    public override fun commands(start: Long, count: Long): Array<TerminalCommandBlock> =
+        available().commands(start, count)
+    public override fun trackedRange(id: Long): TerminalTrackingState? = available()
+        .trackedRange(id)
+    public override fun link(key: Long): TerminalLink? = available().link(key)
+    public override fun lines(start: Long, count: Long): Array<TerminalLine> = available()
+        .lines(start, count)
+    public override fun findLine(id: Long): Long? = available().findLine(id)
+    public override fun anchorAt(
+        row: Long,
+        column: Long,
+        affinity: TerminalAffinity
+    ): TerminalAnchor? = available().anchorAt(row, column, affinity)
+    public override fun resolve(anchor: TerminalAnchor): TerminalPosition? = available()
+        .resolve(anchor)
+    public override fun logicalLineRange(id: Long): TerminalRange? = available()
+        .logicalLineRange(id)
+    public override fun close() {
+        val value = retained.exchange(SnapshotRetention(None)).reading ?: return
+        try {
+            budget.release(value)
+        } finally {
+            imageLease.close()
+        }
+    }
+}
+
+private class SnapshotLease(val reading: TerminalReadingData, val references: Long = 1L)
+
+private class SnapshotUsage(
+    val leases: Array<SnapshotLease> = [],
+    val handles: Long = 0L,
+    val bytes: Long = 0L,
+    val working: Long = 0L
+)
+
+internal class SnapshotBudget(private val limits: TerminalSnapshotLimits) {
+    private val usage = AtomicRef<SnapshotUsage>(SnapshotUsage())
+    private val searchGeneration = AtomicLong(0L)
+    init {
+        if (limits.maxHandles < 0L || limits.maxRetainedBytes < 0L)
+            throw IllegalArgumentException(Some("negative terminal snapshot limit"))
+    }
+
+    fun acquire(reading: TerminalReadingData): TerminalSnapshot {
+        val images = reading.images.retain()
+        try {
+            usage
+                .updateAndGet { current ->
+                    if (current.handles >= limits.maxHandles)
+                        throw IllegalStateException(Some("terminal snapshot handle limit exceeded"))
+                    val found = leaseIndex(current, reading)
+                    val additional = if (found < 0L) reading.retainedBytes else 0L
+                    if (additional > limits.maxRetainedBytes - current.bytes - current.working)
+                        throw IllegalStateException(
+                            Some("terminal snapshot retained-content limit exceeded")
+                        )
+                    val leases = Array<SnapshotLease>(
+                        current.leases.size + if (found < 0L) 1L else 0L
+                    ) { index ->
+                        if (index == current.leases.size)
+                            SnapshotLease(reading)
+                        else if (index == found)
+                            SnapshotLease(reading, current.leases[index].references + 1L)
+                        else
+                            current.leases[index]
+                    }
+                    SnapshotUsage(
+                        leases,
+                        current.handles + 1L,
+                        current.bytes + additional,
+                        current.working
+                    )
+                }
+            return TerminalSnapshot(reading, this, images)
+        } catch (error: Throwable) {
+            images.close()
+            throw error
+        }
+    }
+
+    fun release(reading: TerminalReadingData) {
+        usage
+            .updateAndGet { current ->
+                val found = leaseIndex(current, reading)
+                if (found < 0L)
+                    throw IllegalStateException(Some("terminal snapshot lease was not retained"))
+                val removed = current.leases[found].references == 1L
+                val leases = Array<SnapshotLease>(current.leases.size - if (removed) 1L else 0L) {
+                    index
+                    ->
+                    if (removed)
+                        current.leases[index + if (index >= found) 1L else 0L]
+                    else if (index == found)
+                        SnapshotLease(reading, current.leases[index].references - 1L)
+                    else
+                        current.leases[index]
+                }
+                SnapshotUsage(
+                    leases, current.handles - 1L,
+                    current.bytes - if (removed) reading.retainedBytes else 0L, current.working
+                )
+            }
+    }
+
+    fun nextSearch(): Long = searchGeneration.fetchAdd(1L) + 1L
+    fun reserveWorking(amount: Long) {
+        usage
+            .updateAndGet { current ->
+                if (amount > limits.maxRetainedBytes - current.bytes - current.working)
+                    throw IllegalStateException(
+                        Some("terminal search working-memory limit exceeded")
+                    )
+                SnapshotUsage(
+                    current.leases,
+                    current.handles,
+                    current.bytes,
+                    current.working + amount
+                )
+            }
+    }
+    fun releaseWorking(amount: Long) {
+        usage
+            .updateAndGet { current ->
+                if (amount > current.working)
+                    throw IllegalStateException(
+                        Some("terminal search working memory was not reserved")
+                    )
+                SnapshotUsage(
+                    current.leases,
+                    current.handles,
+                    current.bytes,
+                    current.working - amount
+                )
+            }
+    }
+}
+
+private fun leaseIndex(usage: SnapshotUsage, reading: TerminalReadingData): Long {
+    for (index in 0L..<usage.leases.size)
+        if (usage.leases[index].reading === reading) return index
+    return -1L
+}

@@ -6,95 +6,261 @@ internal class ScreenRow(
     style: TerminalStyle,
     private val changes: ScreenChanges
 ) {
-    private var cells = MutableArray<TerminalCell>(columns) { TerminalCell(style = style) }
+    private var cells = CellBuffer(columns, style)
     private var wrapped = false
+    private var version = 0L
+    private var published: TerminalLine? = None
+    private var publishedCells: CellReading? = None
+    private var retainedBytes = 0L
+    private var identity = LogicalLine(id)
+    private var offset = 0L
+    private var used = if (style == TerminalStyle()) 0L else columns
+    private var released = false
+    val tracked = ArrayList<TrackedEntry>()
+    val logical: LogicalLine get() = identity
+    val logicalOffset: Long get() = offset
+    val usedColumns: Long get() = used
+    val logicalLength: Long get() = logicalColumn(used)
+    val columns: Long get() = cells.size
     var softWrapped: Boolean
         get() = wrapped
         set(value) {
             if (wrapped != value) {
                 wrapped = value
-                changes.pending = true
+                invalidate(cellsChanged = false)
             }
         }
 
     operator fun get(column: Long): TerminalCell = cells[column]
 
-    fun snapshot(): TerminalLine = TerminalLine(
-        id,
-        Array<TerminalCell>(cells.size) { column -> cells[column] },
-        softWrapped
-    )
-
-    fun put(column: Long, text: String, width: Long, style: TerminalStyle) {
-        val cell = TerminalCell(text, width, style)
-        val continuation = TerminalCell(width = 0L, style = style)
-        if (cells[column] == cell && (width != 2L || cells[column + 1L] == continuation)) return
-        clearGlyph(column, style)
-        if (width == 2L) {
-            clearGlyph(column + 1L, style)
-            cells[column + 1L] = continuation
+    fun snapshot(): TerminalLine {
+        when (published) {
+            case Some(val line) -> if (line.textVersion == identity.version) return line
+            case None -> {}
         }
-        cells[column] = cell
+        val content = when (publishedCells) {
+            case Some(val content) -> content
+
+            case None -> {
+                val content = cells.snapshot()
+                retainedBytes = content.retainedBytes
+                publishedCells = Some(content)
+                content
+            }
+        }
+        val line = TerminalLine(
+            id,
+            content,
+            softWrapped,
+            version,
+            identity.id,
+            offset,
+            used,
+            identity.version,
+            retainedBytes
+        )
+        published = Some(line)
+        return line
+    }
+
+    private fun invalidate(textChanged: Boolean = true, cellsChanged: Boolean = true) {
+        published = None
+        if (cellsChanged) publishedCells = None
+        version += 1L
+        if (textChanged) {
+            identity.version += 1L
+            changes.textPending = true
+        }
         changes.pending = true
+    }
+
+    fun rebase(line: LogicalLine, start: Long) {
+        if (identity === line && offset == start) return
+        identity = line
+        offset = start
+        changes.tracking.rebased(this)
+        published = None
+        changes.pending = true
+    }
+
+    fun logicalColumn(column: Long): Long = logicalColumn(cells, column)
+
+    fun visualColumn(column: Long): Long = visualColumn(cells, column)
+
+    fun put(
+        column: Long,
+        text: String,
+        width: Long,
+        style: TerminalStyle,
+        intrinsicWidth: Long = 0L,
+        dottedCircle: Boolean = false,
+        linkId: Long = 0L,
+        anchorWidth: Long = 0L
+    ) {
+        putCell(
+            column,
+            TerminalCell(text, width, style, intrinsicWidth, dottedCircle, linkId, anchorWidth)
+        )
+    }
+
+    fun putCell(column: Long, cell: TerminalCell) {
+        val left = if (cells[column].width == 0L) column - 1L else column
+        var end = column + if (cells[column].width > cell.width) cells[column].width else cell.width
+        if (end < cells.size && cells[end].width == 0L) end += 1L
+        changes.images?.erase(this, left, end)
+        val continuation = TerminalCell(width = 0L, style = cell.style, linkId = cell.linkId)
+        val extended = column + cell.width > used
+        if (extended) used = column + cell.width
+        if (cells[column] == cell && (cell.width != 2L || cells[column + 1L] == continuation)) {
+            if (extended) invalidate()
+            return
+        }
+        val previous = cells[column]
+        val textChanged = extended ||
+            previous.text !=
+            cell.text ||
+            previous.width !=
+            cell.width ||
+            previous.logicalWidth !=
+            cell.logicalWidth ||
+            previous.logicalAdvance !=
+            cell.logicalAdvance
+        // Hold the incoming ID while clearing an overlapping previous glyph.
+        if (textChanged) {
+            val left = if (previous.width == 0L) column - 1L else column
+            var end = column + if (previous.width > cell.width) previous.width else cell.width
+            if (end < cells.size && cells[end].width == 0L) end += 1L
+            changes.tracking.replace(this, left, end, false)
+        }
+        changes.links.retain(cell.linkId)
+        clearGlyph(column, cell.style)
+        if (cell.width == 2L) {
+            clearGlyph(column + 1L, cell.style)
+            replaceCell(column + 1L, continuation)
+        }
+        replaceCell(column, cell)
+        changes.links.release(cell.linkId)
+        trim()
+        invalidate(textChanged)
+    }
+
+    /** Appends to a fresh reflow row; source edits and tracking migrate once after construction. */
+    fun restoreCell(column: Long, cell: TerminalCell) {
+        replaceCell(column, cell)
+        if (cell.width == 2L)
+            replaceCell(
+                column + 1L,
+                TerminalCell(width = 0L, style = cell.style, linkId = cell.linkId)
+            )
+        if (column + cell.width > used) used = column + cell.width
+        trim()
+        invalidate(textChanged = false)
+    }
+
+    private fun trim() {
+        val previous = used
+        val blank = TerminalCell()
+        while (used > 0L && cells[used - 1L] == blank)
+            used -= 1L
+        if (previous != used) invalidate(cellsChanged = false)
     }
 
     fun erase(start: Long, end: Long, style: TerminalStyle) {
         if (start >= end) return
         val left = if (cells[start].width == 0L) start - 1L else start
         val right = if (end < cells.size && cells[end].width == 0L) end + 1L else end
+        changes.images?.erase(this, left, right)
+        changes.tracking.replace(this, left, right, true)
         val blank = TerminalCell(style = style)
+        if (style != TerminalStyle() && right > used) used = right
         for (index in left..<right) {
             if (cells[index] != blank) {
-                cells[index] = blank
-                changes.pending = true
+                val previous = cells[index]
+                replaceCell(index, blank)
+                invalidate(previous.text != blank.text || previous.width != blank.width)
             }
         }
+        trim()
         if (right == cells.size) softWrapped = false
     }
 
-    fun shift(start: Long, amount: Long, insert: Boolean, style: TerminalStyle) {
-        val count = clamp(amount, 0L, cells.size - start)
+    fun shift(
+        start: Long,
+        amount: Long,
+        insert: Boolean,
+        style: TerminalStyle,
+        end: Long
+    ) {
+        val count = clamp(amount, 0L, end - start)
         if (count == 0L) return
+        changes.images?.erase(this, start, end)
+        changes.tracking.shift(this, start, end, count, insert)
         val blank = TerminalCell(style = style)
         if (insert) {
-            var index = cells.size - 1L
+            var index = end - 1L
             while (index >= start + count) {
-                cells[index] = cells[index - count]
+                replaceCell(index, cells[index - count])
                 index -= 1L
             }
             for (column in start..<start + count)
-                cells[column] = blank
+                replaceCell(column, blank)
         } else {
-            for (column in start..<cells.size - count)
-                cells[column] = cells[column + count]
-            for (column in cells.size - count..<cells.size)
-                cells[column] = blank
+            for (column in start..<end - count)
+                replaceCell(column, cells[column + count])
+            for (column in end - count..<end)
+                replaceCell(column, blank)
         }
         repair(style)
+        used = cells.size
+        trim()
         softWrapped = false
-        changes.pending = true
+        invalidate()
+    }
+
+    fun replaceRange(source: TerminalLine?, start: Long, end: Long, style: TerminalStyle) {
+        erase(start, end, style)
+        when (source) {
+            case Some(val line) -> {
+                var column = start
+                while (column < end) {
+                    val cell = line.cells[column]
+                    if (cell.width > 0L && column + cell.width <= end) putCell(column, cell)
+                    column += if (cell.width > 0L) cell.width else 1L
+                }
+            }
+
+            case None -> {}
+        }
+        softWrapped = false
     }
 
     fun resize(columns: Long, style: TerminalStyle) {
         if (columns == cells.size) return
+        if (columns < cells.size) changes.tracking.crop(this, columns)
         val previous = cells
-        val blank = TerminalCell(style = style)
-        cells = MutableArray<TerminalCell>(columns) { index ->
-            if (index < previous.size) previous[index] else blank
+        if (columns < previous.size) {
+            for (index in columns..<previous.storedColumns)
+                changes.links.release(previous[index].linkId)
         }
+        val resized = CellBuffer(columns, style)
+        for (index in 0L..<clamp(previous.size, 0L, columns))
+            resized[index] = previous[index]
+        cells = resized
         repair(style)
+        used = cells.size
+        trim()
         softWrapped = false
-        changes.pending = true
+        invalidate()
     }
 
     private fun clearGlyph(column: Long, style: TerminalStyle) {
         val blank = TerminalCell(style = style)
         when (cells[column].width) {
-            case 0L -> cells[column - 1L] = blank
-            case 2L -> cells[column + 1L] = blank
+            case 0L -> replaceCell(column - 1L, blank)
+            case 2L -> replaceCell(column + 1L, blank)
             case _ -> {}
         }
-        cells[column] = blank
+        replaceCell(column, blank)
     }
 
     private fun repair(style: TerminalStyle) {
@@ -105,14 +271,37 @@ internal class ScreenRow(
                 case 2L -> {
                     if (index + 1L < cells.size && cells[index + 1L].width == 0L)
                         index += 1L
-                    else
-                        cells[index] = blank
+                    else {
+                        changes.tracking.replace(this, index, index + 1L, true)
+                        replaceCell(index, blank)
+                    }
                 }
 
-                case 0L -> cells[index] = blank
+                case 0L -> {
+                    changes.tracking.replace(this, index, index + 1L, true)
+                    replaceCell(index, blank)
+                }
+
                 case _ -> {}
             }
             index += 1L
         }
+    }
+
+    private fun replaceCell(index: Long, value: TerminalCell) {
+        val previous = cells[index].linkId
+        if (previous != value.linkId) {
+            changes.links.retain(value.linkId)
+            changes.links.release(previous)
+        }
+        cells[index] = value
+    }
+
+    fun release(reason: TerminalInvalidation = TerminalInvalidation.Deleted) {
+        if (released) return
+        released = true
+        changes.tracking.release(this, reason)
+        for (index in 0L..<cells.storedColumns)
+            changes.links.release(cells[index].linkId)
     }
 }

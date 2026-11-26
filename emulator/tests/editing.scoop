@@ -1,0 +1,178 @@
+package scoop.terminal.emulator
+
+import scoop.test.*
+
+@Test
+private class EditingTest {
+    @Test
+    fun originAddressingAndWrapRespectBothMarginAxes() {
+        val terminal = Terminal(8L, 5L)
+        terminal.feed("\u001b[?69h\u001b[3;6s\u001b[2;4r\u001b[?6habcdef".toByteArray())
+        assertEquals("  abcd  ", editedRow(terminal, 1L))
+        assertEquals("  ef    ", editedRow(terminal, 2L))
+        assertEquals(TerminalCursor(2L, 4L, true), terminal.cursor)
+        val reply = terminal.feed("\u001b[6n".toByteArray())
+        when (reply.effects[0L]) {
+            case Reply(val bytes) -> assertEquals("\u001b[2;3R", String.fromUtf8(bytes))
+            case _ -> assertTrue(false)
+        }
+        terminal.feed("\u001b[3d\u001b[2GZ".toByteArray())
+        assertEquals("   Z    ", editedRow(terminal, 3L))
+        terminal.feed("\u001b[999;999H\u001b[999CZ\rX".toByteArray())
+        assertEquals("  XZ Z  ", editedRow(terminal, 3L))
+        terminal.feed("\u001b[?69l\u001b[H!".toByteArray())
+        assertEquals("! abcd  ", editedRow(terminal, 1L))
+    }
+
+    @Test
+    fun rectangularScrollPreservesSideColumnsAndDoesNotCreateHistory() {
+        val terminal = Terminal(8L, 4L)
+        terminal
+            .feed(
+                "AAAAAAAA\r\nBBBBBBBB\r\nCCCCCCCC\r\nDDDDDDDD\u001b[?69h\u001b[3;6s\u001b[2;3r\u001b[S"
+                    .toByteArray()
+            )
+        assertEquals("AAAAAAAA", editedRow(terminal, 0L))
+        assertEquals("BBCCCCBB", editedRow(terminal, 1L))
+        assertEquals("CC    CC", editedRow(terminal, 2L))
+        assertEquals("DDDDDDDD", editedRow(terminal, 3L))
+        assertEquals(0L, terminal.historySize)
+        terminal.feed("\u001b[T".toByteArray())
+        assertEquals("BB    BB", editedRow(terminal, 1L))
+        assertEquals("CCCCCCCC", editedRow(terminal, 2L))
+        terminal.feed("\u001b[3;2H\n".toByteArray())
+        assertEquals(3L, terminal.cursor.row)
+        assertEquals("CCCCCCCC", editedRow(terminal, 2L))
+    }
+
+    @Test
+    fun restrictedVerticalScrollAndLineEditsDoNotLeakIntoHistory() {
+        val terminal = Terminal(4L, 3L)
+        terminal.feed("aaaa\r\nbbbb\r\ncccc".toByteArray())
+        assertEquals(0L, terminal.historySize)
+        terminal.feed("\u001b[1;2r".toByteArray())
+        assertEquals(TerminalCursor(0L, 0L, true), terminal.cursor)
+        terminal.feed("\u001b[S".toByteArray())
+        assertEquals(0L, terminal.historySize)
+        assertEquals("bbbb", editedRow(terminal, 0L))
+        assertEquals("cccc", editedRow(terminal, 2L))
+        terminal.feed("\u001b[3;1H\u001b[L\u001b[M".toByteArray())
+        assertEquals("cccc", editedRow(terminal, 2L))
+        terminal.feed("\u001b[r\u001b[S".toByteArray())
+        assertEquals(1L, terminal.historySize)
+        assertEquals("bbbb", editedRow(terminal, 0L))
+    }
+
+    @Test
+    fun characterInsertionAndDeletionStopAtTheRightMargin() {
+        val terminal = Terminal(8L, 2L)
+        terminal.feed("abcdefgh\u001b[?69h\u001b[3;6s\u001b[1;4H\u001b[2@".toByteArray())
+        assertEquals("abc  dgh", editedRow(terminal, 0L))
+        terminal.feed("\u001b[2P".toByteArray())
+        assertEquals("abcd  gh", editedRow(terminal, 0L))
+        terminal.feed("\u001b[1;8H\u001b[P\u001b[@\u001b[M".toByteArray())
+        assertEquals("abcd  gh", editedRow(terminal, 0L))
+    }
+
+    @Test
+    fun savedCursorRestoresAutowrapAndPendingWrapAlongsideRendition() {
+        val terminal = Terminal(3L, 2L)
+        terminal.feed("\u001b[31mabc\u001b7\u001b[?7l\u001b[32mX\u001b8Y".toByteArray())
+        assertEquals("abX", editedRow(terminal, 0L))
+        assertEquals("Y  ", editedRow(terminal, 1L))
+        assertEquals(
+            TerminalColor.Indexed(1),
+            terminal.lines(1L, 1L)[0L].cells[0L].style.foreground
+        )
+        assertEquals(TerminalCursor(1L, 1L, true), terminal.cursor)
+    }
+
+    @Test
+    fun softResetPreservesCellsPositionAndTabsButResetsProtocolState() {
+        val terminal = Terminal(12L, 4L)
+        terminal
+            .feed(
+                "keep\u001b[3g\u001b[1;3H\u001bH\u001b[?69h\u001b[2;7s\u001b[2;3r\u001b[?1;6;2004h\u001b[?7;25l\u001b[4h\u001b[31m\u001b[2;3H\u001b[!p"
+                    .toByteArray()
+            )
+        assertEquals("keep        ", editedRow(terminal, 0L))
+        assertEquals(TerminalCursor(2L, 3L, true), terminal.cursor)
+        terminal.feed("Z".toByteArray())
+        assertEquals(TerminalStyle(), terminal.lines(2L, 1L)[0L].cells[3L].style)
+        assertEquals(
+            "\u001b[A",
+            String
+                .fromUtf8(
+                    terminal.encodeInput(TerminalInput.Key(TerminalKey.Up, TerminalModifiers()))
+                )
+        )
+        assertEquals("x", String.fromUtf8(terminal.encodeInput(TerminalInput.Paste("x"))))
+        terminal.feed("\u001b[H\t".toByteArray())
+        assertEquals(2L, terminal.cursor.column)
+        terminal.feed("\u001b8".toByteArray())
+        assertEquals(TerminalCursor(0L, 0L, true), terminal.cursor)
+        terminal.feed("\u001bc\t".toByteArray())
+        assertEquals(8L, terminal.cursor.column)
+        assertEquals("            ", editedRow(terminal, 0L))
+    }
+
+    @Test
+    fun heightResizePreservesPendingWrapWithFullWidthMargins() {
+        val terminal = Terminal(3L, 2L)
+        terminal.feed("abc".toByteArray())
+        terminal.resize(3L, 3L)
+        terminal.feed("d".toByteArray())
+        assertEquals("abc", editedRow(terminal, 0L))
+        assertEquals("d  ", editedRow(terminal, 1L))
+    }
+
+    @Test
+    fun editingRepairsWideGlyphsAtEveryBoundary() {
+        val operations: Array<String> = [
+            "\u001b[@",
+            "\u001b[P",
+            "\u001b[X",
+            "\u001b[2@",
+            "\u001b[2P",
+            "\u001b[2X"
+        ]
+        for (operation in operations) {
+            for (column in 1L..8L) {
+                val terminal = Terminal(8L, 3L)
+                terminal
+                    .feed(
+                        ("中a界b文\u001b[?69h\u001b[2;7s" + f"\u001b[1;${column}H" + operation)
+                            .toByteArray()
+                    )
+                assertWidePairs(terminal)
+            }
+        }
+        val clipped = Terminal(8L, 3L)
+        clipped.feed("中a界b文\r\n一b二c三\u001b[?69h\u001b[2;7s\u001b[S\u001b[T".toByteArray())
+        assertWidePairs(clipped)
+    }
+}
+
+private fun editedRow(terminal: Terminal, index: Long): String {
+    val text = StringBuilder()
+    for (cell in terminal.lines(index, 1L)[0L].cells) {
+        if (cell.width > 0L) text.append(if (cell.text == "") " " else cell.text)
+    }
+    return text.toString()
+}
+
+private fun assertWidePairs(terminal: Terminal) {
+    for (line in terminal.lines(0L, terminal.rows)) {
+        for (index in 0L..<line.cells.size) {
+            val cell = line.cells[index]
+            if (cell.width == 0L) {
+                assertTrue(index > 0L)
+                assertEquals(2L, line.cells[index - 1L].width)
+            } else if (cell.width == 2L) {
+                assertTrue(index + 1L < line.cells.size)
+                assertEquals(0L, line.cells[index + 1L].width)
+                assertEquals(cell.style, line.cells[index + 1L].style)
+            }
+        }
+    }
+}
