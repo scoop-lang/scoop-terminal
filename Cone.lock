@@ -419,6 +419,7 @@ coordinate = "scoop:scoop.ui.terminal:0.1.0"
 kind = "library"
 dependencies = [
     "scoop:scoop.asyncio:0.1.0",
+    "scoop:scoop.charset:0.1.0",
     "scoop:scoop.concurrent:0.1.0",
     "scoop:scoop.core:0.1.0",
     "scoop:scoop.graphics.text:0.1.0",
