@@ -52,11 +52,13 @@ private class TerminalViewElement(
     private var clipboardAdapter: WindowTerminalClipboardAdapter? = None
     private var accepted: GridGeometry? = None
     private var glyphCache: TerminalGlyphCache? = None
+    private var imageCache: TerminalImageCache? = None
     private var fontSubscription: Closeable? = None
     private var observedScreen = session.reading.screenRevision
     private var observedCursor = session.reading.cursor
     private var observedColors = session.reading.colors
     private var observedCommands = session.reading.commandVersion
+    private var observedImages = session.reading.images.version
     private var themeAppearance = props.value.appearance
     private val screenPaint = PaintKey()
     private var paintRevision = 0L
@@ -110,6 +112,7 @@ private class TerminalViewElement(
         observedCursor = session.reading.cursor
         observedColors = session.reading.colors
         observedCommands = session.reading.commandVersion
+        observedImages = session.reading.images.version
         clipboardAdapter?.close()
         val clipboard = WindowTerminalClipboardAdapter(scope.nativeWindow)
         clipboardAdapter = Some(clipboard)
@@ -157,6 +160,7 @@ private class TerminalViewElement(
             controller.unbind()
             if (ownsController) controller.close()
             accepted = None
+            imageCache?.clear()
             selecting = false
             reported = TerminalMouseButton.NonePressed
             composition.restart()
@@ -188,6 +192,8 @@ private class TerminalViewElement(
         fontSubscription = None
         glyphCache?.release()
         glyphCache = None
+        imageCache?.close()
+        imageCache = None
     }
 
     private fun modelChanged() {
@@ -198,13 +204,15 @@ private class TerminalViewElement(
         observedColors = terminal.colors
         val commandsChanged = observedCommands != terminal.commandVersion
         observedCommands = terminal.commandVersion
+        val imagesChanged = observedImages != terminal.images.version
+        observedImages = terminal.images.version
         val cursor = terminal.cursor
         val moved = cursor != observedCursor
         if (moved) resetCursorBlink()
         observedCursor = cursor
         val screen = terminal.screenRevision
         if (screen == observedScreen) {
-            if (colorsChanged || commandsChanged)
+            if (colorsChanged || commandsChanged || imagesChanged)
                 refresh()
             else if (moved && outputRefreshLimit == None && viewport.atBottom) scope.requestFrame()
             return
@@ -293,6 +301,18 @@ private class TerminalViewElement(
     > {
         val appearance = props.value.appearance
         val glyphs = glyphs(scope.defaultFonts, appearance)
+        val images = when (imageCache) {
+            case Some(val cache) -> {
+                cache.configure(props.value.options.imageCacheLimits);
+                cache
+            }
+
+            case None -> {
+                val cache = TerminalImageCache(props.value.options.imageCacheLimits)
+                imageCache = Some(cache)
+                cache
+            }
+        }
         val terminal = session.reading
         val metrics = glyphs.metrics
         val size = constraints
@@ -314,7 +334,7 @@ private class TerminalViewElement(
         controller.layoutStarted(paintRevision)
         val frame = TerminalFrame(
             geometry, paintRevision, terminal.cursor, composition.revision, appearance, glyphs,
-            props.value.options.commandSeparators
+            props.value.options.commandSeparators, Some(images), props.value.options.onImageError
         )
         try {
             frame.shape(viewport.ranges(), composition.text)

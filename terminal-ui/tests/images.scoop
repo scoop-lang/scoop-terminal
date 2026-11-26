@@ -1,0 +1,507 @@
+package scoop.ui.terminal
+
+import scoop.graphics.*
+import scoop.graphics.text.FontCollection
+import scoop.platform.concurrent.Thread
+import scoop.terminal.emulator.*
+import scoop.test.*
+
+@Test
+private class TerminalImageCacheTest {
+    @Test fun evictionAndCacheClosureKeepLeasedNativePixelsAliveOnTheirOwner() {
+        val terminal = imageTestTerminal()
+        terminal.feed(imageTestSixel(128L, 6L))
+        val image = imageTestResource(terminal.reading)
+        val cache = TerminalImageCache(TerminalImageCacheLimits(maxEntries = 1L))
+        val first = cache.acquire(image, 0L, 0L)!!
+        val second = cache.acquire(image, 1L, 0L)!!
+        val original = first.image
+        val other = second.image
+        try {
+            assertEquals(1L, cache.cachedCount)
+            assertEquals(2L, cache.uploadCount)
+            assertFalse(original.isClosed)
+            cache.close()
+            terminal.close()
+            second.close()
+            assertTrue(other.isClosed)
+            assertFalse(original.isClosed)
+            RasterSurface(64, 6)
+                .use { surface ->
+                    surface
+                        .draw { canvas ->
+                            canvas
+                                .drawImage(
+                                    first.image,
+                                    Rect(0.0, 0.0, 64.0, 6.0),
+                                    ImageSampling.Nearest
+                                )
+                        }
+                    assertImageTestPixel(surface.readPixels(), 64L, 10L, 2L, 255, 0, 0)
+                }
+        } finally {
+            first.close();
+            second.close();
+            cache.close();
+            terminal.close()
+        }
+        assertEquals(0L, cache.retainedBytes)
+        assertTrue(original.isClosed)
+    }
+
+    @Test fun pinnedFramesCountAgainstBudgetAndShrinkingDoesNotInvalidateThem() {
+        val terminal = imageTestTerminal()
+        terminal.feed(imageTestSixel(128L, 6L))
+        val image = imageTestResource(terminal.reading)
+        val cache = TerminalImageCache(TerminalImageCacheLimits(maxBytes = 4352L))
+        val first = cache.acquire(image, 0L, 0L)!!
+        try {
+            assertEquals(4352L, cache.retainedBytes)
+            assertFailsWith<TerminalImageException> { cache.acquire(image, 1L, 0L) }
+            assertEquals(0L, cache.cachedCount)
+            assertEquals(4352L, cache.retainedBytes)
+            assertFalse(first.image.isClosed)
+            first.close()
+            assertEquals(0L, cache.retainedBytes)
+            cache
+                .acquire(image, 1L, 0L)!!
+                .use { second ->
+                    cache.configure(TerminalImageCacheLimits(maxBytes = 0L))
+                    assertFalse(second.image.isClosed)
+                    assertFailsWith<TerminalImageException> { cache.acquire(image, 0L, 0L) }
+                    assertEquals(4352L, cache.retainedBytes)
+                }
+            assertEquals(0L, cache.retainedBytes)
+        } finally {
+            first.close();
+            cache.close();
+            terminal.close()
+        }
+    }
+
+    @Test fun unchangedIndexTilesReuseUploadsWhilePaletteAndNamespacesInvalidateThem() {
+        val terminal = imageTestTerminal()
+        terminal.feed("\u001b[?1070l".toByteArray())
+        terminal.feed(imageTestSixel(128L, 6L))
+        val cache = TerminalImageCache()
+        val original = cache.acquire(imageTestResource(terminal.reading), 1L, 0L)!!
+        val other = imageTestTerminal()
+        try {
+            terminal.feed(" ".toByteArray())
+            cache
+                .acquire(imageTestResource(terminal.reading), 1L, 0L)!!
+                .use { reused -> assertTrue(reused.image === original.image) }
+            assertEquals(1L, cache.uploadCount)
+            terminal.feed("\u001bP7;1q#1;2;0;100;0\u001b\\".toByteArray())
+            cache
+                .acquire(imageTestResource(terminal.reading), 1L, 0L)!!
+                .use { green ->
+                    assertTrue(green.image !== original.image)
+                    RasterSurface(64, 6)
+                        .use { surface ->
+                            surface
+                                .draw { canvas ->
+                                    canvas.drawImage(green.image, Rect(0.0, 0.0, 64.0, 6.0))
+                                }
+                            assertImageTestPixel(surface.readPixels(), 64L, 10L, 2L, 0, 255, 0)
+                        }
+                }
+            assertEquals(2L, cache.uploadCount)
+            other.feed(imageTestSixel(128L, 6L, "0;0;100"))
+            cache
+                .acquire(imageTestResource(other.reading), 1L, 0L)!!
+                .use { blue -> assertTrue(blue.image !== original.image) }
+            assertEquals(3L, cache.uploadCount)
+        } finally {
+            original.close();
+            cache.close();
+            terminal.close();
+            other.close()
+        }
+        assertEquals(0L, cache.retainedBytes)
+    }
+
+    @Test fun anotherThreadCannotAccessOrCloseNativeCacheOrFrameLeases() {
+        val terminal = imageTestTerminal()
+        terminal.feed(imageTestSixel(1L, 1L))
+        val image = imageTestResource(terminal.reading)
+        val cache = TerminalImageCache()
+        val lease = cache.acquire(image, 0L, 0L)!!
+        try {
+            val worker = Thread
+                .start {
+                    assertFailsWith<IllegalStateException> { cache.acquire(image, 0L, 0L) }
+                    assertFailsWith<IllegalStateException> { cache.close() }
+                    assertFailsWith<IllegalStateException> { lease.image }
+                    assertFailsWith<IllegalStateException> { lease.close() }
+                }
+            try {
+                worker.join()
+            } finally {
+                worker.dispose()
+            }
+            assertFalse(lease.image.isClosed)
+        } finally {
+            lease.close();
+            cache.close();
+            terminal.close()
+        }
+        assertEquals(0L, cache.retainedBytes)
+    }
+}
+
+@Test
+private class TerminalImagePaintTest {
+    @Test fun historyBrowsingOffsetsImageAnchorsByTheAcceptedFirstRow() {
+        val terminal = imageTestTerminal()
+        terminal.feed("\u001b[4;1H".toByteArray())
+        terminal.feed(imageTestSixel(8L, 6L))
+        terminal.feed("\r\n\r\n\r\n".toByteArray())
+        assertEquals(3L, terminal.reading.historySize)
+        val images = TerminalImageCache()
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    for (first in [0L, 1L, 3L]) {
+                        imageTestFrame(terminal.reading, images, glyphs, first = first)
+                            .use { frame ->
+                                frame.shape([], "")
+                                RasterSurface(128, 64)
+                                    .use { surface ->
+                                        surface.draw { canvas -> frame.drawScreen(canvas) }
+                                        val pixels = surface.readPixels()
+                                        assertImageTestPixel(
+                                            pixels,
+                                            128L,
+                                            3L,
+                                            (3L - first) * 16L + 2L,
+                                            255,
+                                            0,
+                                            0
+                                        )
+                                        assertImageTestPixel(
+                                            pixels,
+                                            128L,
+                                            3L,
+                                            (3L - first) * 16L + 7L,
+                                            0,
+                                            0,
+                                            0
+                                        )
+                                    }
+                            }
+                    }
+                    assertEquals(1L, images.uploadCount)
+                } finally {
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+        assertEquals(0L, images.retainedBytes)
+    }
+
+    @Test fun visibleTilesUseDevicePixelsClipAtTheViewportAndOutliveCpuImages() {
+        val terminal = imageTestTerminal()
+        terminal.resize(16L, 4L, pixels = Some(TerminalPixelSize(256L, 128L, 16L, 32L)))
+        terminal.feed("\u001b[2;2H".toByteArray())
+        terminal.feed(imageTestSixel(128L, 6L))
+        val images = TerminalImageCache()
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                val frame = imageTestFrame(
+                    terminal.reading,
+                    images,
+                    glyphs,
+                    size = Size(40.0, 40.0),
+                    scale = 2.0
+                )
+                try {
+                    frame.shape([], "")
+                    assertEquals(1L, images.uploadCount)
+                    terminal.close()
+                    images.close()
+                    RasterSurface(40, 40)
+                        .use { surface ->
+                            surface.draw { canvas -> frame.drawScreen(canvas) }
+                            val pixels = surface.readPixels()
+                            assertImageTestPixel(pixels, 40L, 7L, 16L, 0, 0, 0)
+                            assertImageTestPixel(pixels, 40L, 8L, 16L, 255, 0, 0)
+                            assertImageTestPixel(pixels, 40L, 39L, 18L, 255, 0, 0)
+                            assertImageTestPixel(pixels, 40L, 8L, 19L, 0, 0, 0)
+                        }
+                } finally {
+                    frame.close();
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+        assertEquals(0L, images.retainedBytes)
+    }
+
+    @Test fun sharedColorsAndFrozenNativeFramesKeepDifferentPixelsAfterStoreClosure() {
+        val terminal = imageTestTerminal()
+        terminal.feed("\u001b[?1070l".toByteArray())
+        terminal.feed(imageTestSixel(8L, 6L))
+        val images = TerminalImageCache()
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                val first = imageTestFrame(terminal.reading, images, glyphs)
+                try {
+                    first.shape([], "")
+                    terminal.feed("\u001bP7;1q#1;2;0;100;0\u001b\\".toByteArray())
+                    imageTestFrame(terminal.reading, images, glyphs)
+                        .use { second ->
+                            second.shape([], "")
+                            terminal.close()
+                            images.close()
+                            RasterSurface(128, 64)
+                                .use { surface ->
+                                    surface.draw { canvas -> first.drawScreen(canvas) }
+                                    assertImageTestPixel(
+                                        surface.readPixels(),
+                                        128L,
+                                        3L,
+                                        2L,
+                                        255,
+                                        0,
+                                        0
+                                    )
+                                    surface.draw { canvas -> second.drawScreen(canvas) }
+                                    assertImageTestPixel(
+                                        surface.readPixels(),
+                                        128L,
+                                        3L,
+                                        2L,
+                                        0,
+                                        255,
+                                        0
+                                    )
+                                }
+                        }
+                } finally {
+                    first.close();
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+        assertEquals(0L, images.retainedBytes)
+    }
+
+    @Test fun selectionSearchCursorAndCommandSeparatorsRemainAboveImagePixels() {
+        val terminal = imageTestTerminal()
+        terminal
+            .feed(
+                (
+                    "\u001b]133;A\u0007x\u001b]133;D;0\u0007\r\n" +
+                        "\u001b]133;A\u0007\u001b[4mabc\u001b[0m\u001b[?80h"
+                )
+                    .toByteArray()
+            )
+        terminal.feed(imageTestSixel(32L, 32L))
+        val viewport = testViewport(terminal)
+        val reading = terminal.reading
+        viewport.select(CellLocation(reading.lines(0L, 1L)[0L].id, 0L))
+        viewport.extend(CellLocation(reading.lines(0L, 1L)[0L].id, 1L))
+        val appearance = TerminalAppearance(
+            background = Color.Black, foreground = Color.White,
+            selection = Color(0.0, 0.0, 1.0), activeSearchHighlight = Color(0.0, 1.0, 0.0)
+        )
+        val images = TerminalImageCache()
+        try {
+            FontCollection()
+                .use { fonts ->
+                    val glyphs = TerminalGlyphCache(fonts, appearance)
+                    imageTestFrame(
+                        reading,
+                        images,
+                        glyphs,
+                        appearance = appearance,
+                        separators = true
+                    )
+                        .use { frame ->
+                            try {
+                                frame.shape(viewport.ranges(), "")
+                                RasterSurface(128, 64)
+                                    .use { surface ->
+                                        surface
+                                            .draw { canvas ->
+                                                frame.drawScreen(canvas)
+                                                frame
+                                                    .drawSearchHighlights(
+                                                        canvas,
+                                                        [
+                                                            TerminalHighlight(
+                                                                Rect(8.0, 0.0, 8.0, 16.0),
+                                                                true
+                                                            )
+                                                        ]
+                                                    )
+                                                frame
+                                                    .drawCursor(
+                                                        canvas, Rect(16.0, 0.0, 8.0, 16.0),
+                                                        reading
+                                                            .cursor.{
+                                                                shape: TerminalCursorShape.Bar,
+                                                                visible: true,
+                                                                blink: false
+                                                            }, true, true
+                                                    )
+                                            }
+                                        val pixels = surface.readPixels()
+                                        assertImageTestPixel(pixels, 128L, 3L, 2L, 0, 0, 255)
+                                        assertImageTestPixel(pixels, 128L, 10L, 2L, 0, 255, 0)
+                                        assertImageTestPixel(pixels, 128L, 16L, 2L, 255, 255, 255)
+                                        assertImageTestPixel(pixels, 128L, 27L, 20L, 255, 0, 0)
+                                        val separatorBlue = pixels[(16L * 128L + 27L) * 4L + 2L]
+                                            .toInt() and
+                                            255
+                                        assertTrue(separatorBlue > 0 && separatorBlue < 100)
+                                    }
+                            } finally {
+                                glyphs.release()
+                            }
+                        }
+                }
+        } finally {
+            viewport.close();
+            images.close();
+            terminal.close()
+        }
+        assertEquals(0L, images.retainedBytes)
+    }
+
+    @Test fun tileWorkLimitsRejectAnEntirePlacementAndReportOnlyOncePerFrame() {
+        val terminal = imageTestTerminal()
+        terminal.feed(imageTestSixel(128L, 6L))
+        val errors = ArrayList<Throwable>()
+        val images = TerminalImageCache(TerminalImageCacheLimits(maxFrameTiles = 1L))
+        FontCollection()
+            .use { fonts ->
+                val glyphs = TerminalGlyphCache(fonts, TerminalAppearance())
+                try {
+                    imageTestFrame(
+                        terminal.reading,
+                        images,
+                        glyphs,
+                        onError = { error ->
+                            errors.add(error);
+                            Unit
+                        }
+                    )
+                        .use { frame ->
+                            frame.shape([], "")
+                            assertEquals(1L, errors.size)
+                            RasterSurface(128, 64)
+                                .use { surface ->
+                                    surface.draw { canvas -> frame.drawScreen(canvas) }
+                                    assertImageTestPixel(
+                                        surface.readPixels(),
+                                        128L,
+                                        3L,
+                                        2L,
+                                        0,
+                                        0,
+                                        0
+                                    )
+                                    assertImageTestPixel(
+                                        surface.readPixels(),
+                                        128L,
+                                        67L,
+                                        2L,
+                                        0,
+                                        0,
+                                        0
+                                    )
+                                }
+                        }
+                } finally {
+                    glyphs.release();
+                    images.close();
+                    terminal.close()
+                }
+            }
+        assertEquals(0L, images.retainedBytes)
+    }
+}
+
+private fun imageTestTerminal(): Terminal {
+    val terminal = Terminal(
+        16L, 4L, colors = TerminalColors(
+            foreground = TerminalRgb(65535, 65535, 65535),
+            background = TerminalRgb(0, 0, 0), cursor = TerminalRgb(65535, 65535, 65535)
+        ),
+        graphics = TerminalGraphicsSupport(sixel = true)
+    )
+    terminal.resize(16L, 4L, pixels = Some(TerminalPixelSize(128L, 64L, 8L, 16L)))
+    return terminal
+}
+
+private fun imageTestResource(reading: TerminalReading): TerminalImage = reading
+    .images
+    .image(reading.images.placements(0L, 1L)[0L].imageKey)!!
+
+private fun imageTestSixel(width: Long, height: Long, color: String = "100;0;0"): Array<Byte> {
+    val text = StringBuilder()
+    text.append(f"\u001bP7;1q#1;2;${color}")
+    var remaining = height
+    while (remaining > 0L) {
+        val band = clamp(remaining, 1L, 6L)
+        val bits = (1L shl band) - 1L
+        text.append(f"!${width}")
+        text.append((63L + bits).toInt().toChar())
+        remaining -= band
+        if (remaining > 0L) text.append('-')
+    }
+    text.append("\u001b\\")
+    return text.toString().toByteArray()
+}
+
+private fun imageTestFrame(
+    reading: TerminalReading,
+    images: TerminalImageCache,
+    glyphs: TerminalGlyphCache,
+    size: Size = Size(128.0, 64.0),
+    scale: Double = 1.0,
+    first: Long = 0L,
+    appearance: TerminalAppearance = TerminalAppearance(),
+    separators: Boolean = false,
+    onError: (Throwable) -> Unit = { error -> throw error }
+): TerminalFrame {
+    val geometry = GridGeometry(
+        size, CellMetrics(8.0, 16.0, 12.0), first,
+        reading.lines(first, reading.rows), reading.columns, reading.rows, reading.screenRevision,
+        reading.historySize == first, reading, scale
+    )
+    return TerminalFrame(
+        geometry,
+        1L,
+        reading.cursor,
+        0L,
+        appearance,
+        glyphs,
+        separators,
+        Some(images),
+        onError
+    )
+}
+
+private fun assertImageTestPixel(
+    pixels: Array<Byte>,
+    width: Long,
+    x: Long,
+    y: Long,
+    red: Int,
+    green: Int,
+    blue: Int
+) {
+    val start = (y * width + x) * 4L
+    for ((component, expected) in [(0L, red), (1L, green), (2L, blue)])
+        assertEquals(expected, pixels[start + component].toInt() and 255)
+    assertEquals(255, pixels[start + 3L].toInt() and 255)
+}

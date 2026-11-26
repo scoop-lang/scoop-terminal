@@ -7,7 +7,9 @@ public struct TerminalViewOptions(
     val onLinkActivated: (TerminalLink) -> Unit = {},
     val onLinkHovered: (TerminalLink?) -> Unit = {},
     val commandSeparators: Boolean = false,
-    val additionalWordCharacters: String = ""
+    val additionalWordCharacters: String = "",
+    val imageCacheLimits: TerminalImageCacheLimits = TerminalImageCacheLimits(),
+    val onImageError: (Throwable) -> Unit = {}
 )
 
 private struct LinkPress(

@@ -81,7 +81,9 @@ internal class TerminalFrame(
     val inputRevision: Long,
     private val appearance: TerminalAppearance,
     private val glyphs: TerminalGlyphCache,
-    private val commandSeparators: Boolean = false
+    private val commandSeparators: Boolean = false,
+    private val imageCache: TerminalImageCache? = None,
+    private val onImageError: (Throwable) -> Unit = {}
 ) : Closeable {
     private val colors = geometry.reading.colors
     private val foreground = colors.foreground.color()
@@ -92,6 +94,7 @@ internal class TerminalFrame(
     private val selection = ArrayList<Rect>()
     private val links = ArrayList<PaintLink>()
     private val separators = ArrayList<Double>()
+    private val images = TerminalImagePaint()
     private var preedit: TextLayout? = None
     private var blinkingText = false
     private var closed = false
@@ -102,6 +105,10 @@ internal class TerminalFrame(
     }
 
     fun shape(ranges: Array<SelectionRange>, composition: String) {
+        when (imageCache) {
+            case Some(val cache) -> images.prepare(geometry, cache, onImageError)
+            case None -> {}
+        }
         var index = 0L
         for (line in geometry.rows) {
             val row = index
@@ -206,11 +213,11 @@ internal class TerminalFrame(
         canvas.save()
         canvas.clipRect(clip)
         canvas.drawRect(clip, Paint(background))
+        images.draw(canvas, 0)
         for (cell in cells) {
             if (cell.background != background) canvas.drawRect(cell.bounds, Paint(cell.background))
         }
-        for (highlight in selection)
-            canvas.drawRect(highlight, Paint(appearance.selection))
+        images.draw(canvas, 1)
         for (run in runs) {
             if (!run.source.style.blink || blinkVisible)
                 run
@@ -222,6 +229,9 @@ internal class TerminalFrame(
         for (cell in cells) {
             if (!cell.blink || blinkVisible) drawDecoration(canvas, cell)
         }
+        images.draw(canvas, 2)
+        for (highlight in selection)
+            canvas.drawRect(highlight, Paint(appearance.selection))
         val separator = Paint(Color(foreground.red, foreground.green, foreground.blue, 0.2))
         for (y in separators)
             canvas.drawRect(Rect(0.0, y, geometry.size.width, 1.0), separator)
@@ -391,7 +401,11 @@ internal class TerminalFrame(
                 run.close()
             runs.clear()
         } finally {
-            glyphs.release()
+            try {
+                images.close()
+            } finally {
+                glyphs.release()
+            }
         }
     }
 }
